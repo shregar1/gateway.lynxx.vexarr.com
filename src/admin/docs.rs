@@ -70,7 +70,7 @@ pub async fn service_docs(
     }
 
     Ok(Json(ServiceDocs {
-        service_name: svc.name.to_string(),
+        service_name: svc.name,
         base_url,
         endpoints,
     }))
@@ -126,7 +126,10 @@ pub async fn proxy_try(
         }
     }
 
-    let resp_body = resp.text().await.unwrap_or_default();
+    let resp_body = resp
+        .text()
+        .await
+        .unwrap_or_default();
 
     let preview = if resp_body.len() > 4096 {
         format!("{}...(truncated)", &resp_body[..4096])
