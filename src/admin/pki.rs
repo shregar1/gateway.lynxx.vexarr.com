@@ -22,7 +22,10 @@ pub async fn list_certificates(
     State(state): State<AdminState>,
     Query(q): Query<CertQuery>,
 ) -> Result<Json<Vec<Certificate>>, GatewayError> {
-    let certs = state.repo.list_certificates(q.service_id.as_ref()).await?;
+    let certs = state
+        .repo
+        .list_certificates(q.service_id.as_ref())
+        .await?;
     Ok(Json(certs))
 }
 
