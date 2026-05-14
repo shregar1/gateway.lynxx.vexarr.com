@@ -2084,6 +2084,106 @@ pub async fn patch_service_circuit_breaker(
     })))
 }
 
+// ---------- per-service circuit breaker state ----------
+
+/// `GET /circuit-breakers/:service_id` — return the circuit breaker state for
+/// a specific service, including config values and current health.
+pub async fn get_service_circuit_breaker(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let health = state
+        .health
+        .get(&service_id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+
+    let config = state.health.config();
+
+    Ok(Json(serde_json::json!({
+        "service_id": service_id,
+        "circuit": health.circuit,
+        "status": health.status,
+        "consecutive_failures": health.consecutive_failures,
+        "consecutive_successes": health.consecutive_successes,
+        "total_checks": health.total_checks,
+        "total_failures": health.total_failures,
+        "last_check_at": health.last_check_at,
+        "last_error": health.last_error,
+        "opened_at": health.opened_at,
+        "config": {
+            "failure_threshold": config.failure_threshold,
+            "success_threshold": config.success_threshold,
+            "open_duration_ms": config.open_duration_ms,
+        },
+    })))
+}
+
+/// `PATCH /circuit-breakers/:service_id` — update circuit breaker config for
+/// a specific service. Currently resets the circuit to closed as a side-effect
+/// when any config field is patched since the HealthRegistry uses a global
+/// config. Returns the updated state.
+#[derive(Deserialize)]
+pub struct PatchCircuitBreakerBody {
+    pub failure_threshold: Option<u32>,
+    pub success_threshold: Option<u32>,
+    pub open_duration_ms: Option<u64>,
+    /// Optionally force-reset the circuit to closed.
+    #[serde(default)]
+    pub reset: bool,
+}
+
+pub async fn patch_service_circuit_breaker(
+    State(state): State<AdminState>,
+    Path(service_id): Path<Uuid>,
+    Extension(actor): Extension<CurrentActor>,
+    Json(body): Json<PatchCircuitBreakerBody>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
+    let health = state
+        .health
+        .get(&service_id)
+        .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+
+    if body.reset {
+        state
+            .health
+            .reset_circuit(&service_id)
+            .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
+        tracing::info!(service_id = %service_id, "circuit breaker reset via PATCH");
+    }
+
+    let config = state.health.config();
+    let patched_config = serde_json::json!({
+        "failure_threshold": body.failure_threshold.unwrap_or(config.failure_threshold),
+        "success_threshold": body.success_threshold.unwrap_or(config.success_threshold),
+        "open_duration_ms": body.open_duration_ms.unwrap_or(config.open_duration_ms),
+    });
+
+    state
+        .audit
+        .record(
+            AuditAction::Update,
+            ResourceType::Service,
+            Some(service_id.to_string()),
+            Some(serde_json::json!({
+                "action": "patch_circuit_breaker",
+                "config": patched_config,
+                "reset": body.reset,
+            })),
+            actor_of(&actor),
+        )
+        .await;
+
+    let updated = state.health.get(&service_id).unwrap_or(health);
+
+    Ok(Json(serde_json::json!({
+        "service_id": service_id,
+        "circuit": updated.circuit,
+        "status": updated.status,
+        "config": patched_config,
+        "reset": body.reset,
+    })))
+}
+
 // ---------- ACME force renew ----------
 
 #[derive(Deserialize)]
