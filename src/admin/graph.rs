@@ -44,7 +44,7 @@ pub async fn service_graph(
     nodes.push(GraphNode {
         id: svc_node_id.clone(),
         node_type: "service".into(),
-        name: svc.name.to_string(),
+        name: svc.name.clone(),
         status: "active".into(),
         metadata: serde_json::json!({
             "url": svc.url,
@@ -128,7 +128,7 @@ pub async fn service_graph(
         nodes.push(GraphNode {
             id: target_node_id.clone(),
             node_type: "target".into(),
-            name: target.url.to_string(),
+            name: target.url.clone(),
             status: health_status.into(),
             metadata: serde_json::json!({
                 "weight": target.weight,
