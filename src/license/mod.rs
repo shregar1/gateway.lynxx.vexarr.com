@@ -7,7 +7,8 @@
 //!
 //! ## Verify request
 //!
-//! `GET ${LYNXX_BASE_URL}/v1/license/verify?key=<api_key>`
+//! `GET ${LYNXX_BASE_URL}/v1/license/verify`
+//! Header: `Authorization: Bearer <api_key>`
 //! (default base: `https://api.lynxx.vexarr.com`)
 //!
 //! ## Verify response (200)
@@ -402,9 +403,8 @@ pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), No
         .map(|d| d.join(".lynxx").to_string_lossy().to_string());
 
     let url = format!(
-        "{}/v1/nodes/register?key={}",
+        "{}/v1/nodes/register",
         lynxx_base_url.trim_end_matches('/'),
-        api_key
     );
     let body = RegisterReq {
         instance_id,
@@ -423,6 +423,7 @@ pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), No
 
     let resp = client
         .post(&url)
+        .bearer_auth(api_key)
         .json(&body)
         .send()
         .await
@@ -472,9 +473,14 @@ pub fn spawn_node_heartbeat(api_key: String, lynxx_base_url: String) {
             .unwrap();
         loop {
             interval.tick().await;
-            let url = format!("{}?key={}", heartbeat_url, api_key);
             let body = serde_json::json!({ "instance_id": instance_id });
-            match client.post(&url).json(&body).send().await {
+            match client
+                .post(&heartbeat_url)
+                .bearer_auth(&api_key)
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     tracing::debug!("node heartbeat sent");
                 }
@@ -496,16 +502,20 @@ pub async fn deregister_node(api_key: &str, lynxx_base_url: &str) {
     }
     let instance_id = compute_instance_id(api_key);
     let url = format!(
-        "{}/v1/nodes/deregister?key={}",
+        "{}/v1/nodes/deregister",
         lynxx_base_url.trim_end_matches('/'),
-        api_key
     );
     let body = serde_json::json!({ "instance_id": instance_id });
     let client = reqwest::Client::builder()
         .timeout(StdDuration::from_secs(5))
         .build();
     if let Ok(client) = client {
-        let _ = client.post(&url).json(&body).send().await;
+        let _ = client
+            .post(&url)
+            .bearer_auth(api_key)
+            .json(&body)
+            .send()
+            .await;
         tracing::info!("node deregistered");
     }
 }
@@ -538,13 +548,18 @@ pub fn spawn_usage_reporter(
         loop {
             interval.tick().await;
             let snap = quota.snapshot();
-            let url = format!("{}?key={}", report_url, api_key);
             let body = serde_json::json!({
                 "instance_id": instance_id,
                 "period": snap.period,
                 "calls_total": snap.calls_total,
             });
-            match client.post(&url).json(&body).send().await {
+            match client
+                .post(&report_url)
+                .bearer_auth(&api_key)
+                .json(&body)
+                .send()
+                .await
+            {
                 Ok(resp) if resp.status().is_success() => {
                     if let Ok(json) = resp.json::<serde_json::Value>().await {
                         if json.get("flagged").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -592,7 +607,26 @@ fn try_dev_key(api_key: &str) -> Option<License> {
 }
 
 #[cfg(not(debug_assertions))]
-fn try_dev_key(_api_key: &str) -> Option<License> {
+fn try_dev_key(api_key: &str) -> Option<License> {
+    // Allow dev keys in release builds for local/CI benchmarking.
+    // Production deploys should always use a real API key.
+    if std::env::var("LYNXX_ALLOW_DEV_KEY").ok().as_deref() == Some("1") {
+        let tier_str = api_key.strip_prefix("lnx_dev_")?;
+        let tier = match tier_str.to_lowercase().as_str() {
+            "free" | "pro" | "business" | "enterprise" => PlanTier::from_str(tier_str),
+            _ => return None,
+        };
+        return Some(License {
+            customer_id: format!("dev_{}", tier.as_str()),
+            tier,
+            expires_at: None,
+            from_cache: false,
+            max_nodes: None,
+            active_nodes: 0,
+            allow_overage: false,
+            monthly_call_limit: None,
+        });
+    }
     None
 }
 
@@ -604,7 +638,7 @@ async fn verify_online(api_key: &str, url: &str) -> Result<VerifyResponse, Licen
 
     let resp = client
         .get(url)
-        .query(&[("key", api_key)])
+        .bearer_auth(api_key)
         .send()
         .await
         .map_err(|e| LicenseError::Offline(e.to_string()))?;
