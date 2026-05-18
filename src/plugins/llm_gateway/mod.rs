@@ -14,8 +14,8 @@
 //! 8. **Cost tracking** — Prometheus `lynxx_llm_*` counters per consumer.
 //! 9. **Hedging** — parallel dispatch to multiple providers for p99 latency reduction.
 //!
-//! Architecturally the plugin is a *short-circuiting* plugin (like
-//! `aws-lambda`): on a request to a recognised LLM path it makes the upstream
+//! Architecturally the plugin is a *short-circuiting* plugin: on a request
+//! to a recognised LLM path it makes the upstream
 //! call itself and returns `PluginError::ShortCircuit` with the rendered
 //! response. This keeps the proxy hot path untouched and lets the plugin own
 //! end-to-end behaviour — fallback retries, cache writes, streaming consumption,

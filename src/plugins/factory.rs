@@ -4,7 +4,6 @@ use crate::plugins::abort::AbortPlugin;
 use crate::plugins::acl::AclPlugin;
 use crate::plugins::anomaly_detector::AnomalyDetectorPlugin;
 use crate::plugins::auth::AuthPlugin;
-use crate::plugins::aws_lambda::AwsLambdaPlugin;
 use crate::plugins::basic_auth::BasicAuthPlugin;
 use crate::plugins::bot_detection::BotDetectionPlugin;
 use crate::plugins::buffering::BufferingPlugin;
@@ -106,7 +105,6 @@ pub fn build(
         "opentelemetry" => Arc::new(OpenTelemetryPlugin::from_config(config)?),
         "syslog" => Arc::new(SyslogPlugin::from_config(config)?),
         "file-log" => Arc::new(FileLogPlugin::from_config(config)?),
-        "aws-lambda" => Arc::new(AwsLambdaPlugin::from_config(config)?),
         "prometheus-per-consumer" => Arc::new(PrometheusPerConsumerPlugin::from_config(config)?),
         "request-id" => Arc::new(RequestIdPlugin::from_config(config)?),
         "request-recorder" => Arc::new(RequestRecorderPlugin::from_config(config, repo)?),
