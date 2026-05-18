@@ -227,7 +227,11 @@ async fn diff_services(
                         Ok(_) => {
                             route_table.update_service(&cur.id, updated);
                             if url_changed {
-                                health.reset_on_upstream_change(&cur.id, &cur.name, "upstream URL changed");
+                                health.reset_on_upstream_change(
+                                    &cur.id,
+                                    &cur.name,
+                                    "upstream URL changed",
+                                );
                             }
                             result.updated_services += 1;
                         }

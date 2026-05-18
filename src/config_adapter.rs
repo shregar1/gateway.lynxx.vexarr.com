@@ -387,9 +387,7 @@ fn apply_server(
                 }
             }
             "proxy_set_header" => {
-                tracing::warn!(
-                    "ignoring proxy_set_header directive (not supported in conversion)"
-                );
+                tracing::warn!("ignoring proxy_set_header directive (not supported in conversion)");
             }
             _ => {
                 // Unknown server-level directive — silently skip.
@@ -445,11 +443,7 @@ fn apply_server(
                 // Build one service whose URL is the first upstream server.
                 // Additional servers are noted but Lynxx targets would need
                 // the admin API; we pick the first for the config file.
-                let first = upstream
-                    .servers
-                    .first()
-                    .cloned()
-                    .unwrap_or_default();
+                let first = upstream.servers.first().cloned().unwrap_or_default();
                 let svc_url = format!("http://{first}");
                 let svc = ServiceConfig {
                     name: service_name.clone(),
@@ -577,9 +571,7 @@ fn extract_upstream_name(url: &str) -> Option<String> {
 
 /// Derive a Lynxx service name from a location path.
 fn make_service_name(path: &str) -> String {
-    let clean = path
-        .trim_matches('/')
-        .replace('/', "-");
+    let clean = path.trim_matches('/').replace('/', "-");
     if clean.is_empty() {
         "default-service".into()
     } else {
@@ -595,15 +587,10 @@ fn parse_duration_ms(val: &str) -> u64 {
     if let Some(stripped) = val.strip_suffix("ms") {
         stripped.parse::<u64>().unwrap_or(5000)
     } else if let Some(stripped) = val.strip_suffix('s') {
-        stripped
-            .parse::<u64>()
-            .map(|s| s * 1000)
-            .unwrap_or(5000)
+        stripped.parse::<u64>().map(|s| s * 1000).unwrap_or(5000)
     } else {
         // Bare number — treat as seconds.
-        val.parse::<u64>()
-            .map(|s| s * 1000)
-            .unwrap_or(5000)
+        val.parse::<u64>().map(|s| s * 1000).unwrap_or(5000)
     }
 }
 
@@ -709,10 +696,7 @@ mod tests {
         "#;
         let cfg = NginxAdapter::convert(input).unwrap();
         assert_eq!(cfg.services.len(), 1);
-        assert_eq!(
-            cfg.services[0].service_type.as_deref(),
-            Some("static")
-        );
+        assert_eq!(cfg.services[0].service_type.as_deref(), Some("static"));
         assert_eq!(
             cfg.services[0].document_root.as_deref(),
             Some("/var/www/html")

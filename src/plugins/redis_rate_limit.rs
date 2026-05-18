@@ -1,12 +1,12 @@
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::{HeaderValue, Request, Response};
 use redis::aio::ConnectionManager;
 use redis::AsyncCommands;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
-use axum::body::Body;
 
 /// Distributed rate limit backed by Redis. Uses a per-second sliding bucket
 /// keyed by `<namespace>:<key>:<unix_secs>` with INCR + EXPIRE. Falls back

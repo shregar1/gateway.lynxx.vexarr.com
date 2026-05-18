@@ -1,8 +1,8 @@
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
-use axum::http::{Request, Response};
 use axum::body::Body;
+use axum::http::{Request, Response};
 
 /// Deterministic mock responses keyed on method + path patterns. Useful for
 /// dev environments and contract testing.

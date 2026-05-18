@@ -165,9 +165,7 @@ fn validate_config(cfg: &GatewayConfig) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 /// `GET /admin/v1/config` — return the current running config as JSON.
-pub async fn get_config(
-    State(state): State<ConfigApiState>,
-) -> Json<ConfigResponse> {
+pub async fn get_config(State(state): State<ConfigApiState>) -> Json<ConfigResponse> {
     let config = state.store.current().await;
     Json(ConfigResponse { config })
 }
@@ -225,9 +223,8 @@ pub async fn patch_config(
     let current = state.store.current().await;
 
     // Convert the current config to a mutable JSON value.
-    let mut doc = serde_json::to_value(&current).map_err(|e| {
-        GatewayError::Internal(format!("failed to serialise current config: {e}"))
-    })?;
+    let mut doc = serde_json::to_value(&current)
+        .map_err(|e| GatewayError::Internal(format!("failed to serialise current config: {e}")))?;
 
     // Navigate to the target path.
     let segments: Vec<&str> = json_path.split('/').filter(|s| !s.is_empty()).collect();
@@ -264,9 +261,8 @@ pub async fn patch_config(
     }
 
     // Deserialise back to a typed config.
-    let new_config: GatewayConfig = serde_json::from_value(doc).map_err(|e| {
-        GatewayError::BadRequest(format!("patched config is invalid: {e}"))
-    })?;
+    let new_config: GatewayConfig = serde_json::from_value(doc)
+        .map_err(|e| GatewayError::BadRequest(format!("patched config is invalid: {e}")))?;
 
     // Validate.
     if let Err(msg) = validate_config(&new_config) {
@@ -305,9 +301,7 @@ pub async fn patch_config(
 }
 
 /// `POST /admin/v1/config/validate` — dry-run validation without applying.
-pub async fn validate_config_handler(
-    Json(config): Json<GatewayConfig>,
-) -> Json<ValidateResult> {
+pub async fn validate_config_handler(Json(config): Json<GatewayConfig>) -> Json<ValidateResult> {
     match validate_config(&config) {
         Ok(()) => Json(ValidateResult {
             valid: true,
@@ -321,9 +315,7 @@ pub async fn validate_config_handler(
 }
 
 /// `GET /admin/v1/config/history` — list the last 10 config changes.
-pub async fn config_history(
-    State(state): State<ConfigApiState>,
-) -> Json<Vec<HistoryEntry>> {
+pub async fn config_history(State(state): State<ConfigApiState>) -> Json<Vec<HistoryEntry>> {
     let snaps = state.store.history().await;
     let entries: Vec<HistoryEntry> = snaps
         .into_iter()

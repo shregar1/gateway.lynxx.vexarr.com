@@ -74,9 +74,7 @@ impl InFlightReqPlugin {
         let amount = cfg
             .get("amount")
             .and_then(|v| v.as_u64())
-            .ok_or_else(|| {
-                GatewayError::BadRequest("inflight-req: 'amount' is required".into())
-            })?;
+            .ok_or_else(|| GatewayError::BadRequest("inflight-req: 'amount' is required".into()))?;
 
         let criterion = match cfg
             .get("source_criterion")
@@ -129,10 +127,7 @@ impl Plugin for InFlightReqPlugin {
         "inflight-req"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         match self.criterion {
             SourceCriterion::General => {
                 let prev = self.global_counter.fetch_add(1, Ordering::Relaxed);
@@ -161,9 +156,7 @@ impl Plugin for InFlightReqPlugin {
                     req.extensions_mut().insert(InFlightRejected);
                 } else {
                     req.extensions_mut()
-                        .insert(Arc::new(InFlightGuardKeyed {
-                            counter,
-                        }));
+                        .insert(Arc::new(InFlightGuardKeyed { counter }));
                 }
             }
         }

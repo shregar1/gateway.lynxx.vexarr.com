@@ -76,9 +76,8 @@ impl SessionPlugin {
     }
 
     fn verify(&self, raw: &str) -> Option<String> {
-        let mut parts = raw.rsplitn(2, '|');
-        let sig_b64 = parts.next()?;
-        let payload = parts.next()?;
+        let (payload, sig_b64) = raw.rsplit_once('|')?;
+
         let sig = B64.decode(sig_b64).ok()?;
 
         let mut mac = HmacSha256::new_from_slice(&self.secret).ok()?;

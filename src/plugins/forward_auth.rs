@@ -28,9 +28,7 @@ impl ForwardAuthPlugin {
         let auth_url = cfg
             .get("auth_url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| {
-                GatewayError::BadRequest("forward-auth: `auth_url` is required".into())
-            })?
+            .ok_or_else(|| GatewayError::BadRequest("forward-auth: `auth_url` is required".into()))?
             .to_string();
 
         let method = cfg

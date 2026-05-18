@@ -27,7 +27,7 @@ enum KeySource {
 
 /// Real JWT verification. Three key sources, in priority order:
 ///   * `jwks_url`   — JWKS endpoint (e.g. keyx `/v1/jwks.json`); per-token
-///                    `kid` resolves to a JWK, no key rotation friction
+///     `kid` resolves to a JWK, no key rotation friction
 ///   * `public_key` — PEM (RS\*); static single-key verification
 ///   * `secret`     — shared secret (HS\*)
 ///
@@ -73,8 +73,6 @@ impl JwtPlugin {
             }
         };
 
-
-
         let key = if let Some(url) = cfg
             .get("jwks_url")
             .and_then(|v| v.as_str())
@@ -86,10 +84,9 @@ impl JwtPlugin {
             }
         } else if let Some(pk) = cfg.get("public_key").and_then(|v| v.as_str()) {
             // Static PEM. RS\* path.
-            KeySource::Static(
-                DecodingKey::from_rsa_pem(pk.as_bytes())
-                    .map_err(|e| GatewayError::BadRequest(format!("invalid jwt public_key PEM: {e}")))?,
-            )
+            KeySource::Static(DecodingKey::from_rsa_pem(pk.as_bytes()).map_err(|e| {
+                GatewayError::BadRequest(format!("invalid jwt public_key PEM: {e}"))
+            })?)
         } else {
             // Static secret. HS\* path.
             let secret = cfg.get("secret").and_then(|v| v.as_str()).unwrap_or("");
@@ -136,9 +133,9 @@ impl JwtPlugin {
 
         let header = decode_header(token)
             .map_err(|e| PluginError::Unauthorized(format!("JWT header parse: {e}")))?;
-        let kid = header
-            .kid
-            .ok_or_else(|| PluginError::Unauthorized("JWT missing `kid` (required in JWKS mode)".into()))?;
+        let kid = header.kid.ok_or_else(|| {
+            PluginError::Unauthorized("JWT missing `kid` (required in JWKS mode)".into())
+        })?;
         let jwk = jwks
             .find(&kid)
             .ok_or_else(|| PluginError::Unauthorized(format!("kid `{kid}` not in JWKS")))?;
@@ -290,9 +287,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/jwks.json"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(oct_jwks("k1", "secret")),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(oct_jwks("k1", "secret")))
             .mount(&server)
             .await;
 
@@ -306,10 +301,9 @@ mod tests {
         let mut req = req_with_bearer(&token);
         let err = plugin.on_request(&mut req).await.unwrap_err();
         match err {
-            PluginError::Unauthorized(msg) => assert!(
-                msg.contains("not in JWKS"),
-                "want 'not in JWKS', got {msg}"
-            ),
+            PluginError::Unauthorized(msg) => {
+                assert!(msg.contains("not in JWKS"), "want 'not in JWKS', got {msg}")
+            }
             other => panic!("expected Unauthorized, got {other:?}"),
         }
     }
@@ -319,9 +313,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/jwks.json"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(oct_jwks("k1", "secret")),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(oct_jwks("k1", "secret")))
             .mount(&server)
             .await;
 

@@ -313,7 +313,7 @@ mod tests {
     fn exact_match_preferred_over_wildcard() {
         let r = make_resolver_with_wildcards();
         // api.vexarr.com has an exact entry — resolve_wildcard should NOT be needed
-        assert!(r.cert_map.get("api.vexarr.com").is_some());
+        assert!(r.cert_map.contains_key("api.vexarr.com"));
     }
 
     #[test]

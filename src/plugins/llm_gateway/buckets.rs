@@ -143,7 +143,10 @@ impl Buckets {
         if delta > 0 {
             entry.tokens = entry.tokens.saturating_sub(delta as u64);
         } else {
-            entry.tokens = entry.tokens.saturating_add((-delta) as u64).min(self.tokens_per_min * 2);
+            entry.tokens = entry
+                .tokens
+                .saturating_add((-delta) as u64)
+                .min(self.tokens_per_min * 2);
         }
     }
 }

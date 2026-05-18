@@ -11,7 +11,7 @@ fn hashed_re() -> &'static regex::Regex {
         regex::Regex::new(
             r"[.\-][0-9a-f]{8,}\.(js|css|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|avif|ico)$",
         )
-        .unwrap()
+        .expect("invariant: literal HASHED_ASSET_RE compiles; covered by unit tests")
     })
 }
 
@@ -90,10 +90,17 @@ fn is_static_asset(ext: &str) -> bool {
 }
 
 fn empty_response(status: StatusCode) -> Response<Body> {
+    // Infallible builder: `Body::empty()` is always valid and `status` is a
+    // typed `StatusCode`. The `unwrap_or_else` fallback exists only to remove
+    // the last `.unwrap()` from the hot path — `Response::new` cannot fail.
     Response::builder()
         .status(status)
         .body(Body::empty())
-        .unwrap()
+        .unwrap_or_else(|_| {
+            let mut r = Response::new(Body::empty());
+            *r.status_mut() = status;
+            r
+        })
 }
 
 /// Apply a status override to an existing response (if configured).
@@ -117,9 +124,7 @@ fn generate_etag(size: u64, modified: std::time::SystemTime) -> String {
 
 /// Format a SystemTime as an HTTP-date (RFC 7231).
 fn format_http_date(t: std::time::SystemTime) -> String {
-    let d = t
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
+    let d = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let secs = d.as_secs();
     // We do simple HTTP-date formatting without pulling in httpdate crate.
     // Format: "Mon, 01 Jan 2024 00:00:00 GMT"
@@ -264,7 +269,9 @@ fn file_response(
             .header(header::VARY, "Accept-Encoding");
     }
 
-    builder.body(Body::from(bytes)).unwrap()
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 fn range_response(
@@ -296,7 +303,9 @@ fn range_response(
         builder = builder.header(header::CONTENT_ENCODING, enc);
     }
 
-    builder.body(Body::from(bytes)).unwrap()
+    builder
+        .body(Body::from(bytes))
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 /// Resolve `request_path` to a file under `root`, blocking path traversal.
@@ -531,12 +540,10 @@ impl FileSystem for LocalFs {
             // Check if the entry is a symlink (use symlink_metadata to
             // avoid following the link).
             let symlink_target = match fs::symlink_metadata(entry.path()).await {
-                Ok(sm) if sm.file_type().is_symlink() => {
-                    fs::read_link(entry.path())
-                        .await
-                        .ok()
-                        .map(|t| t.to_string_lossy().to_string())
-                }
+                Ok(sm) if sm.file_type().is_symlink() => fs::read_link(entry.path())
+                    .await
+                    .ok()
+                    .map(|t| t.to_string_lossy().to_string()),
                 _ => None,
             };
             entries.push(FsDirEntry {
@@ -628,7 +635,7 @@ pub fn render_directory_listing(
         };
         let modified = entry
             .modified
-            .map(|t| format_http_date(t))
+            .map(format_http_date)
             .unwrap_or_else(|| "—".to_string());
 
         // Symlink annotation when reveal_symlinks is enabled.
@@ -687,7 +694,7 @@ td:nth-child(2), td:nth-child(3) {{ color: #666; font-size: .9rem; }}
         .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
         .header(header::CACHE_CONTROL, "public, max-age=0, must-revalidate")
         .body(Body::from(html))
-        .unwrap()
+        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
 fn format_file_size(bytes: u64) -> String {
@@ -752,7 +759,7 @@ pub async fn serve_with_fs(
                         .status(StatusCode::MOVED_PERMANENTLY)
                         .header(header::LOCATION, redirect_to)
                         .body(Body::empty())
-                        .unwrap(),
+                        .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
                 );
             }
         }
@@ -762,9 +769,15 @@ pub async fn serve_with_fs(
     let precompressed = opts.precompressed.unwrap_or(DEFAULT_PRECOMPRESSED);
 
     // Try serving the file directly (with precompressed variants).
-    if let Some(resp) =
-        try_serve_file_with_fs(filesystem, &candidate, request_path, &encodings, opts, precompressed)
-            .await
+    if let Some(resp) = try_serve_file_with_fs(
+        filesystem,
+        &candidate,
+        request_path,
+        &encodings,
+        opts,
+        precompressed,
+    )
+    .await
     {
         return ServeResult::Response(apply_status_override(resp, opts.status_override));
     }
@@ -772,9 +785,15 @@ pub async fn serve_with_fs(
     // Try index file in directory.
     if candidate.extension().is_none() || request_path.ends_with('/') {
         let index = candidate.join(index_file);
-        if let Some(resp) =
-            try_serve_file_with_fs(filesystem, &index, request_path, &encodings, opts, precompressed)
-                .await
+        if let Some(resp) = try_serve_file_with_fs(
+            filesystem,
+            &index,
+            request_path,
+            &encodings,
+            opts,
+            precompressed,
+        )
+        .await
         {
             return ServeResult::Response(apply_status_override(resp, opts.status_override));
         }
@@ -830,15 +849,12 @@ async fn try_serve_file_with_fs(
     // Try precompressed variants first.
     for enc in precompressed {
         if accept_encodings.iter().any(|e| e == enc.encoding()) {
-            let compressed_path =
-                path.with_extension(format!("{}{}", ext, enc.suffix()));
+            let compressed_path = path.with_extension(format!("{}{}", ext, enc.suffix()));
             if let Some(meta) = filesystem.metadata(&compressed_path).await {
                 if meta.is_file {
                     if let Some(bytes) = filesystem.read(&compressed_path).await {
-                        let etag = generate_etag(
-                            meta.len,
-                            meta.modified.unwrap_or(std::time::UNIX_EPOCH),
-                        );
+                        let etag =
+                            generate_etag(meta.len, meta.modified.unwrap_or(std::time::UNIX_EPOCH));
                         if check_conditional(
                             opts.if_none_match,
                             opts.if_modified_since,
@@ -850,7 +866,9 @@ async fn try_serve_file_with_fs(
                                     .status(StatusCode::NOT_MODIFIED)
                                     .header(header::ETAG, &etag)
                                     .body(Body::empty())
-                                    .unwrap(),
+                                    .unwrap_or_else(|_| {
+                                        empty_response(StatusCode::INTERNAL_SERVER_ERROR)
+                                    }),
                             );
                         }
                         return Some(file_response(
@@ -887,7 +905,7 @@ async fn try_serve_file_with_fs(
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, &etag)
                 .body(Body::empty())
-                .unwrap(),
+                .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
         );
     }
 
@@ -895,8 +913,7 @@ async fn try_serve_file_with_fs(
     if let Some(range_header) = opts.range {
         if let Some((start, end)) = parse_range(range_header, meta.len) {
             let bytes = filesystem.read(path).await?;
-            let slice =
-                bytes::Bytes::from(bytes[(start as usize)..=(end as usize)].to_vec());
+            let slice = bytes::Bytes::from(bytes[(start as usize)..=(end as usize)].to_vec());
             return Some(range_response(
                 slice,
                 ext,
@@ -912,7 +929,7 @@ async fn try_serve_file_with_fs(
                     .status(StatusCode::RANGE_NOT_SATISFIABLE)
                     .header(header::CONTENT_RANGE, format!("bytes */{}", meta.len))
                     .body(Body::empty())
-                    .unwrap(),
+                    .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
             );
         }
     }
@@ -977,22 +994,18 @@ pub async fn serve_with_options(
                     .status(StatusCode::MOVED_PERMANENTLY)
                     .header(header::LOCATION, redirect_to)
                     .body(Body::empty())
-                    .unwrap();
+                    .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR));
             }
         }
     }
 
-    if let Some(resp) =
-        try_serve_file(&candidate, request_path, &encodings, opts).await
-    {
+    if let Some(resp) = try_serve_file(&candidate, request_path, &encodings, opts).await {
         return apply_status_override(resp, opts.status_override);
     }
 
     if candidate.extension().is_none() || request_path.ends_with('/') {
         let index = candidate.join(index_file);
-        if let Some(resp) =
-            try_serve_file(&index, request_path, &encodings, opts).await
-        {
+        if let Some(resp) = try_serve_file(&index, request_path, &encodings, opts).await {
             return apply_status_override(resp, opts.status_override);
         }
     }
@@ -1003,9 +1016,7 @@ pub async fn serve_with_options(
 
     if spa_fallback {
         let index = root.join(index_file);
-        if let Some(resp) =
-            try_serve_file(&index, "/", &encodings, opts).await
-        {
+        if let Some(resp) = try_serve_file(&index, "/", &encodings, opts).await {
             return apply_status_override(resp, opts.status_override);
         }
     }
@@ -1055,17 +1066,27 @@ async fn try_serve_file(
             if let Ok(meta) = fs::metadata(&compressed_path).await {
                 if meta.is_file() {
                     if let Ok(bytes) = fs::read(&compressed_path).await {
-                        let etag = generate_etag(meta.len(), meta.modified().unwrap_or(std::time::UNIX_EPOCH));
+                        let etag = generate_etag(
+                            meta.len(),
+                            meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        );
                         let modified = meta.modified().ok();
 
                         // Check conditional request.
-                        if check_conditional(opts.if_none_match, opts.if_modified_since, &etag, modified.unwrap_or(std::time::UNIX_EPOCH)) {
+                        if check_conditional(
+                            opts.if_none_match,
+                            opts.if_modified_since,
+                            &etag,
+                            modified.unwrap_or(std::time::UNIX_EPOCH),
+                        ) {
                             return Some(
                                 Response::builder()
                                     .status(StatusCode::NOT_MODIFIED)
                                     .header(header::ETAG, &etag)
                                     .body(Body::empty())
-                                    .unwrap(),
+                                    .unwrap_or_else(|_| {
+                                        empty_response(StatusCode::INTERNAL_SERVER_ERROR)
+                                    }),
                             );
                         }
 
@@ -1094,13 +1115,18 @@ async fn try_serve_file(
     let etag = generate_etag(file_size, modified.unwrap_or(std::time::UNIX_EPOCH));
 
     // Check conditional request (ETag / If-None-Match).
-    if check_conditional(opts.if_none_match, opts.if_modified_since, &etag, modified.unwrap_or(std::time::UNIX_EPOCH)) {
+    if check_conditional(
+        opts.if_none_match,
+        opts.if_modified_since,
+        &etag,
+        modified.unwrap_or(std::time::UNIX_EPOCH),
+    ) {
         return Some(
             Response::builder()
                 .status(StatusCode::NOT_MODIFIED)
                 .header(header::ETAG, &etag)
                 .body(Body::empty())
-                .unwrap(),
+                .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
         );
     }
 
@@ -1109,7 +1135,15 @@ async fn try_serve_file(
         if let Some((start, end)) = parse_range(range_header, file_size) {
             let bytes = fs::read(path).await.ok()?;
             let slice = bytes::Bytes::from(bytes[(start as usize)..=(end as usize)].to_vec());
-            return Some(range_response(slice, ext, start, end, file_size, Some(&etag), None));
+            return Some(range_response(
+                slice,
+                ext,
+                start,
+                end,
+                file_size,
+                Some(&etag),
+                None,
+            ));
         } else {
             // Invalid range → 416 Range Not Satisfiable.
             return Some(
@@ -1117,7 +1151,7 @@ async fn try_serve_file(
                     .status(StatusCode::RANGE_NOT_SATISFIABLE)
                     .header(header::CONTENT_RANGE, format!("bytes */{file_size}"))
                     .body(Body::empty())
-                    .unwrap(),
+                    .unwrap_or_else(|_| empty_response(StatusCode::INTERNAL_SERVER_ERROR)),
             );
         }
     }
@@ -1188,12 +1222,30 @@ mod tests {
 
     #[test]
     fn precompressed_encoding_from_str() {
-        assert_eq!(PrecompressedEncoding::from_str("br"), Some(PrecompressedEncoding::Brotli));
-        assert_eq!(PrecompressedEncoding::from_str("brotli"), Some(PrecompressedEncoding::Brotli));
-        assert_eq!(PrecompressedEncoding::from_str("gz"), Some(PrecompressedEncoding::Gzip));
-        assert_eq!(PrecompressedEncoding::from_str("gzip"), Some(PrecompressedEncoding::Gzip));
-        assert_eq!(PrecompressedEncoding::from_str("zstd"), Some(PrecompressedEncoding::Zstd));
-        assert_eq!(PrecompressedEncoding::from_str("zstandard"), Some(PrecompressedEncoding::Zstd));
+        assert_eq!(
+            PrecompressedEncoding::from_str("br"),
+            Some(PrecompressedEncoding::Brotli)
+        );
+        assert_eq!(
+            PrecompressedEncoding::from_str("brotli"),
+            Some(PrecompressedEncoding::Brotli)
+        );
+        assert_eq!(
+            PrecompressedEncoding::from_str("gz"),
+            Some(PrecompressedEncoding::Gzip)
+        );
+        assert_eq!(
+            PrecompressedEncoding::from_str("gzip"),
+            Some(PrecompressedEncoding::Gzip)
+        );
+        assert_eq!(
+            PrecompressedEncoding::from_str("zstd"),
+            Some(PrecompressedEncoding::Zstd)
+        );
+        assert_eq!(
+            PrecompressedEncoding::from_str("zstandard"),
+            Some(PrecompressedEncoding::Zstd)
+        );
         assert_eq!(PrecompressedEncoding::from_str("deflate"), None);
         assert_eq!(PrecompressedEncoding::from_str(""), None);
     }
@@ -1264,7 +1316,9 @@ mod tests {
                     is_file: true,
                     is_dir: false,
                     len: data.len() as u64,
-                    modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                    modified: Some(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000),
+                    ),
                 });
             }
             if self.dirs.contains(path) {
@@ -1272,7 +1326,9 @@ mod tests {
                     is_file: false,
                     is_dir: true,
                     len: 0,
-                    modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                    modified: Some(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000),
+                    ),
                 });
             }
             None
@@ -1294,7 +1350,9 @@ mod tests {
                         name: p.file_name().unwrap().to_string_lossy().to_string(),
                         is_dir: false,
                         size: data.len() as u64,
-                        modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                        modified: Some(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000),
+                        ),
                         symlink_target: None,
                     });
                 }
@@ -1306,7 +1364,9 @@ mod tests {
                         name: d.file_name().unwrap().to_string_lossy().to_string(),
                         is_dir: true,
                         size: 0,
-                        modified: Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000)),
+                        modified: Some(
+                            std::time::UNIX_EPOCH + std::time::Duration::from_secs(1700000000),
+                        ),
                         symlink_target: None,
                     });
                 }
@@ -1339,7 +1399,12 @@ mod tests {
         let opts = ServeOptions::default();
         let resp = render_directory_listing("/files/", &entries, None, &opts);
         assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        let ct = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(ct.contains("text/html"));
     }
 
@@ -1363,8 +1428,20 @@ mod tests {
     #[test]
     fn render_directory_listing_hides_dotfiles() {
         let entries = vec![
-            FsDirEntry { name: ".hidden".into(), is_dir: false, size: 0, modified: None, symlink_target: None },
-            FsDirEntry { name: "visible.txt".into(), is_dir: false, size: 100, modified: None, symlink_target: None },
+            FsDirEntry {
+                name: ".hidden".into(),
+                is_dir: false,
+                size: 0,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "visible.txt".into(),
+                is_dir: false,
+                size: 100,
+                modified: None,
+                symlink_target: None,
+            },
         ];
         // The render function skips entries starting with '.'.
         // We verify by checking that the function runs (the skipping is internal).
@@ -1415,7 +1492,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                let ct = resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(ct, "text/plain; charset=utf-8");
             }
             ServeResult::PassThru => panic!("expected response, got pass_thru"),
@@ -1458,7 +1540,16 @@ mod tests {
     async fn serve_with_fs_path_traversal_blocked() {
         let fs = InMemoryFs::new();
         let opts = ServeOptions::default();
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/../etc/passwd", "", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            false,
+            "/../etc/passwd",
+            "",
+            &opts,
+        )
+        .await;
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -1478,7 +1569,16 @@ mod tests {
             pass_thru: true,
             ..Default::default()
         };
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/nonexistent.txt", "", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            false,
+            "/nonexistent.txt",
+            "",
+            &opts,
+        )
+        .await;
         assert!(matches!(result, ServeResult::PassThru));
     }
 
@@ -1508,7 +1608,8 @@ mod tests {
             pass_thru: false,
             ..Default::default()
         };
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/missing.txt", "", &opts).await;
+        let result =
+            serve_with_fs(&fs, "/www", "index.html", false, "/missing.txt", "", &opts).await;
         match result {
             ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NOT_FOUND),
             ServeResult::PassThru => panic!("pass_thru is off, should 404"),
@@ -1525,7 +1626,8 @@ mod tests {
             pass_thru: true,
             ..Default::default()
         };
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/.git/config", "", &opts).await;
+        let result =
+            serve_with_fs(&fs, "/www", "index.html", false, "/.git/config", "", &opts).await;
         // Hidden paths with pass_thru → PassThru (not 404).
         assert!(matches!(result, ServeResult::PassThru));
     }
@@ -1548,7 +1650,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                let ct = resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert!(ct.contains("text/html"));
             }
             ServeResult::PassThru => panic!("browse enabled, should list directory"),
@@ -1590,7 +1697,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                let ct = resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert!(ct.contains("text/html"));
             }
             ServeResult::PassThru => panic!("should serve index.html"),
@@ -1630,11 +1742,25 @@ mod tests {
             precompressed: Some(&[PrecompressedEncoding::Brotli]),
             ..Default::default()
         };
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/app.js", "br, gzip", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            false,
+            "/app.js",
+            "br, gzip",
+            &opts,
+        )
+        .await;
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let enc = resp.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap();
+                let enc = resp
+                    .headers()
+                    .get(header::CONTENT_ENCODING)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(enc, "br");
             }
             ServeResult::PassThru => panic!("expected brotli response"),
@@ -1654,11 +1780,25 @@ mod tests {
             precompressed: Some(&[PrecompressedEncoding::Gzip]),
             ..Default::default()
         };
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/style.css", "br, gzip", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            false,
+            "/style.css",
+            "br, gzip",
+            &opts,
+        )
+        .await;
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let enc = resp.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap();
+                let enc = resp
+                    .headers()
+                    .get(header::CONTENT_ENCODING)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(enc, "gzip");
             }
             ServeResult::PassThru => panic!("expected gzip response"),
@@ -1677,7 +1817,16 @@ mod tests {
             precompressed: Some(&[]),
             ..Default::default()
         };
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/app.js", "br, gzip", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            false,
+            "/app.js",
+            "br, gzip",
+            &opts,
+        )
+        .await;
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
@@ -1718,11 +1867,25 @@ mod tests {
 
         // Default order is br > zstd > gzip. Client accepts all three.
         let opts = ServeOptions::default();
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/bundle.js", "gzip, br, zstd", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            false,
+            "/bundle.js",
+            "gzip, br, zstd",
+            &opts,
+        )
+        .await;
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let enc = resp.headers().get(header::CONTENT_ENCODING).unwrap().to_str().unwrap();
+                let enc = resp
+                    .headers()
+                    .get(header::CONTENT_ENCODING)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(enc, "br"); // Brotli should win.
             }
             ServeResult::PassThru => panic!("expected br response"),
@@ -1743,7 +1906,12 @@ mod tests {
         let etag = match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                resp.headers().get(header::ETAG).unwrap().to_str().unwrap().to_string()
+                resp.headers()
+                    .get(header::ETAG)
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string()
             }
             _ => panic!("expected OK"),
         };
@@ -1753,7 +1921,8 @@ mod tests {
             if_none_match: Some(&etag),
             ..Default::default()
         };
-        let result2 = serve_with_fs(&fs, "/www", "index.html", false, "/data.json", "", &opts2).await;
+        let result2 =
+            serve_with_fs(&fs, "/www", "index.html", false, "/data.json", "", &opts2).await;
         match result2 {
             ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NOT_MODIFIED),
             _ => panic!("expected 304"),
@@ -1776,7 +1945,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::PARTIAL_CONTENT);
-                let cr = resp.headers().get(header::CONTENT_RANGE).unwrap().to_str().unwrap();
+                let cr = resp
+                    .headers()
+                    .get(header::CONTENT_RANGE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert!(cr.starts_with("bytes 0-3/"));
             }
             _ => panic!("expected 206"),
@@ -1792,7 +1966,16 @@ mod tests {
         fs.add_file("/www/index.html", b"<div id=app></div>");
 
         let opts = ServeOptions::default();
-        let result = serve_with_fs(&fs, "/www", "index.html", true, "/deep/route/here", "", &opts).await;
+        let result = serve_with_fs(
+            &fs,
+            "/www",
+            "index.html",
+            true,
+            "/deep/route/here",
+            "",
+            &opts,
+        )
+        .await;
         match result {
             ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::OK),
             ServeResult::PassThru => panic!("SPA fallback should return index.html"),
@@ -1812,7 +1995,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
-                let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+                let loc = resp
+                    .headers()
+                    .get(header::LOCATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(loc, "/sub/");
             }
             ServeResult::PassThru => panic!("expected redirect"),
@@ -1824,9 +2012,18 @@ mod tests {
     #[tokio::test]
     async fn local_fs_nonexistent_file() {
         let lfs = LocalFs;
-        assert!(lfs.metadata(Path::new("/tmp/__nonexistent_lynx_test_file__")).await.is_none());
-        assert!(lfs.read(Path::new("/tmp/__nonexistent_lynx_test_file__")).await.is_none());
-        assert!(lfs.read_dir(Path::new("/tmp/__nonexistent_lynx_test_dir__")).await.is_none());
+        assert!(lfs
+            .metadata(Path::new("/tmp/__nonexistent_lynx_test_file__"))
+            .await
+            .is_none());
+        assert!(lfs
+            .read(Path::new("/tmp/__nonexistent_lynx_test_file__"))
+            .await
+            .is_none());
+        assert!(lfs
+            .read_dir(Path::new("/tmp/__nonexistent_lynx_test_dir__"))
+            .await
+            .is_none());
     }
 
     // ── serve_with_fs: browse + pass_thru combo ─────────────────────
@@ -1853,7 +2050,8 @@ mod tests {
         fs.add_dir("/www");
 
         let opts = ServeOptions::default();
-        let result = serve_with_fs(&fs, "/www", "index.html", false, "/favicon.ico", "", &opts).await;
+        let result =
+            serve_with_fs(&fs, "/www", "index.html", false, "/favicon.ico", "", &opts).await;
         match result {
             ServeResult::Response(resp) => assert_eq!(resp.status(), StatusCode::NO_CONTENT),
             ServeResult::PassThru => panic!("expected 204 for missing favicon"),
@@ -1865,9 +2063,27 @@ mod tests {
     #[test]
     fn sort_entries_name_ascending_default() {
         let mut entries = vec![
-            FsDirEntry { name: "zebra.txt".into(), is_dir: false, size: 10, modified: None, symlink_target: None },
-            FsDirEntry { name: "alpha.txt".into(), is_dir: false, size: 20, modified: None, symlink_target: None },
-            FsDirEntry { name: "mango.txt".into(), is_dir: false, size: 30, modified: None, symlink_target: None },
+            FsDirEntry {
+                name: "zebra.txt".into(),
+                is_dir: false,
+                size: 10,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "alpha.txt".into(),
+                is_dir: false,
+                size: 20,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "mango.txt".into(),
+                is_dir: false,
+                size: 30,
+                modified: None,
+                symlink_target: None,
+            },
         ];
         sort_entries(&mut entries, None); // default = Name Ascending
         assert_eq!(entries[0].name, "alpha.txt");
@@ -1878,11 +2094,32 @@ mod tests {
     #[test]
     fn sort_entries_size_descending() {
         let mut entries = vec![
-            FsDirEntry { name: "small.txt".into(), is_dir: false, size: 10, modified: None, symlink_target: None },
-            FsDirEntry { name: "big.txt".into(), is_dir: false, size: 9999, modified: None, symlink_target: None },
-            FsDirEntry { name: "medium.txt".into(), is_dir: false, size: 500, modified: None, symlink_target: None },
+            FsDirEntry {
+                name: "small.txt".into(),
+                is_dir: false,
+                size: 10,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "big.txt".into(),
+                is_dir: false,
+                size: 9999,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "medium.txt".into(),
+                is_dir: false,
+                size: 500,
+                modified: None,
+                symlink_target: None,
+            },
         ];
-        sort_entries(&mut entries, Some((BrowseSortField::Size, SortDirection::Descending)));
+        sort_entries(
+            &mut entries,
+            Some((BrowseSortField::Size, SortDirection::Descending)),
+        );
         assert_eq!(entries[0].name, "big.txt");
         assert_eq!(entries[1].name, "medium.txt");
         assert_eq!(entries[2].name, "small.txt");
@@ -1894,12 +2131,33 @@ mod tests {
         let t2 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(2000);
         let t3 = std::time::UNIX_EPOCH + std::time::Duration::from_secs(3000);
         let mut entries = vec![
-            FsDirEntry { name: "old.txt".into(), is_dir: false, size: 1, modified: Some(t1), symlink_target: None },
-            FsDirEntry { name: "new.txt".into(), is_dir: false, size: 1, modified: Some(t3), symlink_target: None },
-            FsDirEntry { name: "mid.txt".into(), is_dir: false, size: 1, modified: Some(t2), symlink_target: None },
+            FsDirEntry {
+                name: "old.txt".into(),
+                is_dir: false,
+                size: 1,
+                modified: Some(t1),
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "new.txt".into(),
+                is_dir: false,
+                size: 1,
+                modified: Some(t3),
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "mid.txt".into(),
+                is_dir: false,
+                size: 1,
+                modified: Some(t2),
+                symlink_target: None,
+            },
         ];
         // Ascending: oldest first.
-        sort_entries(&mut entries, Some((BrowseSortField::Time, SortDirection::Ascending)));
+        sort_entries(
+            &mut entries,
+            Some((BrowseSortField::Time, SortDirection::Ascending)),
+        );
         assert_eq!(entries[0].name, "old.txt");
         assert_eq!(entries[1].name, "mid.txt");
         assert_eq!(entries[2].name, "new.txt");
@@ -1908,12 +2166,33 @@ mod tests {
     #[test]
     fn sort_entries_dirs_always_first() {
         let mut entries = vec![
-            FsDirEntry { name: "file_a.txt".into(), is_dir: false, size: 100, modified: None, symlink_target: None },
-            FsDirEntry { name: "dir_z".into(), is_dir: true, size: 0, modified: None, symlink_target: None },
-            FsDirEntry { name: "file_b.txt".into(), is_dir: false, size: 50, modified: None, symlink_target: None },
+            FsDirEntry {
+                name: "file_a.txt".into(),
+                is_dir: false,
+                size: 100,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "dir_z".into(),
+                is_dir: true,
+                size: 0,
+                modified: None,
+                symlink_target: None,
+            },
+            FsDirEntry {
+                name: "file_b.txt".into(),
+                is_dir: false,
+                size: 50,
+                modified: None,
+                symlink_target: None,
+            },
         ];
         // Even when sorting by size desc, dirs come first.
-        sort_entries(&mut entries, Some((BrowseSortField::Size, SortDirection::Descending)));
+        sort_entries(
+            &mut entries,
+            Some((BrowseSortField::Size, SortDirection::Descending)),
+        );
         assert!(entries[0].is_dir);
         assert_eq!(entries[0].name, "dir_z");
     }
@@ -1957,7 +2236,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::OK);
-                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                let ct = resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert!(ct.contains("text/html"));
             }
             ServeResult::PassThru => panic!("expected browse listing"),
@@ -2042,7 +2326,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
-                let loc = resp.headers().get(header::LOCATION).unwrap().to_str().unwrap();
+                let loc = resp
+                    .headers()
+                    .get(header::LOCATION)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert_eq!(loc, "/sub/");
             }
             ServeResult::PassThru => panic!("expected redirect"),
@@ -2065,7 +2354,12 @@ mod tests {
         match result {
             ServeResult::Response(resp) => {
                 assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-                let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+                let ct = resp
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .unwrap()
+                    .to_str()
+                    .unwrap();
                 assert!(ct.contains("text/html"));
             }
             ServeResult::PassThru => panic!("expected response with 404 status"),

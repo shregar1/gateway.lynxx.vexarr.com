@@ -99,7 +99,7 @@ async fn send_one(addr: &str, kind: Kind) -> Outcome {
         }
         Kind::OversizedHeader => {
             let mut buf = b"GET / HTTP/1.1\r\nHost: x\r\nX-Big: ".to_vec();
-            buf.extend(std::iter::repeat(b'A').take(8 * 1024));
+            buf.extend(std::iter::repeat_n(b'A', 8 * 1024));
             buf.extend_from_slice(b"\r\n\r\n");
             buf
         }

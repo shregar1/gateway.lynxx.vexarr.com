@@ -125,7 +125,7 @@ fn params_record(request_id: u16, params: &[(&str, &str)]) -> Vec<u8> {
         };
         out.extend_from_slice(&hdr.to_bytes());
         out.extend_from_slice(chunk);
-        out.extend(std::iter::repeat(0).take(padding));
+        out.extend(std::iter::repeat_n(0, padding));
     }
 
     // Empty FCGI_PARAMS to signal end
@@ -154,7 +154,7 @@ fn stdin_record(request_id: u16, data: &[u8]) -> Vec<u8> {
         };
         out.extend_from_slice(&hdr.to_bytes());
         out.extend_from_slice(chunk);
-        out.extend(std::iter::repeat(0).take(padding));
+        out.extend(std::iter::repeat_n(0, padding));
     }
     // Empty FCGI_STDIN to signal EOF
     let hdr = FcgiRecord {
@@ -232,8 +232,7 @@ pub async fn send_fastcgi(
     let payload = build_payload(request_id, &params, &body_bytes);
 
     #[cfg(unix)]
-    if upstream_url.starts_with("unix://") {
-        let path = &upstream_url[7..];
+    if let Some(path) = upstream_url.strip_prefix("unix://") {
         let mut s = tokio::net::UnixStream::connect(path)
             .await
             .map_err(FastcgiError::Io)?;
@@ -319,11 +318,7 @@ fn parse_cgi_response(data: &[u8]) -> Result<Response<Body>, FastcgiError> {
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .map(|p| (p, 4))
-        .or_else(|| {
-            data.windows(2)
-                .position(|w| w == b"\n\n")
-                .map(|p| (p, 2))
-        });
+        .or_else(|| data.windows(2).position(|w| w == b"\n\n").map(|p| (p, 2)));
 
     let (header_end, sep_len) = separator_pos.unwrap_or((data.len(), 0));
     let header_bytes = &data[..header_end];

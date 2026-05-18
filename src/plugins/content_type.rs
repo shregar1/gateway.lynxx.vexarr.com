@@ -52,10 +52,7 @@ impl Plugin for ContentTypePlugin {
         "content-type"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let path = req.uri().path().to_string();
         req.extensions_mut().insert(RequestPath(path));
         Ok(())
@@ -108,10 +105,7 @@ mod tests {
 
     /// Build a request with the given URI path.
     fn make_request(uri: &str) -> Request<Body> {
-        Request::builder()
-            .uri(uri)
-            .body(Body::empty())
-            .unwrap()
+        Request::builder().uri(uri).body(Body::empty()).unwrap()
     }
 
     /// Build a response, optionally with a Content-Type header already set.
@@ -192,12 +186,7 @@ mod tests {
             .insert(req.extensions().get::<RequestPath>().unwrap().clone());
         plugin.on_response(&mut resp).await.unwrap();
 
-        let ct = resp
-            .headers()
-            .get(CONTENT_TYPE)
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let ct = resp.headers().get(CONTENT_TYPE).unwrap().to_str().unwrap();
         // mime_guess returns "application/javascript" — both are valid JS MIME types.
         assert!(
             ct == "application/javascript" || ct == "text/javascript",

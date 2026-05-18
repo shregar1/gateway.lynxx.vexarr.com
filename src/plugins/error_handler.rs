@@ -2,7 +2,7 @@ use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::body::Body;
-use axum::http::{Request, Response, StatusCode, header};
+use axum::http::{header, Request, Response, StatusCode};
 use std::collections::HashMap;
 
 /// Custom error pages plugin. Maps HTTP error status codes to custom
@@ -24,13 +24,8 @@ pub struct ErrorHandlerPlugin {
 }
 
 enum ErrorPage {
-    Body {
-        body: String,
-        content_type: String,
-    },
-    Redirect {
-        location: String,
-    },
+    Body { body: String, content_type: String },
+    Redirect { location: String },
 }
 
 impl ErrorHandlerPlugin {
@@ -38,23 +33,29 @@ impl ErrorHandlerPlugin {
         let mut pages = HashMap::new();
         if let Some(obj) = cfg.get("pages").and_then(|v| v.as_object()) {
             for (code_str, val) in obj {
-                let code: u16 = code_str
-                    .parse()
-                    .map_err(|_| GatewayError::BadRequest(format!("invalid status code: {code_str}")))?;
+                let code: u16 = code_str.parse().map_err(|_| {
+                    GatewayError::BadRequest(format!("invalid status code: {code_str}"))
+                })?;
                 if let Some(redirect) = val.get("redirect").and_then(|v| v.as_str()) {
-                    pages.insert(code, ErrorPage::Redirect {
-                        location: redirect.to_string(),
-                    });
+                    pages.insert(
+                        code,
+                        ErrorPage::Redirect {
+                            location: redirect.to_string(),
+                        },
+                    );
                 } else if let Some(body) = val.get("body").and_then(|v| v.as_str()) {
                     let ct = val
                         .get("content_type")
                         .and_then(|v| v.as_str())
                         .unwrap_or("text/html; charset=utf-8")
                         .to_string();
-                    pages.insert(code, ErrorPage::Body {
-                        body: body.to_string(),
-                        content_type: ct,
-                    });
+                    pages.insert(
+                        code,
+                        ErrorPage::Body {
+                            body: body.to_string(),
+                            content_type: ct,
+                        },
+                    );
                 }
             }
         }
@@ -85,7 +86,9 @@ impl Plugin for ErrorHandlerPlugin {
                 *resp.body_mut() = Body::from(body.clone());
                 resp.headers_mut().insert(
                     header::CONTENT_TYPE,
-                    content_type.parse().unwrap_or_else(|_| "text/html".parse().unwrap()),
+                    content_type
+                        .parse()
+                        .unwrap_or_else(|_| "text/html".parse().unwrap()),
                 );
                 resp.headers_mut().insert(
                     header::CONTENT_LENGTH,

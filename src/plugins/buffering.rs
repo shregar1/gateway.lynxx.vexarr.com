@@ -220,7 +220,10 @@ mod tests {
         let err = plugin.on_request(&mut req).await.unwrap_err();
         match err {
             PluginError::PayloadTooLarge(msg) => {
-                assert!(msg.contains("50"), "error should mention actual size: {msg}");
+                assert!(
+                    msg.contains("50"),
+                    "error should mention actual size: {msg}"
+                );
                 assert!(msg.contains("10"), "error should mention limit: {msg}");
             }
             other => panic!("expected PayloadTooLarge, got: {other:?}"),
@@ -272,7 +275,10 @@ mod tests {
         let err = plugin.on_response(&mut resp).await.unwrap_err();
         match err {
             PluginError::Internal(msg) => {
-                assert!(msg.contains("50"), "error should mention actual size: {msg}");
+                assert!(
+                    msg.contains("50"),
+                    "error should mention actual size: {msg}"
+                );
                 assert!(msg.contains("10"), "error should mention limit: {msg}");
             }
             other => panic!("expected Internal, got: {other:?}"),

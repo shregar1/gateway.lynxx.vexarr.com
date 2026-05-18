@@ -28,6 +28,13 @@ dashboard-dist/
 # Claude Code per-session scratch worktrees (never commit)
 .claude/worktrees/
 
+# Internal-only docs (DO NOT PUBLISH). Strategy, roadmap, perf
+# techniques, etc. — material we don't want competitors reading.
+# Force-add with `git add -f docs/internal/...` if you intentionally
+# want the content in this repo's history; otherwise the directory is
+# local-only and won't end up in any mirror.
+docs/internal/
+
 # Built dashboard assets (these come from the dashboard repo's build output;
 # tracked there, not here)
 node.dashboard.lynxx.dev/dist/

@@ -12,6 +12,7 @@ mod abstractions;
 mod admin;
 mod audit;
 mod auth;
+mod backup;
 mod cluster;
 mod config;
 mod configurations;
@@ -50,14 +51,14 @@ use crate::proxy::router::{RouteTable, SharedRouteTable};
 use axum::extract::DefaultBodyLimit;
 use axum::response::IntoResponse;
 use clap::Parser;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use opentelemetry_otlp::WithExportConfig;
-use opentelemetry::trace::TracerProvider as _;
+use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 /// Command-line arguments for the Lynxx gateway.
@@ -148,6 +149,7 @@ fn apply_cli_overrides(config: &mut GatewayConfig, args: &Args) {
 /// the threads (helps `perf` / flamegraphs). Kept simple — no thread pinning,
 /// no per-thread stack size — those are deployment-specific tuning knobs.
 fn main() -> anyhow::Result<()> {
+    install_panic_hook();
     let _ = rustls::crypto::ring::default_provider().install_default();
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -157,6 +159,32 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async_main())
 }
 
+/// Replace the default Rust panic hook with one that logs via tracing
+/// and omits the source `file:line:col` (which leaks our internal layout
+/// to anyone reading panic output). Backtrace is still emitted when
+/// `RUST_BACKTRACE=1` for legitimate debugging; the operator opts in
+/// explicitly when they need it.
+///
+/// In `--release` with `panic = "abort"` this only fires once before the
+/// process exits, so the cost is negligible. The trade-off is debug
+/// ergonomics for opacity — the gateway hot path has zero remaining
+/// panic surface (audit, 2026-05-18) so in practice this hook is only
+/// ever called for a programming bug, not a routine failure.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(|s| s.as_str()))
+            .unwrap_or("panic");
+        tracing::error!(target: "lynxx::panic", error = msg, "gateway aborted");
+        if std::env::var("RUST_BACKTRACE").is_ok() {
+            eprintln!("{:?}", std::backtrace::Backtrace::force_capture());
+        }
+    }));
+}
+
 async fn async_main() -> anyhow::Result<()> {
     // --- Load config early so telemetry settings are available ----------
     let args = Args::parse();
@@ -164,6 +192,14 @@ async fn async_main() -> anyhow::Result<()> {
     let mut config = load_config(&config_path)?;
     apply_env_overrides(&mut config);
     apply_cli_overrides(&mut config, &args);
+
+    // Pre-flight: catch keyx misconfiguration at boot instead of on the
+    // first admin / licence-verify request. Same pattern as userx's
+    // check_mode_consistency — see config::check_keyx_consistency.
+    crate::config::check_keyx_consistency(
+        &config.keyx,
+        std::env::var("VEXARR_MODE").ok().as_deref(),
+    )?;
 
     // --- Telemetry init -------------------------------------------------
     // Reads from config.telemetry (populated from TOML + env overrides).
@@ -236,8 +272,8 @@ async fn async_main() -> anyhow::Result<()> {
 
         let provider = provider_builder.build();
         opentelemetry::global::set_tracer_provider(provider.clone());
-        let otel_layer = tracing_opentelemetry::layer()
-            .with_tracer(provider.tracer("lynxx-gateway"));
+        let otel_layer =
+            tracing_opentelemetry::layer().with_tracer(provider.tracer("lynxx-gateway"));
         tracing_subscriber::registry()
             .with(env_filter)
             .with(fmt_layer)
@@ -274,7 +310,9 @@ async fn async_main() -> anyhow::Result<()> {
                 service_token: config.keyx.service_token.clone(),
                 license_urn: config.keyx.license_urn.clone(),
             };
-            crate::integrations::keyx::KeyxClient::new(cfg).ok().map(Arc::new)
+            crate::integrations::keyx::KeyxClient::new(cfg)
+                .ok()
+                .map(Arc::new)
         } else {
             None
         };
@@ -295,30 +333,26 @@ async fn async_main() -> anyhow::Result<()> {
             v
         });
 
-    let license = match crate::license::License::load(
-        &config.license,
-        license_verifier.as_deref(),
-    )
-    .await
-    {
-        Ok(lic) => {
-            tracing::info!(
-                customer_id = %lic.customer_id,
-                tier = %lic.tier.as_str(),
-                from_cache = lic.from_cache,
-                "licence verified"
-            );
-            config.gateway.plan_tier = lic.tier.as_str().to_string();
-            lic
-        }
-        Err(err) => {
-            eprintln!("licence verification failed: {err}");
-            eprintln!("This Lynxx binary requires an active subscription.");
-            eprintln!("Set LYNXX_API_KEY=<key> or [license].api_key in config.toml.");
-            eprintln!("Get a key at https://lynxx.vexarr.com/account/api-keys");
-            return Err(anyhow::anyhow!("licence required: {err}"));
-        }
-    };
+    let license =
+        match crate::license::License::load(&config.license, license_verifier.as_deref()).await {
+            Ok(lic) => {
+                tracing::info!(
+                    customer_id = %lic.customer_id,
+                    tier = %lic.tier.as_str(),
+                    from_cache = lic.from_cache,
+                    "licence verified"
+                );
+                config.gateway.plan_tier = lic.tier.as_str().to_string();
+                lic
+            }
+            Err(err) => {
+                eprintln!("licence verification failed: {err}");
+                eprintln!("This Lynxx binary requires an active subscription.");
+                eprintln!("Set LYNXX_API_KEY=<key> or [license].api_key in config.toml.");
+                eprintln!("Get a key at https://lynxx.vexarr.com/account/api-keys");
+                return Err(anyhow::anyhow!("licence required: {err}"));
+            }
+        };
 
     tracing::info!(
         proxy_port = config.gateway.proxy_port,
@@ -455,8 +489,7 @@ async fn async_main() -> anyhow::Result<()> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_default();
 
-    let license_state = if config.keyx.is_configured()
-        && !config.license.payload.trim().is_empty()
+    let license_state = if config.keyx.is_configured() && !config.license.payload.trim().is_empty()
     {
         use base64::engine::general_purpose::STANDARD as B64;
         use base64::Engine;
@@ -481,7 +514,6 @@ async fn async_main() -> anyhow::Result<()> {
         crate::license::LicenseState::unverified(plan_tier)
     };
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
-
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
@@ -628,7 +660,15 @@ async fn async_main() -> anyhow::Result<()> {
         // fallback runs. Scripts and the /v1/install/binary streamer are
         // self-contained — they don't share state with the proxy pipeline.
         let install_state = Arc::new(install::InstallState::new());
-        install::router(install_state).merge(proxy_router)
+        let proxy_router = install::router(install_state).merge(proxy_router);
+
+        // Mount the cronX-driven backup endpoint. HMAC-gated by
+        // LYNXX_BACKUP_WEBHOOK_SECRET; gracefully returns 503 when unset.
+        // Lives on the public data plane so cronX can reach it from outside
+        // without needing access to the admin port.
+        let backup_state =
+            Arc::new(backup::BackupState::from_env().expect("backup state from env"));
+        backup::router(backup_state).merge(proxy_router)
     };
 
     metrics::spawn_metrics_collector(route_table.clone(), repo.clone(), health.clone(), 5_000);
@@ -695,11 +735,7 @@ async fn async_main() -> anyhow::Result<()> {
     // ---------- SRV DNS provider ----------
     if config.gateway.providers.srv_dns.enabled {
         let srv_cfg = config.gateway.providers.srv_dns.clone();
-        match crate::discovery::srv_dns::SrvDnsProvider::new(
-            srv_cfg,
-            repo.clone(),
-            bus.clone(),
-        ) {
+        match crate::discovery::srv_dns::SrvDnsProvider::new(srv_cfg, repo.clone(), bus.clone()) {
             Ok(provider) => {
                 tracing::info!("srv-dns provider started; polling SRV records");
                 provider.spawn();
@@ -801,9 +837,11 @@ async fn async_main() -> anyhow::Result<()> {
     let strict_port = config.gateway.strict_port;
 
     let admin_tls_enabled = config.gateway.admin_tls.enabled;
-    let admin_bind = utilities::resilient_bind(
-        &utilities::BindConfig::new(&bind_addr, config.gateway.admin_port, strict_port),
-    )
+    let admin_bind = utilities::resilient_bind(&utilities::BindConfig::new(
+        &bind_addr,
+        config.gateway.admin_port,
+        strict_port,
+    ))
     .await?;
     let actual_admin_port = admin_bind.port;
     let admin_listener = admin_bind.listener;
@@ -925,9 +963,11 @@ async fn async_main() -> anyhow::Result<()> {
     // ---------- Proxy Listener ----------
     // Pre-bind the proxy socket with resilient_bind (SO_REUSEADDR, retry,
     // fallback) so all TLS/non-TLS branches share the same listener.
-    let proxy_bind = utilities::resilient_bind(
-        &utilities::BindConfig::new(&bind_addr, config.gateway.proxy_port, strict_port),
-    )
+    let proxy_bind = utilities::resilient_bind(&utilities::BindConfig::new(
+        &bind_addr,
+        config.gateway.proxy_port,
+        strict_port,
+    ))
     .await?;
     let actual_proxy_port = proxy_bind.port;
     let proxy_listener = proxy_bind.listener;
@@ -959,7 +999,8 @@ async fn async_main() -> anyhow::Result<()> {
     let admin_serve_mode = if admin_tls_enabled {
         let admin_tls_cfg = &config.gateway.admin_tls;
         let server_config = crate::proxy::tls::build_admin_tls_config(admin_tls_cfg)?;
-        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let rustls_cfg =
+            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
         let handle = axum_server::Handle::new();
         let h = handle.clone();
         let app = admin_app.clone();
@@ -1060,9 +1101,14 @@ async fn async_main() -> anyhow::Result<()> {
         let server_config = crate::proxy::tls::build_server_config(&config.gateway.tls)?;
         tracing::info!(
             "proxy listening on {proxy_addr} (TLS{})",
-            if config.gateway.tls.mtls_enabled() { ", mTLS" } else { "" }
+            if config.gateway.tls.mtls_enabled() {
+                ", mTLS"
+            } else {
+                ""
+            }
         );
-        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+        let rustls_cfg =
+            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
         let handle = axum_server::Handle::new();
         let shutdown_handle = handle.clone();
         let std_listener = proxy_listener.into_std()?;
@@ -1071,7 +1117,9 @@ async fn async_main() -> anyhow::Result<()> {
             .serve(proxy_app.into_make_service());
         run_select!(serve, Some(shutdown_handle));
     } else if config.gateway.acme.enabled {
-        tracing::warn!("ACME enabled but no certificate available; waiting for background provisioning...");
+        tracing::warn!(
+            "ACME enabled but no certificate available; waiting for background provisioning..."
+        );
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     } else {

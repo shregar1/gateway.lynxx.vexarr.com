@@ -8,11 +8,7 @@ const PROPAGATION_TIMEOUT_SECS: u64 = 120;
 
 #[async_trait]
 pub trait DnsProvider: Send + Sync + std::fmt::Debug {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError>;
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError>;
 
     async fn clear_txt_record(&self, record_id: &str) -> Result<(), GatewayError>;
 
@@ -47,11 +43,7 @@ impl CloudflareDns {
 
 #[async_trait]
 impl DnsProvider for CloudflareDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let body = serde_json::json!({
             "type": "TXT",
             "name": fqdn,
@@ -61,7 +53,7 @@ impl DnsProvider for CloudflareDns {
 
         let resp = self
             .client
-            .post(&self.api_base())
+            .post(self.api_base())
             .bearer_auth(&self.api_token)
             .json(&body)
             .send()
@@ -241,11 +233,7 @@ impl Route53Dns {
 
 #[async_trait]
 impl DnsProvider for Route53Dns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         self.submit_change("UPSERT", fqdn, value).await?;
         tracing::info!(fqdn = %fqdn, "route53 TXT record upserted");
         Ok(format!("{fqdn}:{value}"))
@@ -289,10 +277,7 @@ pub fn build_acme_dns_name(domain: &str) -> String {
     format!("_acme-challenge.{domain}")
 }
 
-pub async fn wait_for_propagation(
-    fqdn: &str,
-    expected: &str,
-) -> Result<(), GatewayError> {
+pub async fn wait_for_propagation(fqdn: &str, expected: &str) -> Result<(), GatewayError> {
     wait_for_propagation_with_timeout(fqdn, expected, PROPAGATION_TIMEOUT_SECS).await
 }
 
@@ -313,8 +298,7 @@ pub async fn wait_for_propagation_with_timeout(
         },
     );
 
-    let deadline =
-        tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
 
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -323,17 +307,14 @@ pub async fn wait_for_propagation_with_timeout(
             )));
         }
 
-        match resolver.txt_lookup(fqdn).await {
-            Ok(lookup) => {
-                for record in lookup.iter() {
-                    let txt = record.to_string();
-                    if txt.trim_matches('"') == expected {
-                        tracing::info!(fqdn = %fqdn, "DNS TXT record propagated");
-                        return Ok(());
-                    }
+        if let Ok(lookup) = resolver.txt_lookup(fqdn).await {
+            for record in lookup.iter() {
+                let txt = record.to_string();
+                if txt.trim_matches('"') == expected {
+                    tracing::info!(fqdn = %fqdn, "DNS TXT record propagated");
+                    return Ok(());
                 }
             }
-            Err(_) => {}
         }
 
         tokio::time::sleep(std::time::Duration::from_secs(PROPAGATION_POLL_SECS)).await;
@@ -371,11 +352,7 @@ impl DigitalOceanDns {
 
 #[async_trait]
 impl DnsProvider for DigitalOceanDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_fqdn = build_acme_dns_name(fqdn);
         let (domain, name) = Self::extract_domain(&acme_fqdn);
 
@@ -457,11 +434,7 @@ impl GoogleCloudDns {
 
 #[async_trait]
 impl DnsProvider for GoogleCloudDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         // fqdn is already `_acme-challenge.{domain}` from the caller
         let acme_fqdn = format!("{fqdn}.");
         let project = &self.project;
@@ -584,7 +557,11 @@ impl GoogleCloudDns {
         let rrdatas = body
             .get("rrdatas")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(rrdatas)
     }
@@ -611,11 +588,7 @@ impl HetznerDns {
 
 #[async_trait]
 impl DnsProvider for HetznerDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_fqdn = build_acme_dns_name(fqdn);
         let resp = self
             .client
@@ -712,11 +685,7 @@ impl PorkbunDns {
 
 #[async_trait]
 impl DnsProvider for PorkbunDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_fqdn = build_acme_dns_name(fqdn);
         let domain = Self::extract_root_domain(&acme_fqdn);
         let subdomain = if acme_fqdn.len() > domain.len() + 1 {
@@ -831,19 +800,13 @@ impl VultrDns {
 
 #[async_trait]
 impl DnsProvider for VultrDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_fqdn = build_acme_dns_name(fqdn);
         let (domain, name) = Self::extract_domain(&acme_fqdn);
 
         let resp = self
             .client
-            .post(format!(
-                "https://api.vultr.com/v2/domains/{domain}/records"
-            ))
+            .post(format!("https://api.vultr.com/v2/domains/{domain}/records"))
             .bearer_auth(&self.api_key)
             .json(&serde_json::json!({
                 "type": "TXT",
@@ -939,11 +902,7 @@ impl NamecheapDns {
 
 #[async_trait]
 impl DnsProvider for NamecheapDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_fqdn = build_acme_dns_name(fqdn);
         let (domain, subdomain) = DigitalOceanDns::extract_domain(&acme_fqdn);
         let (sld, tld) = Self::extract_sld_tld(domain);
@@ -1028,12 +987,12 @@ impl AzureDns {
 
 #[async_trait]
 impl DnsProvider for AzureDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
-        let record_name = format!("_acme-challenge.{}", fqdn.trim_end_matches(&format!(".{}", self.zone_name)).trim_end_matches('.'));
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
+        let record_name = format!(
+            "_acme-challenge.{}",
+            fqdn.trim_end_matches(&format!(".{}", self.zone_name))
+                .trim_end_matches('.')
+        );
         let url = self.record_url(&record_name);
 
         let resp = self
@@ -1115,12 +1074,12 @@ impl OvhDns {
 
 #[async_trait]
 impl DnsProvider for OvhDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
-        let subdomain = format!("_acme-challenge.{}", fqdn.trim_end_matches(&format!(".{}", self.zone_name)).trim_end_matches('.'));
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
+        let subdomain = format!(
+            "_acme-challenge.{}",
+            fqdn.trim_end_matches(&format!(".{}", self.zone_name))
+                .trim_end_matches('.')
+        );
 
         let resp = self
             .client
@@ -1234,18 +1193,13 @@ impl DuckDns {
     /// Extract the subdomain portion for DuckDNS.
     /// "myhost.duckdns.org" -> "myhost", "myhost" -> "myhost"
     fn extract_subdomain(fqdn: &str) -> &str {
-        fqdn.strip_suffix(".duckdns.org")
-            .unwrap_or(fqdn)
+        fqdn.strip_suffix(".duckdns.org").unwrap_or(fqdn)
     }
 }
 
 #[async_trait]
 impl DnsProvider for DuckDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let domain = Self::extract_subdomain(fqdn);
 
         let resp = self
@@ -1321,11 +1275,7 @@ impl LinodeDns {
 
 #[async_trait]
 impl DnsProvider for LinodeDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_name = build_acme_dns_name(fqdn);
 
         let resp = self
@@ -1429,11 +1379,7 @@ impl GandiDns {
 
 #[async_trait]
 impl DnsProvider for GandiDns {
-    async fn set_txt_record(
-        &self,
-        fqdn: &str,
-        value: &str,
-    ) -> Result<String, GatewayError> {
+    async fn set_txt_record(&self, fqdn: &str, value: &str) -> Result<String, GatewayError> {
         let acme_fqdn = build_acme_dns_name(fqdn);
         let (domain, name) = Self::extract_domain(&acme_fqdn);
 
@@ -1491,9 +1437,7 @@ impl DnsProvider for GandiDns {
     }
 }
 
-pub fn from_config(
-    cfg: &crate::config::Dns01Config,
-) -> Result<Arc<dyn DnsProvider>, GatewayError> {
+pub fn from_config(cfg: &crate::config::Dns01Config) -> Result<Arc<dyn DnsProvider>, GatewayError> {
     match cfg.provider.as_str() {
         "cloudflare" => {
             if cfg.api_token.is_empty() || cfg.zone_id.is_empty() {
@@ -2009,8 +1953,14 @@ mod tests {
 
     #[test]
     fn porkbun_extract_root_domain() {
-        assert_eq!(PorkbunDns::extract_root_domain("_acme-challenge.example.com"), "example.com");
-        assert_eq!(PorkbunDns::extract_root_domain("example.com"), "example.com");
+        assert_eq!(
+            PorkbunDns::extract_root_domain("_acme-challenge.example.com"),
+            "example.com"
+        );
+        assert_eq!(
+            PorkbunDns::extract_root_domain("example.com"),
+            "example.com"
+        );
     }
 
     #[test]

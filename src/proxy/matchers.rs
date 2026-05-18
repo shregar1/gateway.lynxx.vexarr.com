@@ -43,7 +43,10 @@ pub enum Matcher {
     Any { matchers: Vec<Matcher> },
     /// File existence matcher. Checks if any of the try_files paths exist
     /// on disk relative to the given root path.
-    File { path: String, try_files: Vec<String> },
+    File {
+        path: String,
+        try_files: Vec<String>,
+    },
     /// Protocol matcher. Matches the request scheme (http, https, grpc).
     Protocol { protocol: String },
     /// Variable exact-value matcher. Looks up a named variable from the
@@ -123,22 +126,20 @@ pub fn evaluate(matcher: &Matcher, ctx: &MatcherContext) -> bool {
         }
         Matcher::Not { matcher: inner } => !evaluate(inner, ctx),
         Matcher::Expression { expr } => evaluate_expression(expr, ctx),
-        Matcher::Header { name, value } => {
-            ctx.headers
-                .and_then(|h| h.get(name.as_str()))
-                .and_then(|v| v.to_str().ok())
-                .map(|v| v.eq_ignore_ascii_case(value))
-                .unwrap_or(false)
-        }
-        Matcher::Query { name, value } => {
-            ctx.query_string
-                .map(|qs| {
-                    qs.split('&')
-                        .filter_map(|pair| pair.split_once('='))
-                        .any(|(k, v)| k == name.as_str() && v == value.as_str())
-                })
-                .unwrap_or(false)
-        }
+        Matcher::Header { name, value } => ctx
+            .headers
+            .and_then(|h| h.get(name.as_str()))
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.eq_ignore_ascii_case(value))
+            .unwrap_or(false),
+        Matcher::Query { name, value } => ctx
+            .query_string
+            .map(|qs| {
+                qs.split('&')
+                    .filter_map(|pair| pair.split_once('='))
+                    .any(|(k, v)| k == name.as_str() && v == value.as_str())
+            })
+            .unwrap_or(false),
         Matcher::PathPrefix { prefix } => ctx.path.starts_with(prefix.as_str()),
         Matcher::PathRegex { pattern } => regex::Regex::new(pattern)
             .map(|re| re.is_match(ctx.path))
@@ -149,30 +150,26 @@ pub fn evaluate(matcher: &Matcher, ctx: &MatcherContext) -> bool {
             let root = std::path::Path::new(path.as_str());
             try_files.iter().any(|f| root.join(f).exists())
         }
-        Matcher::Protocol { protocol } => {
-            ctx.scheme
-                .map(|s| s.eq_ignore_ascii_case(protocol))
-                .unwrap_or(false)
-        }
-        Matcher::Var { name, value } => {
-            ctx.vars
-                .get(name.as_str())
-                .map(|v| v == value)
-                .unwrap_or(false)
-        }
-        Matcher::VarRegex { name, pattern } => {
-            ctx.vars
-                .get(name.as_str())
-                .and_then(|v| regex::Regex::new(pattern).ok().map(|re| re.is_match(v)))
-                .unwrap_or(false)
-        }
-        Matcher::HeaderRegex { name, pattern } => {
-            ctx.headers
-                .and_then(|h| h.get(name.as_str()))
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| regex::Regex::new(pattern).ok().map(|re| re.is_match(v)))
-                .unwrap_or(false)
-        }
+        Matcher::Protocol { protocol } => ctx
+            .scheme
+            .map(|s| s.eq_ignore_ascii_case(protocol))
+            .unwrap_or(false),
+        Matcher::Var { name, value } => ctx
+            .vars
+            .get(name.as_str())
+            .map(|v| v == value)
+            .unwrap_or(false),
+        Matcher::VarRegex { name, pattern } => ctx
+            .vars
+            .get(name.as_str())
+            .and_then(|v| regex::Regex::new(pattern).ok().map(|re| re.is_match(v)))
+            .unwrap_or(false),
+        Matcher::HeaderRegex { name, pattern } => ctx
+            .headers
+            .and_then(|h| h.get(name.as_str()))
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| regex::Regex::new(pattern).ok().map(|re| re.is_match(v)))
+            .unwrap_or(false),
     }
 }
 
@@ -228,14 +225,12 @@ fn evaluate_expression(expr: &str, ctx: &MatcherContext) -> bool {
 
     // OR (lowest precedence) — split on top-level `||`.
     if let Some((left, right)) = split_top_level(expr, "||") {
-        return evaluate_expression(left.trim(), ctx)
-            || evaluate_expression(right.trim(), ctx);
+        return evaluate_expression(left.trim(), ctx) || evaluate_expression(right.trim(), ctx);
     }
 
     // AND — split on top-level `&&`.
     if let Some((left, right)) = split_top_level(expr, "&&") {
-        return evaluate_expression(left.trim(), ctx)
-            && evaluate_expression(right.trim(), ctx);
+        return evaluate_expression(left.trim(), ctx) && evaluate_expression(right.trim(), ctx);
     }
 
     // Parenthesised group.
@@ -269,7 +264,10 @@ fn evaluate_expression(expr: &str, ctx: &MatcherContext) -> bool {
     // host == "..."
     if let Some(rest) = expr.strip_prefix("host == ") {
         if let Some(val) = extract_quoted(rest.trim()) {
-            return ctx.host.map(|h| h.eq_ignore_ascii_case(&val)).unwrap_or(false);
+            return ctx
+                .host
+                .map(|h| h.eq_ignore_ascii_case(&val))
+                .unwrap_or(false);
         }
     }
 
@@ -534,8 +532,14 @@ mod tests {
     #[test]
     fn expr_client_ip_in() {
         let ctx = ctx_with_path("/");
-        assert!(evaluate_expression(r#"client_ip in "192.168.1.0/24""#, &ctx));
-        assert!(!evaluate_expression(r#"client_ip in "172.16.0.0/12""#, &ctx));
+        assert!(evaluate_expression(
+            r#"client_ip in "192.168.1.0/24""#,
+            &ctx
+        ));
+        assert!(!evaluate_expression(
+            r#"client_ip in "172.16.0.0/12""#,
+            &ctx
+        ));
     }
 
     #[test]
@@ -695,8 +699,7 @@ mod tests {
 
     #[test]
     fn var_exact_match() {
-        let vars: HashMap<String, String> =
-            [("env".to_string(), "production".to_string())].into();
+        let vars: HashMap<String, String> = [("env".to_string(), "production".to_string())].into();
         let m = Matcher::Var {
             name: "env".to_string(),
             value: "production".to_string(),
@@ -708,8 +711,7 @@ mod tests {
 
     #[test]
     fn var_no_match() {
-        let vars: HashMap<String, String> =
-            [("env".to_string(), "staging".to_string())].into();
+        let vars: HashMap<String, String> = [("env".to_string(), "staging".to_string())].into();
         let m = Matcher::Var {
             name: "env".to_string(),
             value: "production".to_string(),
@@ -731,8 +733,7 @@ mod tests {
 
     #[test]
     fn var_regex_match() {
-        let vars: HashMap<String, String> =
-            [("version".to_string(), "v2.3.1".to_string())].into();
+        let vars: HashMap<String, String> = [("version".to_string(), "v2.3.1".to_string())].into();
         let m = Matcher::VarRegex {
             name: "version".to_string(),
             pattern: r"^v\d+\.\d+\.\d+$".to_string(),
@@ -744,8 +745,7 @@ mod tests {
 
     #[test]
     fn var_regex_no_match() {
-        let vars: HashMap<String, String> =
-            [("version".to_string(), "latest".to_string())].into();
+        let vars: HashMap<String, String> = [("version".to_string(), "latest".to_string())].into();
         let m = Matcher::VarRegex {
             name: "version".to_string(),
             pattern: r"^v\d+\.\d+\.\d+$".to_string(),

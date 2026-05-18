@@ -25,16 +25,16 @@ pub mod scoring;
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::{Request, Response};
 use baselines::Baseline;
 use config::{Config, KeyStrategy, Mode};
 use dashmap::DashMap;
+use http_body_util::BodyExt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use http_body_util::BodyExt;
-use axum::body::Body;
 
 /// Extension stash so `on_response` can find the same key without re-parsing
 /// headers. Cloned out of `req.extensions_mut()` after `on_request`.
@@ -425,7 +425,11 @@ fn prune(state: &DashMap<String, Mutex<Baseline>>) {
     let cutoff = Duration::from_secs(30 * 60);
     let now = Instant::now();
     state.retain(|_, slot| {
-        let b = match slot.lock() {
+        // `slot` is `&mut Mutex<Baseline>`, so `get_mut` avoids the lock —
+        // there can be no contending readers if we have exclusive access.
+        // `PoisonError` still surfaces here so a panicked baseline can be
+        // re-evaluated cleanly.
+        let b = match slot.get_mut() {
             Ok(g) => g,
             Err(_) => return true, // poisoned — leave it; next access will surface the panic
         };
@@ -636,10 +640,7 @@ mod tests {
         p.on_request(&mut req1).await.unwrap();
         let ctx = req1.extensions().get::<AnomalyCtx>().cloned().unwrap();
 
-        let mut resp = Response::builder()
-            .status(500)
-            .body(Body::empty())
-            .unwrap();
+        let mut resp = Response::builder().status(500).body(Body::empty()).unwrap();
         resp.extensions_mut().insert(ctx);
         p.on_response(&mut resp).await.unwrap();
 

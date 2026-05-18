@@ -122,10 +122,7 @@ pub fn admin_router(
     let reads = Router::new()
         .route("/projects", get(routes::list_projects))
         .route("/projects/:id", get(routes::get_project))
-        .route(
-            "/projects/:id/services",
-            get(routes::list_project_services),
-        )
+        .route("/projects/:id/services", get(routes::list_project_services))
         .route("/services", get(routes::list_services))
         .route("/services/:id", get(routes::get_service))
         .route("/services/:id/targets", get(routes::list_service_targets))
@@ -152,8 +149,14 @@ pub fn admin_router(
         .route("/logs", get(routes::list_logs))
         // ── analytics (read-only) ──
         .route("/services/:id/analytics", get(analytics::service_analytics))
-        .route("/services/:id/rate-limits", get(analytics::service_rate_limits))
-        .route("/services/:id/rate-limit-stats", get(analytics::service_rate_limit_stats))
+        .route(
+            "/services/:id/rate-limits",
+            get(analytics::service_rate_limits),
+        )
+        .route(
+            "/services/:id/rate-limit-stats",
+            get(analytics::service_rate_limit_stats),
+        )
         .route("/services/:id/geo", get(analytics::service_geo))
         // ── probes (read-only) ──
         .route("/services/:id/probes", get(probes::list_probes))
@@ -167,11 +170,23 @@ pub fn admin_router(
         // ── ip rules (read-only) ──
         .route("/services/:id/ip-rules", get(ip_rules::list_ip_rules))
         // ── error pages (read-only) ──
-        .route("/services/:id/error-pages", get(error_pages::list_error_pages))
+        .route(
+            "/services/:id/error-pages",
+            get(error_pages::list_error_pages),
+        )
         // ── consumer groups (read-only) ──
-        .route("/services/:id/consumer-groups", get(consumer_groups::list_consumer_groups))
-        .route("/consumer-groups/:id/members", get(consumer_groups::list_members))
-        .route("/consumer-groups/:id/usage", get(consumer_groups::group_usage))
+        .route(
+            "/services/:id/consumer-groups",
+            get(consumer_groups::list_consumer_groups),
+        )
+        .route(
+            "/consumer-groups/:id/members",
+            get(consumer_groups::list_members),
+        )
+        .route(
+            "/consumer-groups/:id/usage",
+            get(consumer_groups::group_usage),
+        )
         // ── dependency graph ──
         .route("/services/:id/graph", get(graph::service_graph))
         // ── api docs ──
@@ -190,7 +205,10 @@ pub fn admin_router(
         // ── incidents (read-only) ──
         .route("/services/:id/incidents", get(incidents::list_incidents))
         .route("/incidents/:id", get(incidents::get_incident))
-        .route("/incidents/:id/updates", get(incidents::list_incident_updates))
+        .route(
+            "/incidents/:id/updates",
+            get(incidents::list_incident_updates),
+        )
         // ── webhooks (read-only) ──
         .route("/services/:id/webhooks", get(webhooks::list_webhooks))
         .route("/webhooks/:id", get(webhooks::get_webhook))
@@ -208,13 +226,19 @@ pub fn admin_router(
         .route("/cluster/nodes", get(cluster_mgmt::list_nodes))
         .route("/cluster/nodes/:id", get(cluster_mgmt::get_node))
         // ── rate limit simulator (read-only) ──
-        .route("/services/:id/rate-limit-sim", get(ratelimit_sim::list_simulations))
+        .route(
+            "/services/:id/rate-limit-sim",
+            get(ratelimit_sim::list_simulations),
+        )
         .route("/rate-limit-sim/:id", get(ratelimit_sim::get_simulation))
         // ── PKI / certificates (read-only) ──
         .route("/certificates", get(pki::list_certificates))
         .route("/certificates/:id", get(pki::get_certificate))
         // ── circuit breaker per-service (read-only) ──
-        .route("/services/:id/circuit-breaker", get(routes::get_service_circuit_breaker))
+        .route(
+            "/services/:id/circuit-breaker",
+            get(routes::get_service_circuit_breaker),
+        )
         .route_layer(middleware::from_fn(viewer));
 
     // ---- mutations (operator) ----
@@ -289,62 +313,120 @@ pub fn admin_router(
             "/circuit-breakers/:service_id/reset",
             post(routes::reset_circuit_breaker),
         )
-        .route(
-            "/services/:id/deploy",
-            post(deploy::start_deploy),
-        )
-        .route(
-            "/services/:id/deploy/status",
-            get(deploy::deploy_status),
-        )
+        .route("/services/:id/deploy", post(deploy::start_deploy))
+        .route("/services/:id/deploy/status", get(deploy::deploy_status))
         // ── probes (mutations) ──
         .route("/services/:id/probes", post(probes::create_probe))
-        .route("/probes/:id", patch(probes::patch_probe).delete(probes::delete_probe))
+        .route(
+            "/probes/:id",
+            patch(probes::patch_probe).delete(probes::delete_probe),
+        )
         // ── snapshots (mutations) ──
         .route("/services/:id/snapshots", post(snapshots::create_snapshot))
-        .route("/services/:id/snapshots/:sid/diff", get(snapshots::snapshot_diff))
-        .route("/services/:id/snapshots/:sid/rollback", post(snapshots::rollback_snapshot))
-        .route("/services/:id/snapshots/:sid", delete(snapshots::delete_snapshot))
+        .route(
+            "/services/:id/snapshots/:sid/diff",
+            get(snapshots::snapshot_diff),
+        )
+        .route(
+            "/services/:id/snapshots/:sid/rollback",
+            post(snapshots::rollback_snapshot),
+        )
+        .route(
+            "/services/:id/snapshots/:sid",
+            delete(snapshots::delete_snapshot),
+        )
         // ── alerts (mutations) ──
         .route("/services/:id/alerts", post(alerts::create_alert_rule))
-        .route("/alerts/:id", patch(alerts::patch_alert_rule).delete(alerts::delete_alert_rule))
-        .route("/alert-events/:id/resolve", post(alerts::resolve_alert_event))
+        .route(
+            "/alerts/:id",
+            patch(alerts::patch_alert_rule).delete(alerts::delete_alert_rule),
+        )
+        .route(
+            "/alert-events/:id/resolve",
+            post(alerts::resolve_alert_event),
+        )
         .route("/alerts/:id/test", post(alerts::test_alert))
         // ── ip rules (mutations) ──
         .route("/services/:id/ip-rules", post(ip_rules::create_ip_rule))
-        .route("/services/:id/ip-rules/bulk", post(ip_rules::bulk_create_ip_rules))
-        .route("/ip-rules/:id", patch(ip_rules::patch_ip_rule).delete(ip_rules::delete_ip_rule))
+        .route(
+            "/services/:id/ip-rules/bulk",
+            post(ip_rules::bulk_create_ip_rules),
+        )
+        .route(
+            "/ip-rules/:id",
+            patch(ip_rules::patch_ip_rule).delete(ip_rules::delete_ip_rule),
+        )
         // ── error pages (mutations) ──
-        .route("/services/:id/error-pages", post(error_pages::create_error_page))
-        .route("/error-pages/:id", patch(error_pages::patch_error_page).delete(error_pages::delete_error_page))
+        .route(
+            "/services/:id/error-pages",
+            post(error_pages::create_error_page),
+        )
+        .route(
+            "/error-pages/:id",
+            patch(error_pages::patch_error_page).delete(error_pages::delete_error_page),
+        )
         // ── consumer groups (mutations) ──
-        .route("/services/:id/consumer-groups", post(consumer_groups::create_consumer_group))
-        .route("/consumer-groups/:id", patch(consumer_groups::patch_consumer_group).delete(consumer_groups::delete_consumer_group))
-        .route("/consumer-groups/:id/members", post(consumer_groups::add_member))
-        .route("/consumer-groups/:id/members/:cid", delete(consumer_groups::remove_member))
+        .route(
+            "/services/:id/consumer-groups",
+            post(consumer_groups::create_consumer_group),
+        )
+        .route(
+            "/consumer-groups/:id",
+            patch(consumer_groups::patch_consumer_group)
+                .delete(consumer_groups::delete_consumer_group),
+        )
+        .route(
+            "/consumer-groups/:id/members",
+            post(consumer_groups::add_member),
+        )
+        .route(
+            "/consumer-groups/:id/members/:cid",
+            delete(consumer_groups::remove_member),
+        )
         // ── proxy helpers ──
         .route("/proxy/try", post(docs::proxy_try))
         .route("/proxy/replay", post(replay::proxy_replay))
         // ── consumer key regen ──
-        .route("/consumers/:id/regenerate-key", post(routes::regenerate_consumer_key))
+        .route(
+            "/consumers/:id/regenerate-key",
+            post(routes::regenerate_consumer_key),
+        )
         // ── cache (mutations) ──
         .route("/services/:id/cache/purge", post(cache::purge_cache))
         .route("/services/:id/cache/warm", post(cache::warm_cache))
         // ── tracing (mutations) ──
         .route("/services/:id/traces", post(tracing_api::ingest_trace))
         // ── transforms (mutations) ──
-        .route("/services/:id/transforms", post(transforms::create_transform))
-        .route("/transforms/:id", patch(transforms::patch_transform).delete(transforms::delete_transform))
+        .route(
+            "/services/:id/transforms",
+            post(transforms::create_transform),
+        )
+        .route(
+            "/transforms/:id",
+            patch(transforms::patch_transform).delete(transforms::delete_transform),
+        )
         // ── versioning (mutations) ──
         .route("/services/:id/versions", post(versioning::create_version))
-        .route("/versions/:id", patch(versioning::patch_version).delete(versioning::delete_version))
+        .route(
+            "/versions/:id",
+            patch(versioning::patch_version).delete(versioning::delete_version),
+        )
         // ── incidents (mutations) ──
         .route("/services/:id/incidents", post(incidents::create_incident))
-        .route("/incidents/:id", patch(incidents::update_incident).delete(incidents::delete_incident))
-        .route("/incidents/:id/updates", post(incidents::create_incident_update))
+        .route(
+            "/incidents/:id",
+            patch(incidents::update_incident).delete(incidents::delete_incident),
+        )
+        .route(
+            "/incidents/:id/updates",
+            post(incidents::create_incident_update),
+        )
         // ── webhooks (mutations) ──
         .route("/services/:id/webhooks", post(webhooks::create_webhook))
-        .route("/webhooks/:id", patch(webhooks::patch_webhook).delete(webhooks::delete_webhook))
+        .route(
+            "/webhooks/:id",
+            patch(webhooks::patch_webhook).delete(webhooks::delete_webhook),
+        )
         .route("/webhooks/:id/test", post(webhooks::test_webhook))
         // ── load testing (mutations) ──
         .route("/services/:id/load-tests", post(loadtest::create_load_test))
@@ -355,12 +437,18 @@ pub fn admin_router(
         .route("/cluster/nodes/:id/drain", post(cluster_mgmt::drain_node))
         .route("/cluster/nodes/:id", delete(cluster_mgmt::remove_node))
         // ── rate limit simulator (mutations) ──
-        .route("/services/:id/rate-limit-sim", post(ratelimit_sim::run_simulation))
+        .route(
+            "/services/:id/rate-limit-sim",
+            post(ratelimit_sim::run_simulation),
+        )
         // ── PKI / certificates (mutations) ──
         .route("/certificates", post(pki::create_certificate))
         .route("/certificates/:id", delete(pki::delete_certificate))
         // ── circuit breaker per-service (mutations) ──
-        .route("/services/:id/circuit-breaker", patch(routes::patch_service_circuit_breaker))
+        .route(
+            "/services/:id/circuit-breaker",
+            patch(routes::patch_service_circuit_breaker),
+        )
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----
@@ -374,7 +462,6 @@ pub fn admin_router(
             put(routes::update_token).delete(routes::delete_token),
         )
         .route_layer(middleware::from_fn(admin_only));
-
 
     // ---- live config API ----
     let config_store = config_api::ConfigStore::new(gateway_config);
@@ -489,12 +576,7 @@ async fn api_envelope(req: Request, next: Next) -> Response {
     };
 
     let envelope: serde_json::Value = if status_code.is_success() {
-        let env = ApiEnvelope::success(
-            data,
-            txn_urn,
-            timestamp,
-            reference_urn,
-        );
+        let env = ApiEnvelope::success(data, txn_urn, timestamp, reference_urn);
         serde_json::to_value(env).unwrap_or_default()
     } else {
         let response_key = match status_code.as_u16() {
@@ -513,13 +595,7 @@ async fn api_envelope(req: Request, next: Next) -> Response {
             .get("error")
             .and_then(|e| e.as_str())
             .unwrap_or("An error occurred");
-        let env = ApiEnvelope::error(
-            response_key,
-            msg,
-            txn_urn,
-            timestamp,
-            reference_urn,
-        );
+        let env = ApiEnvelope::error(response_key, msg, txn_urn, timestamp, reference_urn);
         serde_json::to_value(env).unwrap_or_default()
     };
 
@@ -527,9 +603,10 @@ async fn api_envelope(req: Request, next: Next) -> Response {
     let content_len = body_bytes.len();
     let mut response = Response::from_parts(parts, Body::from(body_bytes));
     *response.status_mut() = status_code;
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     response
         .headers_mut()
         .insert(header::CONTENT_LENGTH, HeaderValue::from(content_len));

@@ -271,11 +271,7 @@ async fn run_deploy(
         .build()
         .unwrap_or_default();
 
-    let probe_url = format!(
-        "{}{}",
-        target_url.trim_end_matches('/'),
-        health_path
-    );
+    let probe_url = format!("{}{}", target_url.trim_end_matches('/'), health_path);
 
     let max_wait = Duration::from_millis(interval_ms * threshold as u64 * 2);
     let deadline = tokio::time::Instant::now() + max_wait;
@@ -324,9 +320,7 @@ async fn run_deploy(
                 );
             }
             consecutive = 0;
-            deploy
-                .health_checks_passed
-                .store(0, Ordering::Relaxed);
+            deploy.health_checks_passed.store(0, Ordering::Relaxed);
         }
     }
 

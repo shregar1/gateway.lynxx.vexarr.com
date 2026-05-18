@@ -43,7 +43,7 @@ async fn main() -> Result<()> {
         if a == "--print-crds" {
             // serde_yaml is provided transitively via kube? fallback: serialize via serde_json then manual.
             // We did not add serde_yaml as a dep; emit JSON-as-YAML via serde_json + a tiny conversion.
-            let crds = vec![
+            let crds = [
                 serde_json::to_value(LynxxService::crd())?,
                 serde_json::to_value(LynxxRoute::crd())?,
                 serde_json::to_value(LynxxPlugin::crd())?,

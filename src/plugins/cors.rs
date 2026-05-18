@@ -18,7 +18,8 @@ impl CorsPlugin {
         Self {
             allow_origins,
             allow_methods: "GET, POST, PUT, DELETE, PATCH, OPTIONS".into(),
-            allow_headers: "Content-Type, Authorization, X-Api-Key, X-Request-Id, X-Lynxx-Web".into(),
+            allow_headers: "Content-Type, Authorization, X-Api-Key, X-Request-Id, X-Lynxx-Web"
+                .into(),
             allow_credentials,
         }
     }
@@ -56,11 +57,13 @@ impl Plugin for CorsPlugin {
 
     async fn on_response(&self, resp: &mut Response<BoxBody>) -> Result<(), PluginError> {
         let origin_ext = resp.extensions().get::<RequestOrigin>();
-        
+
         let origin = if self.allow_origins.contains(&"*".to_string()) {
             if self.allow_credentials {
                 // If credentials are allowed, we MUST mirror the origin instead of '*'
-                origin_ext.map(|o| o.0.clone()).unwrap_or(HeaderValue::from_static("*"))
+                origin_ext
+                    .map(|o| o.0.clone())
+                    .unwrap_or(HeaderValue::from_static("*"))
             } else {
                 HeaderValue::from_static("*")
             }
@@ -87,7 +90,7 @@ impl Plugin for CorsPlugin {
 
         let headers = resp.headers_mut();
         headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, origin);
-        
+
         headers.insert(
             header::ACCESS_CONTROL_ALLOW_METHODS,
             HeaderValue::from_str(&self.allow_methods).unwrap_or(HeaderValue::from_static("GET")),

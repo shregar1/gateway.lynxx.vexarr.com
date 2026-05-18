@@ -2,11 +2,11 @@ use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::{Request, Response};
 use http_body_util::BodyExt;
 use jsonschema::JSONSchema;
 use std::sync::Arc;
-use axum::body::Body;
 
 /// JSON Schema validation of request bodies.
 ///

@@ -1,5 +1,5 @@
 name: lynxx-backend-deploy
-repository: https://github.com/shregar1/backend.lynxx.dev.git
+repository: https://github.com/vexarr/gateway.lynxx.vexarr.com.git
 
 on:
   push:
@@ -21,9 +21,9 @@ jobs:
         run: |
           rm -rf ../node.dashboard.lynxx.dev 2>/dev/null || true
           if [ -n "${GITHUB_TOKEN}" ]; then
-            git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/shregar1/node.dashboard.lynxx.dev.git ../node.dashboard.lynxx.dev
+            git clone --depth 1 https://x-access-token:${GITHUB_TOKEN}@github.com/vexarr/node.dashboard.lynxx.vexarr.com.git ../node.dashboard.lynxx.dev
           else
-            git clone --depth 1 https://github.com/shregar1/node.dashboard.lynxx.dev.git ../node.dashboard.lynxx.dev
+            git clone --depth 1 https://github.com/vexarr/node.dashboard.lynxx.vexarr.com.git ../node.dashboard.lynxx.dev
           fi
           cd ../node.dashboard.lynxx.dev
           npm install

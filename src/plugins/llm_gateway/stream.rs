@@ -21,13 +21,13 @@
 //! model id.
 
 use super::tokens;
+use crate::plugins::llm_gateway::buckets::Buckets;
+use bytes::Bytes;
+use futures_util::Stream;
 use serde_json::Value;
 use std::pin::Pin;
-use std::task::{Context, Poll};
-use futures_util::Stream;
-use bytes::Bytes;
-use crate::plugins::llm_gateway::buckets::Buckets;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 /// Output of stream-body analysis.
 #[derive(Debug, Clone, Default)]
@@ -205,7 +205,10 @@ where
 impl<S> Drop for TokenCountingStream<S> {
     fn drop(&mut self) {
         // Post-hoc quota adjustment.
-        let actual_total = self.usage.upstream_completion_tokens.unwrap_or(self.usage.completion_tokens);
+        let actual_total = self
+            .usage
+            .upstream_completion_tokens
+            .unwrap_or(self.usage.completion_tokens);
         // We only adjust if we have a non-zero count. If the stream was
         // interrupted before any tokens were parsed, we stick with the
         // initial estimate as a safety measure.
@@ -233,7 +236,6 @@ pub fn is_event_stream(content_type: Option<&str>) -> bool {
         })
         .unwrap_or(false)
 }
-
 
 #[cfg(test)]
 mod tests {

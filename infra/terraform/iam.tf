@@ -92,7 +92,7 @@ resource "google_iam_workload_identity_pool_provider" "github" {
   }
 
   # Only allow workflows from the correct GitHub org/user.
-  attribute_condition = "assertion.repository_owner == 'shregar1'"
+  attribute_condition = "assertion.repository_owner == 'vexarr'"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -103,5 +103,5 @@ resource "google_iam_workload_identity_pool_provider" "github" {
 resource "google_service_account_iam_member" "cicd_wif" {
   service_account_id = google_service_account.cicd.name
   role               = "roles/iam.workloadIdentityUser"
-  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository_owner/shregar1"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository_owner/vexarr"
 }

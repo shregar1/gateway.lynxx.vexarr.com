@@ -282,11 +282,7 @@ async fn poll_range(
         };
 
         let name = if cfg.name.is_empty() {
-            key_str
-                .rsplit('/')
-                .next()
-                .unwrap_or("unnamed")
-                .to_string()
+            key_str.rsplit('/').next().unwrap_or("unnamed").to_string()
         } else {
             cfg.name.clone()
         };

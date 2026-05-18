@@ -1,0 +1,13 @@
+http:
+  routers:
+    bench:
+      rule: "PathPrefix(`/`)"
+      entryPoints: ["web"]
+      service: upstream
+
+  services:
+    upstream:
+      loadBalancer:
+        passHostHeader: true
+        servers:
+          - url: "http://127.0.0.1:19090/"

@@ -340,16 +340,10 @@ impl OnDemandTlsResolver {
         let key_path = output_dir.join("key.pem");
 
         let cert_pem = std::fs::read(&cert_path).map_err(|e| {
-            GatewayError::Internal(format!(
-                "on-demand: read cert {}: {e}",
-                cert_path.display()
-            ))
+            GatewayError::Internal(format!("on-demand: read cert {}: {e}", cert_path.display()))
         })?;
         let key_pem = std::fs::read(&key_path).map_err(|e| {
-            GatewayError::Internal(format!(
-                "on-demand: read key {}: {e}",
-                key_path.display()
-            ))
+            GatewayError::Internal(format!("on-demand: read key {}: {e}", key_path.display()))
         })?;
 
         certified_key_from_pem(&cert_pem, &key_pem)
@@ -405,7 +399,10 @@ impl ResolvesServerCert for OnDemandTlsResolver {
         // But the cleanest pattern is: store an mpsc sender and have
         // a receiver loop that calls trigger_issuance. We do that.
 
-        if let Some(ref tx) = *ISSUANCE_TX.lock().unwrap() {
+        if let Some(ref tx) = *ISSUANCE_TX
+            .lock()
+            .expect("ISSUANCE_TX mutex not poisoned: only swapped once at spawn_issuance_loop")
+        {
             let _ = tx.try_send(IssuanceRequest {
                 domain: sni.to_string(),
             });
@@ -431,7 +428,9 @@ static ISSUANCE_TX: std::sync::Mutex<Option<tokio::sync::mpsc::Sender<IssuanceRe
 /// constructing the `OnDemandTlsResolver`.
 pub fn spawn_issuance_loop(resolver: Arc<OnDemandTlsResolver>) {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<IssuanceRequest>(256);
-    *ISSUANCE_TX.lock().unwrap() = Some(tx);
+    *ISSUANCE_TX
+        .lock()
+        .expect("ISSUANCE_TX mutex not poisoned: spawn_issuance_loop is single-shot") = Some(tx);
 
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
@@ -486,9 +485,10 @@ async fn check_ask_endpoint(url: &str, domain: &str) -> Result<bool, GatewayErro
         .build()
         .map_err(|e| GatewayError::Internal(format!("ask endpoint client: {e}")))?;
 
-    let resp = client.get(&full_url).send().await.map_err(|e| {
-        GatewayError::Internal(format!("ask endpoint request to {full_url}: {e}"))
-    })?;
+    let resp =
+        client.get(&full_url).send().await.map_err(|e| {
+            GatewayError::Internal(format!("ask endpoint request to {full_url}: {e}"))
+        })?;
 
     Ok(resp.status().is_success())
 }
@@ -606,8 +606,7 @@ mod tests {
     fn fallback_cert_has_lynxx_org() {
         install_crypto_provider();
         let ck = generate_temp_self_signed("example.com").unwrap();
-        let (_, parsed) =
-            x509_parser::parse_x509_certificate(ck.cert[0].as_ref()).unwrap();
+        let (_, parsed) = x509_parser::parse_x509_certificate(ck.cert[0].as_ref()).unwrap();
         let issuer = parsed.issuer().to_string();
         assert!(
             issuer.contains("Lynxx On-Demand TLS"),

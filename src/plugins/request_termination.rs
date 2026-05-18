@@ -1,8 +1,8 @@
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
-use axum::http::{Request, Response};
 use axum::body::Body;
+use axum::http::{Request, Response};
 
 /// Always short-circuit with a canned response. Useful for maintenance
 /// windows, blocking specific routes, or mocking endpoints during dev. Set

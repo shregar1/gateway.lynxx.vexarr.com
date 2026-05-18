@@ -37,19 +37,11 @@ use uuid::Uuid;
 // ======================================================================
 
 /// Configuration for the embedded ACME server.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AcmeServerConfig {
     /// Master switch. Defaults to `false`.
     #[serde(default)]
     pub acme_server_enabled: bool,
-}
-
-impl Default for AcmeServerConfig {
-    fn default() -> Self {
-        Self {
-            acme_server_enabled: false,
-        }
-    }
 }
 
 // ======================================================================
@@ -134,13 +126,13 @@ impl AcmeServer {
     /// Generate and store a fresh nonce.
     fn new_nonce(&self) -> String {
         let nonce = Uuid::new_v4().to_string();
-        self.nonces.lock().unwrap().insert(nonce.clone());
+        self.nonces.lock().expect("nonces mutex not poisoned: only held in sync HashSet ops").insert(nonce.clone());
         nonce
     }
 
     /// Consume a nonce, returning `true` if it was valid.
     fn consume_nonce(&self, nonce: &str) -> bool {
-        self.nonces.lock().unwrap().remove(nonce)
+        self.nonces.lock().expect("nonces mutex not poisoned: only held in sync HashSet ops").remove(nonce)
     }
 
     /// Sign a CSR (DER bytes) using the intermediate CA and return the
@@ -149,9 +141,8 @@ impl AcmeServer {
         // Parse the intermediate CA.
         let inter_key = KeyPair::from_pem(&self.intermediate_key_pem)
             .map_err(|e| format!("parse intermediate key: {e}"))?;
-        let inter_params =
-            CertificateParams::from_ca_cert_pem(&self.intermediate_cert_pem)
-                .map_err(|e| format!("parse intermediate cert: {e}"))?;
+        let inter_params = CertificateParams::from_ca_cert_pem(&self.intermediate_cert_pem)
+            .map_err(|e| format!("parse intermediate cert: {e}"))?;
         let inter_cert = inter_params
             .self_signed(&inter_key)
             .map_err(|e| format!("reconstruct intermediate cert: {e}"))?;
@@ -159,8 +150,8 @@ impl AcmeServer {
         // Build leaf cert params from the domains (we ignore the CSR's
         // subject because the ACME spec says the server decides the
         // names based on the order, not the CSR).
-        let mut leaf_params = CertificateParams::new(domains.to_vec())
-            .map_err(|e| format!("leaf params: {e}"))?;
+        let mut leaf_params =
+            CertificateParams::new(domains.to_vec()).map_err(|e| format!("leaf params: {e}"))?;
         leaf_params
             .distinguished_name
             .push(DnType::CommonName, domains[0].clone());
@@ -274,12 +265,15 @@ pub struct FinalizeRequest {
 // ======================================================================
 
 /// `GET /acme/directory` — returns the ACME directory JSON.
-pub async fn directory_handler(
-    State(server): State<Arc<AcmeServer>>,
-) -> impl IntoResponse {
+pub async fn directory_handler(State(server): State<Arc<AcmeServer>>) -> impl IntoResponse {
     let nonce = server.new_nonce();
     let mut headers = HeaderMap::new();
-    headers.insert("Replay-Nonce", nonce.parse().unwrap());
+    headers.insert(
+        "Replay-Nonce",
+        nonce
+            .parse()
+            .expect("invariant: UUID v4 string is a valid HeaderValue"),
+    );
 
     let body = DirectoryResponse {
         new_nonce: "/acme/new-nonce".to_string(),
@@ -291,12 +285,15 @@ pub async fn directory_handler(
 }
 
 /// `POST /acme/new-nonce` — returns a fresh nonce in the header.
-pub async fn new_nonce_handler(
-    State(server): State<Arc<AcmeServer>>,
-) -> impl IntoResponse {
+pub async fn new_nonce_handler(State(server): State<Arc<AcmeServer>>) -> impl IntoResponse {
     let nonce = server.new_nonce();
     let mut headers = HeaderMap::new();
-    headers.insert("Replay-Nonce", nonce.parse().unwrap());
+    headers.insert(
+        "Replay-Nonce",
+        nonce
+            .parse()
+            .expect("invariant: UUID v4 string is a valid HeaderValue"),
+    );
     (StatusCode::OK, headers)
 }
 
@@ -307,7 +304,12 @@ pub async fn new_account_handler(
 ) -> impl IntoResponse {
     let nonce = server.new_nonce();
     let mut headers = HeaderMap::new();
-    headers.insert("Replay-Nonce", nonce.parse().unwrap());
+    headers.insert(
+        "Replay-Nonce",
+        nonce
+            .parse()
+            .expect("invariant: UUID v4 string is a valid HeaderValue"),
+    );
 
     let account_id = Uuid::new_v4().to_string();
     let account = Account {
@@ -316,7 +318,11 @@ pub async fn new_account_handler(
         status: "valid".to_string(),
     };
 
-    server.accounts.lock().unwrap().insert(account_id.clone(), account);
+    server
+        .accounts
+        .lock()
+        .expect("accounts mutex not poisoned: only held in sync HashMap ops")
+        .insert(account_id.clone(), account);
 
     let resp = AccountResponse {
         status: "valid".to_string(),
@@ -334,7 +340,12 @@ pub async fn new_order_handler(
 ) -> impl IntoResponse {
     let nonce = server.new_nonce();
     let mut headers = HeaderMap::new();
-    headers.insert("Replay-Nonce", nonce.parse().unwrap());
+    headers.insert(
+        "Replay-Nonce",
+        nonce
+            .parse()
+            .expect("invariant: UUID v4 string is a valid HeaderValue"),
+    );
 
     let domains: Vec<String> = req
         .identifiers
@@ -365,7 +376,11 @@ pub async fn new_order_handler(
         cert_chain_pem: None,
     };
 
-    server.orders.lock().unwrap().insert(order_id.clone(), order);
+    server
+        .orders
+        .lock()
+        .expect("orders mutex not poisoned: only held in sync HashMap ops")
+        .insert(order_id.clone(), order);
 
     let identifiers: Vec<AcmeIdentifier> = domains
         .iter()
@@ -394,7 +409,12 @@ pub async fn finalize_handler(
 ) -> impl IntoResponse {
     let nonce = server.new_nonce();
     let mut headers = HeaderMap::new();
-    headers.insert("Replay-Nonce", nonce.parse().unwrap());
+    headers.insert(
+        "Replay-Nonce",
+        nonce
+            .parse()
+            .expect("invariant: UUID v4 string is a valid HeaderValue"),
+    );
 
     // Decode the CSR.
     let csr_der = match base64_url_decode(&req.csr) {
@@ -408,7 +428,10 @@ pub async fn finalize_handler(
         }
     };
 
-    let mut orders = server.orders.lock().unwrap();
+    let mut orders = server
+        .orders
+        .lock()
+        .expect("orders mutex not poisoned: only held in sync HashMap ops");
     let order = match orders.get_mut(&order_id) {
         Some(o) => o,
         None => {
@@ -469,23 +492,20 @@ pub async fn cert_handler(
     State(server): State<Arc<AcmeServer>>,
     AxumPath(order_id): AxumPath<String>,
 ) -> impl IntoResponse {
-    let orders = server.orders.lock().unwrap();
+    let orders = server
+        .orders
+        .lock()
+        .expect("orders mutex not poisoned: only held in sync HashMap ops");
     match orders.get(&order_id) {
-        Some(order) if order.status == OrderStatus::Valid => {
-            match &order.cert_chain_pem {
-                Some(pem) => (
-                    StatusCode::OK,
-                    [("content-type", "application/pem-certificate-chain")],
-                    pem.clone(),
-                )
-                    .into_response(),
-                None => (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "cert not yet available",
-                )
-                    .into_response(),
-            }
-        }
+        Some(order) if order.status == OrderStatus::Valid => match &order.cert_chain_pem {
+            Some(pem) => (
+                StatusCode::OK,
+                [("content-type", "application/pem-certificate-chain")],
+                pem.clone(),
+            )
+                .into_response(),
+            None => (StatusCode::INTERNAL_SERVER_ERROR, "cert not yet available").into_response(),
+        },
         Some(_) => (StatusCode::FORBIDDEN, "order not finalized").into_response(),
         None => (StatusCode::NOT_FOUND, "no such order").into_response(),
     }
@@ -633,7 +653,10 @@ mod tests {
         assert!(chain_pem.contains("BEGIN CERTIFICATE"));
         // Should contain leaf + intermediate + root = 3 certs.
         let cert_count = chain_pem.matches("BEGIN CERTIFICATE").count();
-        assert_eq!(cert_count, 3, "chain should have 3 certs (leaf + inter + root)");
+        assert_eq!(
+            cert_count, 3,
+            "chain should have 3 certs (leaf + inter + root)"
+        );
 
         // Verify the leaf cert is parseable and has the right domain.
         let mut cursor = std::io::Cursor::new(chain_pem.as_bytes());
@@ -643,8 +666,7 @@ mod tests {
                 .unwrap();
         assert_eq!(certs.len(), 3);
 
-        let (_, leaf) =
-            x509_parser::parse_x509_certificate(certs[0].as_ref()).unwrap();
+        let (_, leaf) = x509_parser::parse_x509_certificate(certs[0].as_ref()).unwrap();
         let cn = leaf.subject().to_string();
         assert!(
             cn.contains("internal.example.com"),
@@ -668,8 +690,7 @@ mod tests {
             rustls_pemfile::certs(&mut cursor)
                 .collect::<Result<Vec<_>, _>>()
                 .unwrap();
-        let (_, leaf) =
-            x509_parser::parse_x509_certificate(certs[0].as_ref()).unwrap();
+        let (_, leaf) = x509_parser::parse_x509_certificate(certs[0].as_ref()).unwrap();
         let cn = leaf.subject().to_string();
         assert!(cn.contains("api.internal.dev"), "CN: {cn}");
     }
@@ -683,10 +704,8 @@ mod tests {
 
     #[test]
     fn test_base64_url_decode() {
-        let encoded = base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            b"hello",
-        );
+        let encoded =
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, b"hello");
         let decoded = base64_url_decode(&encoded).unwrap();
         assert_eq!(decoded, b"hello");
     }

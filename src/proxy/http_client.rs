@@ -137,7 +137,7 @@ impl TowerService<Name> for CachingDnsResolver {
             let lookup = resolver
                 .lookup_ip(host.as_str())
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+                .map_err(std::io::Error::other)?;
             // Port 0 — the connector fills it in from the URL.
             let addrs: Vec<SocketAddr> = lookup.iter().map(|ip| SocketAddr::new(ip, 0)).collect();
             Ok(ResolvedAddrs(addrs.into_iter()))

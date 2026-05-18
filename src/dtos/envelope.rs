@@ -23,7 +23,12 @@ pub struct ApiErrorDetail {
 }
 
 impl<T: Serialize> ApiEnvelope<T> {
-    pub fn success(data: T, transaction_urn: String, timestamp: String, reference_urn: String) -> Self {
+    pub fn success(
+        data: T,
+        transaction_urn: String,
+        timestamp: String,
+        reference_urn: String,
+    ) -> Self {
         Self {
             transaction_urn,
             status: "SUCCESS".into(),

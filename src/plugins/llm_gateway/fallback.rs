@@ -8,11 +8,11 @@
 //! returns the first successful 200 OK response.
 
 use super::config::ProviderCfg;
+use futures_util::future::{select_all, BoxFuture};
+use futures_util::FutureExt;
+use http;
 use reqwest::Client;
 use std::time::Duration;
-use http;
-use futures_util::future::{BoxFuture, select_all};
-use futures_util::FutureExt;
 
 /// Outcome of a single dispatch.
 pub struct DispatchResult {
@@ -51,8 +51,10 @@ pub async fn dispatch(
         if i > 0 {
             on_fallback(&providers[i - 1].name, &p.name);
         }
-        
-        let dr = match dispatch_single(client, p, path, method, forwarded_headers, body, i as u32).await {
+
+        let dr = match dispatch_single(client, p, path, method, forwarded_headers, body, i as u32)
+            .await
+        {
             Ok(dr) => dr,
             Err(e) => {
                 tracing::warn!(provider = %p.name, error = %e, "llm-gateway: provider request failed; trying next");
@@ -60,7 +62,9 @@ pub async fn dispatch(
                     http::Response::builder()
                         .status(502)
                         .header("Content-Type", "application/json")
-                        .body(format!(r#"{{"error":{{"code":"upstream_error","message":"{e}"}}}}"#))
+                        .body(format!(
+                            r#"{{"error":{{"code":"upstream_error","message":"{e}"}}}}"#
+                        ))
                         .unwrap(),
                 );
                 last = Some(DispatchResult {
@@ -114,17 +118,18 @@ pub async fn dispatch_hedged(
         let method = method.clone();
         let headers = forwarded_headers.to_vec();
         let body = body.to_vec();
-        
-        futures.push(async move {
-            dispatch_single(&client, &p, &path, &method, &headers, &body, 0).await
-        }.boxed());
+
+        futures.push(
+            async move { dispatch_single(&client, &p, &path, &method, &headers, &body, 0).await }
+                .boxed(),
+        );
     }
 
     let mut remaining = futures;
     while !remaining.is_empty() {
         let (result, _index, others) = select_all(remaining).await;
         remaining = others;
-        
+
         match result {
             Ok(dr) if dr.status == 200 => {
                 tracing::info!(provider = %dr.provider, "llm-gateway: hedge winner");

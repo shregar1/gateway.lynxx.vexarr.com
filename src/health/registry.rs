@@ -202,12 +202,21 @@ impl HealthRegistry {
     /// Reset a circuit breaker when the upstream configuration has changed
     /// (URL, targets, etc.). Returns true if a reset actually happened
     /// (i.e. the circuit was not already Closed with zero failures).
-    pub fn reset_on_upstream_change(&self, service_id: &Uuid, service_name: &str, reason: &str) -> bool {
-        let needs_reset = self.entries.get(service_id).map(|e| {
-            e.circuit != CircuitState::Closed
-                || e.consecutive_failures > 0
-                || e.status == HealthStatus::Unhealthy
-        }).unwrap_or(false);
+    pub fn reset_on_upstream_change(
+        &self,
+        service_id: &Uuid,
+        service_name: &str,
+        reason: &str,
+    ) -> bool {
+        let needs_reset = self
+            .entries
+            .get(service_id)
+            .map(|e| {
+                e.circuit != CircuitState::Closed
+                    || e.consecutive_failures > 0
+                    || e.status == HealthStatus::Unhealthy
+            })
+            .unwrap_or(false);
 
         if needs_reset {
             self.reset_circuit(service_id);

@@ -114,7 +114,7 @@ impl WasmConfig {
     /// rounding up so the operator's intent is honored even on
     /// non-page-aligned values.
     pub fn memory_pages(&self) -> u32 {
-        let pages = (self.memory_max_kb + 63) / 64;
+        let pages = self.memory_max_kb.div_ceil(64);
         pages.max(1)
     }
 }

@@ -269,6 +269,33 @@ fn load_module_bytes(cfg: &WasmConfig) -> Result<Vec<u8>, GatewayError> {
     ))
 }
 
+/// Map wasmtime errors to `PluginError::Internal` with a stable message
+/// so the dashboard can surface them consistently. Out-of-fuel and
+/// epoch interruption are the two canonical resource exhaustion cases;
+/// everything else is bucketed as a generic trap.
+fn classify_trap(err: anyhow::Error, ctx: &str) -> PluginError {
+    use wasmtime::Trap;
+    let msg = err.to_string();
+    if let Some(trap) = err.downcast_ref::<Trap>() {
+        match trap {
+            Trap::OutOfFuel => return PluginError::Internal("wasm out of fuel".into()),
+            Trap::Interrupt => {
+                return PluginError::Internal("wasm wall-time exceeded".into());
+            }
+            _ => {}
+        }
+    }
+    // Some traps also surface via the message text, especially when
+    // wrapped through `anyhow`. Fall back to substring matching.
+    if msg.contains("all fuel consumed") {
+        return PluginError::Internal("wasm out of fuel".into());
+    }
+    if msg.contains("epoch deadline") || msg.contains("interrupt") {
+        return PluginError::Internal("wasm wall-time exceeded".into());
+    }
+    PluginError::Internal(format!("wasm {ctx} trap: {msg}"))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────
 #[cfg(test)]
 mod tests {
@@ -413,31 +440,4 @@ mod tests {
         let s = format!("{err}");
         assert!(s.contains("WebAssembly") || s.contains("magic"), "got: {s}");
     }
-}
-
-/// Map wasmtime errors to `PluginError::Internal` with a stable message
-/// so the dashboard can surface them consistently. Out-of-fuel and
-/// epoch interruption are the two canonical resource exhaustion cases;
-/// everything else is bucketed as a generic trap.
-fn classify_trap(err: anyhow::Error, ctx: &str) -> PluginError {
-    use wasmtime::Trap;
-    let msg = err.to_string();
-    if let Some(trap) = err.downcast_ref::<Trap>() {
-        match trap {
-            Trap::OutOfFuel => return PluginError::Internal("wasm out of fuel".into()),
-            Trap::Interrupt => {
-                return PluginError::Internal("wasm wall-time exceeded".into());
-            }
-            _ => {}
-        }
-    }
-    // Some traps also surface via the message text, especially when
-    // wrapped through `anyhow`. Fall back to substring matching.
-    if msg.contains("all fuel consumed") {
-        return PluginError::Internal("wasm out of fuel".into());
-    }
-    if msg.contains("epoch deadline") || msg.contains("interrupt") {
-        return PluginError::Internal("wasm wall-time exceeded".into());
-    }
-    PluginError::Internal(format!("wasm {ctx} trap: {msg}"))
 }

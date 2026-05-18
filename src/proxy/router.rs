@@ -257,13 +257,12 @@ impl RouteTable {
                 let method_matches =
                     route.methods.is_empty() || route.methods.iter().any(|m| m == method);
                 let host_matches = route.hosts.is_empty()
-                    || host.map_or(false, |h| {
-                        route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h))
-                    });
-                let headers_match = route.headers.is_empty()
-                    || match_headers(&route.headers, req_headers);
-                let query_match = route.query_params.is_empty()
-                    || match_query(&route.query_params, query_string);
+                    || host
+                        .is_some_and(|h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+                let headers_match =
+                    route.headers.is_empty() || match_headers(&route.headers, req_headers);
+                let query_match =
+                    route.query_params.is_empty() || match_query(&route.query_params, query_string);
                 if method_matches && host_matches && headers_match && query_match {
                     if let Some(service) = self.get_service(&route.service_id) {
                         return Some((route.clone(), service));
@@ -311,9 +310,7 @@ impl RouteTable {
             }
 
             let host_matches = route.hosts.is_empty()
-                || host.map_or(false, |h| {
-                    route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h))
-                });
+                || host.is_some_and(|h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
 
             if !host_matches {
                 continue;
@@ -358,8 +355,7 @@ impl RouteTable {
         if route.strip_path {
             for prefix in &route.paths {
                 let prefix = prefix.trim_end_matches('*');
-                if original_path.starts_with(prefix) {
-                    let remaining = &original_path[prefix.len()..];
+                if let Some(remaining) = original_path.strip_prefix(prefix) {
                     if remaining.is_empty() || remaining.starts_with('/') {
                         return remaining.to_string();
                     }

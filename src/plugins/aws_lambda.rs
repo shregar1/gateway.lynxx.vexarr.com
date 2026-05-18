@@ -106,7 +106,10 @@ impl Plugin for AwsLambdaPlugin {
                     .map(|v| v as u16)
                     .unwrap_or(200);
                 let b_str = obj.get("body").and_then(|v| v.as_str()).unwrap_or("");
-                let is_b64 = obj.get("isBase64Encoded").and_then(|v| v.as_bool()).unwrap_or(false);
+                let is_b64 = obj
+                    .get("isBase64Encoded")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let b = if is_b64 {
                     base64::engine::general_purpose::STANDARD
                         .decode(b_str)

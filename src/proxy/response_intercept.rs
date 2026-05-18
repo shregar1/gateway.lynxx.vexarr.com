@@ -54,9 +54,7 @@ pub fn evaluate_rules(
 ) -> Option<Response<Body>> {
     for rule in rules {
         // Status match.
-        if !rule.match_status.is_empty()
-            && !rule.match_status.contains(&upstream_status.as_u16())
-        {
+        if !rule.match_status.is_empty() && !rule.match_status.contains(&upstream_status.as_u16()) {
             continue;
         }
         // Header presence match.
@@ -92,16 +90,12 @@ pub fn evaluate_rules(
                 }
                 return Some(resp);
             }
-            ResponseAction::CopyResponse {
-                body,
-                copy_headers,
-            } => {
+            ResponseAction::CopyResponse { body, copy_headers } => {
                 let mut resp = Response::new(Body::from(body.clone()));
                 *resp.status_mut() = upstream_status;
                 for h in copy_headers {
                     if let Some(v) = upstream_headers.get(h.as_str()) {
-                        if let Ok(name) = axum::http::header::HeaderName::from_bytes(h.as_bytes())
-                        {
+                        if let Ok(name) = axum::http::header::HeaderName::from_bytes(h.as_bytes()) {
                             resp.headers_mut().insert(name, v.clone());
                         }
                     }

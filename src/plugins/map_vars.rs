@@ -76,10 +76,7 @@ impl MapVarsPlugin {
                     })
                     .unwrap_or_default();
 
-                let default = def["default"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let default = def["default"].as_str().unwrap_or("").to_string();
 
                 mappings.push(Mapping {
                     output_header: output_header.clone(),
@@ -118,15 +115,12 @@ impl Plugin for MapVarsPlugin {
                     .get(h.as_str())
                     .and_then(|v| v.to_str().ok())
                     .map(|s| s.to_string()),
-                MappingSource::Query(q) => req
-                    .uri()
-                    .query()
-                    .and_then(|qs| {
-                        qs.split('&')
-                            .filter_map(|p| p.split_once('='))
-                            .find(|(k, _)| *k == q.as_str())
-                            .map(|(_, v)| v.to_string())
-                    }),
+                MappingSource::Query(q) => req.uri().query().and_then(|qs| {
+                    qs.split('&')
+                        .filter_map(|p| p.split_once('='))
+                        .find(|(k, _)| *k == q.as_str())
+                        .map(|(_, v)| v.to_string())
+                }),
             };
 
             let resolved = source_value

@@ -21,6 +21,7 @@ use crate::recording::{
     redact, ContentAddressedStore, RecordedRequest, RecordedResponse, Recording, RecordingIndexRow,
 };
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::{HeaderValue, Request, Response};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
@@ -29,7 +30,6 @@ use dashmap::DashMap;
 use http_body_util::BodyExt;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use axum::body::Body;
 
 /// Header used to thread the pending capture id from request to response.
 const HDR_CAPTURE_ID: &str = "x-lynxx-recorder-id";
@@ -117,8 +117,7 @@ impl Plugin for RequestRecorderPlugin {
 
         // Drain the request body so we can both record it and rebuild the
         // request for downstream consumers.
-        let (parts, body) =
-            std::mem::replace(req, Request::new(Body::empty())).into_parts();
+        let (parts, body) = std::mem::replace(req, Request::new(Body::empty())).into_parts();
         let body_bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
             Err(e) => {
@@ -160,12 +159,16 @@ impl Plugin for RequestRecorderPlugin {
             .get("x-consumer-username")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let (mc_service, mc_route, mc_upstream, mc_consumer) = match_ctx.map(|c| (
-            Some(c.service_id),
-            Some(c.route_id),
-            c.upstream_url,
-            c.consumer_username.or(consumer_from_header.clone()),
-        )).unwrap_or((None, None, String::new(), consumer_from_header));
+        let (mc_service, mc_route, mc_upstream, mc_consumer) = match_ctx
+            .map(|c| {
+                (
+                    Some(c.service_id),
+                    Some(c.route_id),
+                    c.upstream_url,
+                    c.consumer_username.or(consumer_from_header.clone()),
+                )
+            })
+            .unwrap_or((None, None, String::new(), consumer_from_header));
 
         let pending_capture = PendingCapture {
             method: parts.method.as_str().to_string(),
@@ -224,8 +227,7 @@ impl Plugin for RequestRecorderPlugin {
 
         // Drain the response body so we can both record it and rebuild the
         // response for downstream consumers.
-        let (parts, body) =
-            std::mem::replace(resp, Response::new(Body::empty())).into_parts();
+        let (parts, body) = std::mem::replace(resp, Response::new(Body::empty())).into_parts();
         let body_bytes = match body.collect().await {
             Ok(c) => c.to_bytes(),
             Err(e) => {
@@ -348,234 +350,997 @@ mod tests {
 
     #[async_trait]
     impl Repository for StubRepo {
-        async fn list_services(&self) -> Result<Vec<crate::models::Service>, GatewayError> { Ok(vec![]) }
-        async fn get_service(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Service>, GatewayError> { Ok(None) }
-        async fn get_service_by_name(&self, _name: &str) -> Result<Option<crate::models::Service>, GatewayError> { Ok(None) }
-        async fn create_service(&self, _svc: &crate::models::Service) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_service(&self, _id: &uuid::Uuid, _svc: &crate::models::Service) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_service(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_routes(&self) -> Result<Vec<crate::models::Route>, GatewayError> { Ok(vec![]) }
-        async fn get_route(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Route>, GatewayError> { Ok(None) }
-        async fn create_route(&self, _route: &crate::models::Route) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_route(&self, _id: &uuid::Uuid, _route: &crate::models::Route) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_route(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_plugins(&self) -> Result<Vec<crate::models::PluginInstance>, GatewayError> { Ok(vec![]) }
-        async fn get_plugin(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::PluginInstance>, GatewayError> { Ok(None) }
-        async fn create_plugin(&self, _plugin: &crate::models::PluginInstance) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_plugin(&self, _id: &uuid::Uuid, _plugin: &crate::models::PluginInstance) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_plugin(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_consumers(&self) -> Result<Vec<crate::models::Consumer>, GatewayError> { Ok(vec![]) }
-        async fn create_consumer(&self, _consumer: &crate::models::Consumer) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_consumer(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_targets(&self) -> Result<Vec<crate::models::Target>, GatewayError> { Ok(vec![]) }
-        async fn list_targets_for_service(&self, _id: &uuid::Uuid) -> Result<Vec<crate::models::Target>, GatewayError> { Ok(vec![]) }
-        async fn get_target(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Target>, GatewayError> { Ok(None) }
-        async fn create_target(&self, _t: &crate::models::Target) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_target(&self, _id: &uuid::Uuid, _t: &crate::models::Target) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_target(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn update_target_state(&self, _id: &uuid::Uuid, _state: &str) -> Result<bool, GatewayError> { Ok(false) }
-        async fn is_empty(&self) -> Result<bool, GatewayError> { Ok(true) }
-        async fn seed_from_config(&self, _config: &crate::config::GatewayConfig) -> Result<(), GatewayError> { Ok(()) }
-        async fn clear_config_seed(&self) -> Result<(), GatewayError> { Ok(()) }
-        async fn mark_config_source(&self, _s: &[uuid::Uuid], _r: &[uuid::Uuid], _p: &[uuid::Uuid]) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_admin_tokens(&self) -> Result<Vec<crate::auth::AdminToken>, GatewayError> { Ok(vec![]) }
-        async fn get_admin_token_by_hash(&self, _h: &str) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
-        async fn get_admin_token(&self, _id: &uuid::Uuid) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
-        async fn create_admin_token(&self, _t: &crate::db::NewAdminToken) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_admin_token(&self, _id: &uuid::Uuid, _patch: &crate::db::AdminTokenPatch) -> Result<Option<crate::auth::AdminToken>, GatewayError> { Ok(None) }
-        async fn delete_admin_token(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn update_admin_token_last_used(&self, _id: &uuid::Uuid, _ts: chrono::DateTime<Utc>) -> Result<(), GatewayError> { Ok(()) }
-        async fn has_any_admin_token(&self) -> Result<bool, GatewayError> { Ok(false) }
-        async fn append_audit(&self, entry: &crate::audit::NewAuditEntry) -> Result<crate::audit::AuditEntry, GatewayError> {
+        async fn list_services(&self) -> Result<Vec<crate::models::Service>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_service(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Service>, GatewayError> {
+            Ok(None)
+        }
+        async fn get_service_by_name(
+            &self,
+            _name: &str,
+        ) -> Result<Option<crate::models::Service>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_service(&self, _svc: &crate::models::Service) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_service(
+            &self,
+            _id: &uuid::Uuid,
+            _svc: &crate::models::Service,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_service(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_routes(&self) -> Result<Vec<crate::models::Route>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_route(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Route>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_route(&self, _route: &crate::models::Route) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_route(
+            &self,
+            _id: &uuid::Uuid,
+            _route: &crate::models::Route,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_route(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_plugins(&self) -> Result<Vec<crate::models::PluginInstance>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_plugin(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::PluginInstance>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_plugin(
+            &self,
+            _plugin: &crate::models::PluginInstance,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_plugin(
+            &self,
+            _id: &uuid::Uuid,
+            _plugin: &crate::models::PluginInstance,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_plugin(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_consumers(&self) -> Result<Vec<crate::models::Consumer>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn create_consumer(
+            &self,
+            _consumer: &crate::models::Consumer,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_consumer(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_targets(&self) -> Result<Vec<crate::models::Target>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn list_targets_for_service(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::Target>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_target(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Target>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_target(&self, _t: &crate::models::Target) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_target(
+            &self,
+            _id: &uuid::Uuid,
+            _t: &crate::models::Target,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_target(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn update_target_state(
+            &self,
+            _id: &uuid::Uuid,
+            _state: &str,
+        ) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn is_empty(&self) -> Result<bool, GatewayError> {
+            Ok(true)
+        }
+        async fn seed_from_config(
+            &self,
+            _config: &crate::config::GatewayConfig,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn clear_config_seed(&self) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn mark_config_source(
+            &self,
+            _s: &[uuid::Uuid],
+            _r: &[uuid::Uuid],
+            _p: &[uuid::Uuid],
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_admin_tokens(&self) -> Result<Vec<crate::auth::AdminToken>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_admin_token_by_hash(
+            &self,
+            _h: &str,
+        ) -> Result<Option<crate::auth::AdminToken>, GatewayError> {
+            Ok(None)
+        }
+        async fn get_admin_token(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::auth::AdminToken>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_admin_token(
+            &self,
+            _t: &crate::db::NewAdminToken,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_admin_token(
+            &self,
+            _id: &uuid::Uuid,
+            _patch: &crate::db::AdminTokenPatch,
+        ) -> Result<Option<crate::auth::AdminToken>, GatewayError> {
+            Ok(None)
+        }
+        async fn delete_admin_token(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn update_admin_token_last_used(
+            &self,
+            _id: &uuid::Uuid,
+            _ts: chrono::DateTime<Utc>,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn append_audit(
+            &self,
+            entry: &crate::audit::NewAuditEntry,
+        ) -> Result<crate::audit::AuditEntry, GatewayError> {
             Ok(crate::audit::AuditEntry {
-                id: 0, ts: entry.ts, actor_id: entry.actor_id, actor_name: entry.actor_name.clone(), actor_role: entry.actor_role.clone(),
-                action: entry.action.clone(), resource_type: entry.resource_type.clone(), resource_id: entry.resource_id.clone(),
-                diff: entry.diff.clone(), hash: String::new(), prev_hash: None,
+                id: 0,
+                ts: entry.ts,
+                actor_id: entry.actor_id,
+                actor_name: entry.actor_name.clone(),
+                actor_role: entry.actor_role.clone(),
+                action: entry.action.clone(),
+                resource_type: entry.resource_type.clone(),
+                resource_id: entry.resource_id.clone(),
+                diff: entry.diff.clone(),
+                hash: String::new(),
+                prev_hash: None,
             })
         }
-        async fn list_audit(&self, _f: &crate::audit::AuditFilter) -> Result<Vec<crate::audit::AuditEntry>, GatewayError> { Ok(vec![]) }
-        async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> { Ok(None) }
-        fn cluster_bus(&self) -> Arc<dyn crate::cluster::ClusterBus> { unimplemented!("test stub") }
-        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> { Ok(None) }
-        async fn upsert_quota_usage(&self, _period: &str, _calls_total: u64, _calls_rejected: u64) -> Result<(), GatewayError> { Ok(()) }
-        async fn append_recording(&self, _row: &RecordingIndexRow) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_recordings(&self, _f: &crate::recording::RecordingFilter) -> Result<Vec<RecordingIndexRow>, GatewayError> { Ok(vec![]) }
-        async fn get_recording_index(&self, _id: &str) -> Result<Option<RecordingIndexRow>, GatewayError> { Ok(None) }
-        async fn delete_recording(&self, _id: &str) -> Result<bool, GatewayError> { Ok(false) }
-        async fn delete_recordings_before(&self, _ts: chrono::DateTime<chrono::Utc>) -> Result<u64, GatewayError> { Ok(0) }
-        async fn get_device_fingerprint(&self, _customer_id: i64, _hardware_id: &str) -> Result<Option<crate::models::DeviceFingerprint>, GatewayError> { Ok(None) }
-        async fn create_device_fingerprint(&self, _device: &crate::models::DeviceFingerprint) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_device_last_seen(&self, _id: &uuid::Uuid, _ts: chrono::DateTime<chrono::Utc>) -> Result<(), GatewayError> { Ok(()) }
-        async fn create_runtime_grant(&self, _grant: &crate::models::RuntimeGrant) -> Result<(), GatewayError> { Ok(()) }
-        async fn get_runtime_grant_by_token_id(&self, _token_id: &str) -> Result<Option<crate::models::RuntimeGrant>, GatewayError> { Ok(None) }
-        async fn update_grant_heartbeat(&self, _token_id: &str, _ts: chrono::DateTime<chrono::Utc>) -> Result<(), GatewayError> { Ok(()) }
-        async fn revoke_grant(&self, _token_id: &str) -> Result<bool, GatewayError> { Ok(false) }
-        async fn get_api_key_by_prefix(&self, _prefix: &str) -> Result<Option<crate::models::ApiKeyRow>, GatewayError> { Ok(None) }
+        async fn list_audit(
+            &self,
+            _f: &crate::audit::AuditFilter,
+        ) -> Result<Vec<crate::audit::AuditEntry>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> {
+            Ok(None)
+        }
+        fn cluster_bus(&self) -> Arc<dyn crate::cluster::ClusterBus> {
+            unimplemented!("test stub")
+        }
+        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
+            Ok(None)
+        }
+        async fn upsert_quota_usage(
+            &self,
+            _period: &str,
+            _calls_total: u64,
+            _calls_rejected: u64,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn append_recording(&self, _row: &RecordingIndexRow) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_recordings(
+            &self,
+            _f: &crate::recording::RecordingFilter,
+        ) -> Result<Vec<RecordingIndexRow>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_recording_index(
+            &self,
+            _id: &str,
+        ) -> Result<Option<RecordingIndexRow>, GatewayError> {
+            Ok(None)
+        }
+        async fn delete_recording(&self, _id: &str) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn delete_recordings_before(
+            &self,
+            _ts: chrono::DateTime<chrono::Utc>,
+        ) -> Result<u64, GatewayError> {
+            Ok(0)
+        }
+        async fn get_device_fingerprint(
+            &self,
+            _customer_id: i64,
+            _hardware_id: &str,
+        ) -> Result<Option<crate::models::DeviceFingerprint>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_device_fingerprint(
+            &self,
+            _device: &crate::models::DeviceFingerprint,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_device_last_seen(
+            &self,
+            _id: &uuid::Uuid,
+            _ts: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn create_runtime_grant(
+            &self,
+            _grant: &crate::models::RuntimeGrant,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn get_runtime_grant_by_token_id(
+            &self,
+            _token_id: &str,
+        ) -> Result<Option<crate::models::RuntimeGrant>, GatewayError> {
+            Ok(None)
+        }
+        async fn update_grant_heartbeat(
+            &self,
+            _token_id: &str,
+            _ts: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn revoke_grant(&self, _token_id: &str) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn get_api_key_by_prefix(
+            &self,
+            _prefix: &str,
+        ) -> Result<Option<crate::models::ApiKeyRow>, GatewayError> {
+            Ok(None)
+        }
 
         // Projects
-        async fn list_projects(&self) -> Result<Vec<crate::models::Project>, GatewayError> { Ok(vec![]) }
-        async fn get_project(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Project>, GatewayError> { Ok(None) }
-        async fn create_project(&self, _p: &crate::models::Project) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_project(&self, _id: &uuid::Uuid, _p: &crate::models::Project) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_project(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_services_for_project(&self, _id: &uuid::Uuid) -> Result<Vec<crate::models::Service>, GatewayError> { Ok(vec![]) }
+        async fn list_projects(&self) -> Result<Vec<crate::models::Project>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_project(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Project>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_project(&self, _p: &crate::models::Project) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_project(
+            &self,
+            _id: &uuid::Uuid,
+            _p: &crate::models::Project,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_project(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_services_for_project(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::Service>, GatewayError> {
+            Ok(vec![])
+        }
 
         // Cascade soft-delete
-        async fn soft_delete_plugins_for_route(&self, _id: &uuid::Uuid) -> Result<u64, GatewayError> { Ok(0) }
-        async fn soft_delete_plugins_for_service(&self, _id: &uuid::Uuid) -> Result<u64, GatewayError> { Ok(0) }
-        async fn soft_delete_routes_for_service(&self, _id: &uuid::Uuid) -> Result<Vec<uuid::Uuid>, GatewayError> { Ok(vec![]) }
-        async fn soft_delete_targets_for_service(&self, _id: &uuid::Uuid) -> Result<u64, GatewayError> { Ok(0) }
-        async fn soft_delete_services_for_project(&self, _id: &uuid::Uuid) -> Result<Vec<uuid::Uuid>, GatewayError> { Ok(vec![]) }
+        async fn soft_delete_plugins_for_route(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<u64, GatewayError> {
+            Ok(0)
+        }
+        async fn soft_delete_plugins_for_service(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<u64, GatewayError> {
+            Ok(0)
+        }
+        async fn soft_delete_routes_for_service(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Vec<uuid::Uuid>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn soft_delete_targets_for_service(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<u64, GatewayError> {
+            Ok(0)
+        }
+        async fn soft_delete_services_for_project(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Vec<uuid::Uuid>, GatewayError> {
+            Ok(vec![])
+        }
 
         // Logs
-        async fn insert_logs(&self, _entries: &[crate::models::LogEntry]) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_logs(&self, _filter: &crate::db::LogFilter) -> Result<Vec<crate::models::LogEntry>, GatewayError> { Ok(vec![]) }
-        async fn prune_logs(&self, _days: u32) -> Result<u64, GatewayError> { Ok(0) }
+        async fn insert_logs(
+            &self,
+            _entries: &[crate::models::LogEntry],
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_logs(
+            &self,
+            _filter: &crate::db::LogFilter,
+        ) -> Result<Vec<crate::models::LogEntry>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn prune_logs(&self, _days: u32) -> Result<u64, GatewayError> {
+            Ok(0)
+        }
 
         // Analytics
-        async fn upsert_metric_bucket(&self, _b: &crate::models::MetricBucket) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_metric_buckets(&self, _sid: &uuid::Uuid, _from: chrono::DateTime<Utc>, _to: chrono::DateTime<Utc>, _g: &str) -> Result<Vec<crate::models::MetricBucket>, GatewayError> { Ok(vec![]) }
-        async fn upsert_geo_bucket(&self, _b: &crate::models::GeoBucket) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_geo_buckets(&self, _sid: &uuid::Uuid, _from: chrono::DateTime<Utc>, _to: chrono::DateTime<Utc>) -> Result<Vec<crate::models::GeoBucket>, GatewayError> { Ok(vec![]) }
-        async fn upsert_rate_limit_bucket(&self, _b: &crate::models::RateLimitBucket) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_rate_limit_buckets(&self, _sid: &uuid::Uuid, _from: chrono::DateTime<Utc>, _to: chrono::DateTime<Utc>) -> Result<Vec<crate::models::RateLimitBucket>, GatewayError> { Ok(vec![]) }
+        async fn upsert_metric_bucket(
+            &self,
+            _b: &crate::models::MetricBucket,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_metric_buckets(
+            &self,
+            _sid: &uuid::Uuid,
+            _from: chrono::DateTime<Utc>,
+            _to: chrono::DateTime<Utc>,
+            _g: &str,
+        ) -> Result<Vec<crate::models::MetricBucket>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn upsert_geo_bucket(
+            &self,
+            _b: &crate::models::GeoBucket,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_geo_buckets(
+            &self,
+            _sid: &uuid::Uuid,
+            _from: chrono::DateTime<Utc>,
+            _to: chrono::DateTime<Utc>,
+        ) -> Result<Vec<crate::models::GeoBucket>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn upsert_rate_limit_bucket(
+            &self,
+            _b: &crate::models::RateLimitBucket,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_rate_limit_buckets(
+            &self,
+            _sid: &uuid::Uuid,
+            _from: chrono::DateTime<Utc>,
+            _to: chrono::DateTime<Utc>,
+        ) -> Result<Vec<crate::models::RateLimitBucket>, GatewayError> {
+            Ok(vec![])
+        }
 
         // Probes
-        async fn list_probes(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::Probe>, GatewayError> { Ok(vec![]) }
-        async fn get_probe(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Probe>, GatewayError> { Ok(None) }
-        async fn create_probe(&self, _p: &crate::models::Probe) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_probe(&self, _id: &uuid::Uuid, _p: &crate::models::Probe) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_probe(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn append_probe_result(&self, _r: &crate::models::ProbeResult) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_probe_results(&self, _pid: &uuid::Uuid, _limit: u32) -> Result<Vec<crate::models::ProbeResult>, GatewayError> { Ok(vec![]) }
+        async fn list_probes(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::Probe>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_probe(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Probe>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_probe(&self, _p: &crate::models::Probe) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_probe(
+            &self,
+            _id: &uuid::Uuid,
+            _p: &crate::models::Probe,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_probe(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn append_probe_result(
+            &self,
+            _r: &crate::models::ProbeResult,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_probe_results(
+            &self,
+            _pid: &uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<crate::models::ProbeResult>, GatewayError> {
+            Ok(vec![])
+        }
 
         // Snapshots
-        async fn list_snapshots(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::Snapshot>, GatewayError> { Ok(vec![]) }
-        async fn get_snapshot(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Snapshot>, GatewayError> { Ok(None) }
-        async fn create_snapshot(&self, _s: &crate::models::Snapshot) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_snapshot(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_snapshots(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::Snapshot>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_snapshot(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Snapshot>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_snapshot(&self, _s: &crate::models::Snapshot) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_snapshot(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Alerts
-        async fn list_alert_rules(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::AlertRule>, GatewayError> { Ok(vec![]) }
-        async fn get_alert_rule(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::AlertRule>, GatewayError> { Ok(None) }
-        async fn create_alert_rule(&self, _r: &crate::models::AlertRule) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_alert_rule(&self, _id: &uuid::Uuid, _r: &crate::models::AlertRule) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_alert_rule(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_alert_events(&self, _sid: &uuid::Uuid, _limit: u32) -> Result<Vec<crate::models::AlertEvent>, GatewayError> { Ok(vec![]) }
-        async fn create_alert_event(&self, _e: &crate::models::AlertEvent) -> Result<(), GatewayError> { Ok(()) }
-        async fn resolve_alert_event(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_alert_rules(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::AlertRule>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_alert_rule(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::AlertRule>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_alert_rule(
+            &self,
+            _r: &crate::models::AlertRule,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_alert_rule(
+            &self,
+            _id: &uuid::Uuid,
+            _r: &crate::models::AlertRule,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_alert_rule(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_alert_events(
+            &self,
+            _sid: &uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<crate::models::AlertEvent>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn create_alert_event(
+            &self,
+            _e: &crate::models::AlertEvent,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn resolve_alert_event(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // IP Rules
-        async fn list_ip_rules(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::IpRule>, GatewayError> { Ok(vec![]) }
-        async fn get_ip_rule(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::IpRule>, GatewayError> { Ok(None) }
-        async fn create_ip_rule(&self, _r: &crate::models::IpRule) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_ip_rule(&self, _id: &uuid::Uuid, _r: &crate::models::IpRule) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_ip_rule(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_ip_rules(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::IpRule>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_ip_rule(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::IpRule>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_ip_rule(&self, _r: &crate::models::IpRule) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_ip_rule(
+            &self,
+            _id: &uuid::Uuid,
+            _r: &crate::models::IpRule,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_ip_rule(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Error Pages
-        async fn list_error_pages(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::ErrorPage>, GatewayError> { Ok(vec![]) }
-        async fn get_error_page(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::ErrorPage>, GatewayError> { Ok(None) }
-        async fn create_error_page(&self, _p: &crate::models::ErrorPage) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_error_page(&self, _id: &uuid::Uuid, _p: &crate::models::ErrorPage) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_error_page(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_error_pages(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::ErrorPage>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_error_page(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::ErrorPage>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_error_page(
+            &self,
+            _p: &crate::models::ErrorPage,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_error_page(
+            &self,
+            _id: &uuid::Uuid,
+            _p: &crate::models::ErrorPage,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_error_page(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Consumer Groups
-        async fn list_consumer_groups(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::ConsumerGroup>, GatewayError> { Ok(vec![]) }
-        async fn get_consumer_group(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::ConsumerGroup>, GatewayError> { Ok(None) }
-        async fn create_consumer_group(&self, _g: &crate::models::ConsumerGroup) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_consumer_group(&self, _id: &uuid::Uuid, _g: &crate::models::ConsumerGroup) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_consumer_group(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_consumer_group_members(&self, _gid: &uuid::Uuid) -> Result<Vec<crate::models::ConsumerGroupMember>, GatewayError> { Ok(vec![]) }
-        async fn add_consumer_group_member(&self, _m: &crate::models::ConsumerGroupMember) -> Result<(), GatewayError> { Ok(()) }
-        async fn remove_consumer_group_member(&self, _gid: &uuid::Uuid, _cid: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_consumer_groups(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::ConsumerGroup>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_consumer_group(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::ConsumerGroup>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_consumer_group(
+            &self,
+            _g: &crate::models::ConsumerGroup,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_consumer_group(
+            &self,
+            _id: &uuid::Uuid,
+            _g: &crate::models::ConsumerGroup,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_consumer_group(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_consumer_group_members(
+            &self,
+            _gid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::ConsumerGroupMember>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn add_consumer_group_member(
+            &self,
+            _m: &crate::models::ConsumerGroupMember,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn remove_consumer_group_member(
+            &self,
+            _gid: &uuid::Uuid,
+            _cid: &uuid::Uuid,
+        ) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Cache
-        async fn list_cache_entries(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::CacheEntry>, GatewayError> { Ok(vec![]) }
-        async fn get_cache_entry(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::CacheEntry>, GatewayError> { Ok(None) }
-        async fn upsert_cache_entry(&self, _e: &crate::models::CacheEntry) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_cache_entry(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn purge_cache(&self, _sid: &uuid::Uuid) -> Result<u64, GatewayError> { Ok(0) }
-        async fn cache_stats(&self, _sid: &uuid::Uuid) -> Result<crate::models::CacheStats, GatewayError> {
-            Ok(crate::models::CacheStats { service_id: *_sid, total_entries: 0, total_size_bytes: 0, hit_count: 0, miss_count: 0, hit_rate: 0.0, eviction_count: 0 })
+        async fn list_cache_entries(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::CacheEntry>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_cache_entry(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::CacheEntry>, GatewayError> {
+            Ok(None)
+        }
+        async fn upsert_cache_entry(
+            &self,
+            _e: &crate::models::CacheEntry,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_cache_entry(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn purge_cache(&self, _sid: &uuid::Uuid) -> Result<u64, GatewayError> {
+            Ok(0)
+        }
+        async fn cache_stats(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<crate::models::CacheStats, GatewayError> {
+            Ok(crate::models::CacheStats {
+                service_id: *_sid,
+                total_entries: 0,
+                total_size_bytes: 0,
+                hit_count: 0,
+                miss_count: 0,
+                hit_rate: 0.0,
+                eviction_count: 0,
+            })
         }
 
         // Tracing
-        async fn list_traces(&self, _sid: &uuid::Uuid, _limit: u32) -> Result<Vec<crate::models::TraceRecord>, GatewayError> { Ok(vec![]) }
-        async fn get_trace(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::TraceRecord>, GatewayError> { Ok(None) }
-        async fn create_trace(&self, _t: &crate::models::TraceRecord) -> Result<(), GatewayError> { Ok(()) }
-        async fn list_spans(&self, _tid: &str) -> Result<Vec<crate::models::SpanRecord>, GatewayError> { Ok(vec![]) }
-        async fn create_span(&self, _s: &crate::models::SpanRecord) -> Result<(), GatewayError> { Ok(()) }
+        async fn list_traces(
+            &self,
+            _sid: &uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<crate::models::TraceRecord>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_trace(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::TraceRecord>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_trace(&self, _t: &crate::models::TraceRecord) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn list_spans(
+            &self,
+            _tid: &str,
+        ) -> Result<Vec<crate::models::SpanRecord>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn create_span(&self, _s: &crate::models::SpanRecord) -> Result<(), GatewayError> {
+            Ok(())
+        }
 
         // Transforms
-        async fn list_transform_rules(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::TransformRule>, GatewayError> { Ok(vec![]) }
-        async fn get_transform_rule(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::TransformRule>, GatewayError> { Ok(None) }
-        async fn create_transform_rule(&self, _r: &crate::models::TransformRule) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_transform_rule(&self, _id: &uuid::Uuid, _r: &crate::models::TransformRule) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_transform_rule(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_transform_rules(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::TransformRule>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_transform_rule(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::TransformRule>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_transform_rule(
+            &self,
+            _r: &crate::models::TransformRule,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_transform_rule(
+            &self,
+            _id: &uuid::Uuid,
+            _r: &crate::models::TransformRule,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_transform_rule(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // API Versions
-        async fn list_api_versions(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::ApiVersion>, GatewayError> { Ok(vec![]) }
-        async fn get_api_version(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::ApiVersion>, GatewayError> { Ok(None) }
-        async fn create_api_version(&self, _v: &crate::models::ApiVersion) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_api_version(&self, _id: &uuid::Uuid, _v: &crate::models::ApiVersion) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_api_version(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_api_versions(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::ApiVersion>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_api_version(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::ApiVersion>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_api_version(
+            &self,
+            _v: &crate::models::ApiVersion,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_api_version(
+            &self,
+            _id: &uuid::Uuid,
+            _v: &crate::models::ApiVersion,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_api_version(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Incidents
-        async fn list_incidents(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::Incident>, GatewayError> { Ok(vec![]) }
-        async fn get_incident(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Incident>, GatewayError> { Ok(None) }
-        async fn create_incident(&self, _i: &crate::models::Incident) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_incident(&self, _id: &uuid::Uuid, _i: &crate::models::Incident) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_incident(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_incident_updates(&self, _iid: &uuid::Uuid) -> Result<Vec<crate::models::IncidentUpdate>, GatewayError> { Ok(vec![]) }
-        async fn create_incident_update(&self, _u: &crate::models::IncidentUpdate) -> Result<(), GatewayError> { Ok(()) }
+        async fn list_incidents(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::Incident>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_incident(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Incident>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_incident(&self, _i: &crate::models::Incident) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_incident(
+            &self,
+            _id: &uuid::Uuid,
+            _i: &crate::models::Incident,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_incident(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_incident_updates(
+            &self,
+            _iid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::IncidentUpdate>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn create_incident_update(
+            &self,
+            _u: &crate::models::IncidentUpdate,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
 
         // Webhooks
-        async fn list_webhooks(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::Webhook>, GatewayError> { Ok(vec![]) }
-        async fn get_webhook(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Webhook>, GatewayError> { Ok(None) }
-        async fn create_webhook(&self, _w: &crate::models::Webhook) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_webhook(&self, _id: &uuid::Uuid, _w: &crate::models::Webhook) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_webhook(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
-        async fn list_webhook_deliveries(&self, _wid: &uuid::Uuid, _limit: u32) -> Result<Vec<crate::models::WebhookDelivery>, GatewayError> { Ok(vec![]) }
-        async fn create_webhook_delivery(&self, _d: &crate::models::WebhookDelivery) -> Result<(), GatewayError> { Ok(()) }
+        async fn list_webhooks(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::Webhook>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_webhook(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Webhook>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_webhook(&self, _w: &crate::models::Webhook) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_webhook(
+            &self,
+            _id: &uuid::Uuid,
+            _w: &crate::models::Webhook,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_webhook(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
+        async fn list_webhook_deliveries(
+            &self,
+            _wid: &uuid::Uuid,
+            _limit: u32,
+        ) -> Result<Vec<crate::models::WebhookDelivery>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn create_webhook_delivery(
+            &self,
+            _d: &crate::models::WebhookDelivery,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
 
         // Load Tests
-        async fn list_load_tests(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::LoadTest>, GatewayError> { Ok(vec![]) }
-        async fn get_load_test(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::LoadTest>, GatewayError> { Ok(None) }
-        async fn create_load_test(&self, _t: &crate::models::LoadTest) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_load_test(&self, _id: &uuid::Uuid, _t: &crate::models::LoadTest) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_load_test(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_load_tests(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::LoadTest>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_load_test(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::LoadTest>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_load_test(&self, _t: &crate::models::LoadTest) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_load_test(
+            &self,
+            _id: &uuid::Uuid,
+            _t: &crate::models::LoadTest,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_load_test(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Marketplace
-        async fn list_marketplace_plugins(&self) -> Result<Vec<crate::models::MarketplacePlugin>, GatewayError> { Ok(vec![]) }
-        async fn get_marketplace_plugin(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::MarketplacePlugin>, GatewayError> { Ok(None) }
-        async fn create_marketplace_plugin(&self, _p: &crate::models::MarketplacePlugin) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_marketplace_plugin(&self, _id: &uuid::Uuid, _p: &crate::models::MarketplacePlugin) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_marketplace_plugin(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_marketplace_plugins(
+            &self,
+        ) -> Result<Vec<crate::models::MarketplacePlugin>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_marketplace_plugin(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::MarketplacePlugin>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_marketplace_plugin(
+            &self,
+            _p: &crate::models::MarketplacePlugin,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_marketplace_plugin(
+            &self,
+            _id: &uuid::Uuid,
+            _p: &crate::models::MarketplacePlugin,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_marketplace_plugin(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Cost
-        async fn list_cost_records(&self, _sid: &uuid::Uuid, _from: chrono::DateTime<Utc>, _to: chrono::DateTime<Utc>) -> Result<Vec<crate::models::CostRecord>, GatewayError> { Ok(vec![]) }
-        async fn upsert_cost_record(&self, _r: &crate::models::CostRecord) -> Result<(), GatewayError> { Ok(()) }
+        async fn list_cost_records(
+            &self,
+            _sid: &uuid::Uuid,
+            _from: chrono::DateTime<Utc>,
+            _to: chrono::DateTime<Utc>,
+        ) -> Result<Vec<crate::models::CostRecord>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn upsert_cost_record(
+            &self,
+            _r: &crate::models::CostRecord,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
 
         // Cluster
-        async fn list_cluster_nodes(&self) -> Result<Vec<crate::models::ClusterNode>, GatewayError> { Ok(vec![]) }
-        async fn get_cluster_node(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::ClusterNode>, GatewayError> { Ok(None) }
-        async fn upsert_cluster_node(&self, _n: &crate::models::ClusterNode) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_cluster_node(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_cluster_nodes(
+            &self,
+        ) -> Result<Vec<crate::models::ClusterNode>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_cluster_node(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::ClusterNode>, GatewayError> {
+            Ok(None)
+        }
+        async fn upsert_cluster_node(
+            &self,
+            _n: &crate::models::ClusterNode,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_cluster_node(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Rate Limit Simulator
-        async fn list_rate_limit_simulations(&self, _sid: &uuid::Uuid) -> Result<Vec<crate::models::RateLimitSimulation>, GatewayError> { Ok(vec![]) }
-        async fn create_rate_limit_simulation(&self, _s: &crate::models::RateLimitSimulation) -> Result<(), GatewayError> { Ok(()) }
-        async fn get_rate_limit_simulation(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::RateLimitSimulation>, GatewayError> { Ok(None) }
+        async fn list_rate_limit_simulations(
+            &self,
+            _sid: &uuid::Uuid,
+        ) -> Result<Vec<crate::models::RateLimitSimulation>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn create_rate_limit_simulation(
+            &self,
+            _s: &crate::models::RateLimitSimulation,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn get_rate_limit_simulation(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::RateLimitSimulation>, GatewayError> {
+            Ok(None)
+        }
 
         // PKI
-        async fn list_certificates(&self, _sid: Option<&uuid::Uuid>) -> Result<Vec<crate::models::Certificate>, GatewayError> { Ok(vec![]) }
-        async fn get_certificate(&self, _id: &uuid::Uuid) -> Result<Option<crate::models::Certificate>, GatewayError> { Ok(None) }
-        async fn create_certificate(&self, _c: &crate::models::Certificate) -> Result<(), GatewayError> { Ok(()) }
-        async fn update_certificate(&self, _id: &uuid::Uuid, _c: &crate::models::Certificate) -> Result<(), GatewayError> { Ok(()) }
-        async fn delete_certificate(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> { Ok(false) }
+        async fn list_certificates(
+            &self,
+            _sid: Option<&uuid::Uuid>,
+        ) -> Result<Vec<crate::models::Certificate>, GatewayError> {
+            Ok(vec![])
+        }
+        async fn get_certificate(
+            &self,
+            _id: &uuid::Uuid,
+        ) -> Result<Option<crate::models::Certificate>, GatewayError> {
+            Ok(None)
+        }
+        async fn create_certificate(
+            &self,
+            _c: &crate::models::Certificate,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn update_certificate(
+            &self,
+            _id: &uuid::Uuid,
+            _c: &crate::models::Certificate,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
+        async fn delete_certificate(&self, _id: &uuid::Uuid) -> Result<bool, GatewayError> {
+            Ok(false)
+        }
 
         // Consumer update
-        async fn update_consumer(&self, _id: &uuid::Uuid, _c: &crate::models::Consumer) -> Result<(), GatewayError> { Ok(()) }
+        async fn update_consumer(
+            &self,
+            _id: &uuid::Uuid,
+            _c: &crate::models::Consumer,
+        ) -> Result<(), GatewayError> {
+            Ok(())
+        }
     }
 
     #[tokio::test]

@@ -13,10 +13,7 @@ impl VersionService {
         Self { repo }
     }
 
-    pub async fn list(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<ApiVersion>, GatewayError> {
+    pub async fn list(&self, service_id: &Uuid) -> Result<Vec<ApiVersion>, GatewayError> {
         self.repo.list_api_versions(service_id).await
     }
 

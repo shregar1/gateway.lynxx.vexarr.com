@@ -4,16 +4,15 @@ use crate::cluster::postgres::PostgresBus;
 use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::db::sqlite::seed_from_config_generic;
+use crate::db::LogFilter;
 use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
-use crate::db::LogFilter;
 use crate::models::{
-    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate,
-    ClusterNode, Consumer, ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage,
-    GeoBucket, Incident, IncidentUpdate, IpRule, LoadTest, LogEntry, MarketplacePlugin,
-    MetricBucket, PluginInstance, Probe, ProbeResult, Project, RateLimitBucket,
-    RateLimitSimulation, Route, Service, Snapshot, SpanRecord, Target, TraceRecord,
-    TransformRule, Webhook, WebhookDelivery,
+    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate, ClusterNode, Consumer,
+    ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage, GeoBucket, Incident, IncidentUpdate,
+    IpRule, LoadTest, LogEntry, MarketplacePlugin, MetricBucket, PluginInstance, Probe,
+    ProbeResult, Project, RateLimitBucket, RateLimitSimulation, Route, Service, Snapshot,
+    SpanRecord, Target, TraceRecord, TransformRule, Webhook, WebhookDelivery,
 };
 use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
@@ -328,10 +327,12 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE targets SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE targets SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -421,10 +422,11 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_route(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE routes SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE routes SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -487,10 +489,12 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE plugins SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE plugins SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -535,10 +539,7 @@ impl Repository for PostgresRepository {
 
     // ---------- cascade soft-delete ----------
 
-    async fn soft_delete_plugins_for_route(
-        &self,
-        route_id: &Uuid,
-    ) -> Result<u64, GatewayError> {
+    async fn soft_delete_plugins_for_route(&self, route_id: &Uuid) -> Result<u64, GatewayError> {
         let result = sqlx::query(
             "UPDATE plugins SET is_deleted = TRUE WHERE route_id = $1 AND is_deleted = FALSE",
         )
@@ -565,12 +566,11 @@ impl Repository for PostgresRepository {
         &self,
         service_id: &Uuid,
     ) -> Result<Vec<Uuid>, GatewayError> {
-        let rows: Vec<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM routes WHERE service_id = $1 AND is_deleted = FALSE",
-        )
-        .bind(service_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM routes WHERE service_id = $1 AND is_deleted = FALSE")
+                .bind(service_id)
+                .fetch_all(&self.pool)
+                .await?;
 
         let ids: Vec<Uuid> = rows.iter().map(|(id,)| *id).collect();
 
@@ -601,12 +601,11 @@ impl Repository for PostgresRepository {
         &self,
         project_id: &Uuid,
     ) -> Result<Vec<Uuid>, GatewayError> {
-        let rows: Vec<(Uuid,)> = sqlx::query_as(
-            "SELECT id FROM services WHERE project_id = $1 AND is_deleted = FALSE",
-        )
-        .bind(project_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(Uuid,)> =
+            sqlx::query_as("SELECT id FROM services WHERE project_id = $1 AND is_deleted = FALSE")
+                .bind(project_id)
+                .fetch_all(&self.pool)
+                .await?;
 
         let ids: Vec<Uuid> = rows.iter().map(|(id,)| *id).collect();
 
@@ -798,9 +797,10 @@ impl Repository for PostgresRepository {
     }
 
     async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens WHERE is_deleted = FALSE")
-            .fetch_one(&self.pool)
-            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens WHERE is_deleted = FALSE")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count > 0)
     }
 
@@ -850,7 +850,11 @@ impl Repository for PostgresRepository {
 
     async fn list_audit(&self, filter: &AuditFilter) -> Result<Vec<AuditEntry>, GatewayError> {
         let limit = filter.effective_limit() as i64;
-        let diff_col = if filter.include_diff { "diff" } else { "NULL::jsonb AS diff" };
+        let diff_col = if filter.include_diff {
+            "diff"
+        } else {
+            "NULL::jsonb AS diff"
+        };
         let mut sql = format!(
             "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, {diff_col}, hash, prev_hash FROM audit_log WHERE TRUE",
         );
@@ -1016,18 +1020,22 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_recording(&self, id: &str) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE recordings SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE recordings SET is_deleted = TRUE WHERE id = $1 AND is_deleted = FALSE",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
     async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError> {
-        let result = sqlx::query("UPDATE recordings SET is_deleted = TRUE WHERE ts < $1 AND is_deleted = FALSE")
-            .bind(ts)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE recordings SET is_deleted = TRUE WHERE ts < $1 AND is_deleted = FALSE",
+        )
+        .bind(ts)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected())
     }
 
@@ -1133,11 +1141,13 @@ impl Repository for PostgresRepository {
     }
 
     async fn revoke_grant(&self, token_id: &str) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE runtime_grants SET revoked_at = $1 WHERE token_id = $2 AND revoked_at IS NULL")
-            .bind(Utc::now())
-            .bind(token_id)
-            .execute(&self.pool)
-            .await?;
+        let result = sqlx::query(
+            "UPDATE runtime_grants SET revoked_at = $1 WHERE token_id = $2 AND revoked_at IS NULL",
+        )
+        .bind(Utc::now())
+        .bind(token_id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -1309,20 +1319,34 @@ impl Repository for PostgresRepository {
             "INSERT INTO metric_buckets (id, service_id, route_id, bucket_ts, granularity, \
              total_requests, success_count, error_4xx, error_5xx, total_latency_ms, \
              min_latency_ms, max_latency_ms, bytes_in, bytes_out) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
         )
-        .bind(b.id).bind(b.service_id).bind(b.route_id)
-        .bind(b.bucket_ts).bind(&b.granularity)
-        .bind(b.total_requests as i32).bind(b.success_count as i32)
-        .bind(b.error_4xx as i32).bind(b.error_5xx as i32)
-        .bind(b.total_latency_ms).bind(b.min_latency_ms.map(|v| v as i32))
+        .bind(b.id)
+        .bind(b.service_id)
+        .bind(b.route_id)
+        .bind(b.bucket_ts)
+        .bind(&b.granularity)
+        .bind(b.total_requests as i32)
+        .bind(b.success_count as i32)
+        .bind(b.error_4xx as i32)
+        .bind(b.error_5xx as i32)
+        .bind(b.total_latency_ms)
+        .bind(b.min_latency_ms.map(|v| v as i32))
         .bind(b.max_latency_ms.map(|v| v as i32))
-        .bind(b.bytes_in).bind(b.bytes_out)
-        .execute(&self.pool).await?;
+        .bind(b.bytes_in)
+        .bind(b.bytes_out)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    async fn list_metric_buckets(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>, granularity: &str) -> Result<Vec<MetricBucket>, GatewayError> {
+    async fn list_metric_buckets(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        granularity: &str,
+    ) -> Result<Vec<MetricBucket>, GatewayError> {
         let rows = sqlx::query("SELECT * FROM metric_buckets WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 AND granularity = $4 ORDER BY bucket_ts")
             .bind(service_id).bind(from).bind(to).bind(granularity)
             .fetch_all(&self.pool).await?;
@@ -1337,7 +1361,12 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn list_geo_buckets(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<GeoBucket>, GatewayError> {
+    async fn list_geo_buckets(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<GeoBucket>, GatewayError> {
         let rows = sqlx::query("SELECT * FROM geo_buckets WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 ORDER BY bucket_ts")
             .bind(service_id).bind(from).bind(to)
             .fetch_all(&self.pool).await?;
@@ -1352,7 +1381,12 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn list_rate_limit_buckets(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<RateLimitBucket>, GatewayError> {
+    async fn list_rate_limit_buckets(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<RateLimitBucket>, GatewayError> {
         let rows = sqlx::query("SELECT * FROM rate_limit_buckets WHERE service_id = $1 AND bucket_ts >= $2 AND bucket_ts <= $3 ORDER BY bucket_ts")
             .bind(service_id).bind(from).bind(to)
             .fetch_all(&self.pool).await?;
@@ -1363,13 +1397,17 @@ impl Repository for PostgresRepository {
 
     async fn list_probes(&self, service_id: &Uuid) -> Result<Vec<Probe>, GatewayError> {
         let rows = sqlx::query("SELECT * FROM probes WHERE service_id = $1 ORDER BY created_at")
-            .bind(service_id).fetch_all(&self.pool).await?;
+            .bind(service_id)
+            .fetch_all(&self.pool)
+            .await?;
         rows.into_iter().map(row_to_probe).collect()
     }
 
     async fn get_probe(&self, id: &Uuid) -> Result<Option<Probe>, GatewayError> {
         let row = sqlx::query("SELECT * FROM probes WHERE id = $1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(row_to_probe).transpose()
     }
 
@@ -1393,7 +1431,10 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_probe(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM probes WHERE id = $1").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM probes WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -1405,24 +1446,37 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn list_probe_results(&self, probe_id: &Uuid, limit: u32) -> Result<Vec<ProbeResult>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM probe_results WHERE probe_id = $1 ORDER BY ts DESC LIMIT $2")
-            .bind(probe_id).bind(limit as i64)
-            .fetch_all(&self.pool).await?;
+    async fn list_probe_results(
+        &self,
+        probe_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<ProbeResult>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT * FROM probe_results WHERE probe_id = $1 ORDER BY ts DESC LIMIT $2",
+        )
+        .bind(probe_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_probe_result).collect()
     }
 
     // ── Snapshots ──
 
     async fn list_snapshots(&self, service_id: &Uuid) -> Result<Vec<Snapshot>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM snapshots WHERE service_id = $1 ORDER BY created_at DESC")
-            .bind(service_id).fetch_all(&self.pool).await?;
+        let rows =
+            sqlx::query("SELECT * FROM snapshots WHERE service_id = $1 ORDER BY created_at DESC")
+                .bind(service_id)
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_snapshot).collect()
     }
 
     async fn get_snapshot(&self, id: &Uuid) -> Result<Option<Snapshot>, GatewayError> {
         let row = sqlx::query("SELECT * FROM snapshots WHERE id = $1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(row_to_snapshot).transpose()
     }
 
@@ -1434,21 +1488,29 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_snapshot(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM snapshots WHERE id = $1").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM snapshots WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected() > 0)
     }
 
     // ── Alerts ──
 
     async fn list_alert_rules(&self, service_id: &Uuid) -> Result<Vec<AlertRule>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM alert_rules WHERE service_id = $1 ORDER BY created_at")
-            .bind(service_id).fetch_all(&self.pool).await?;
+        let rows =
+            sqlx::query("SELECT * FROM alert_rules WHERE service_id = $1 ORDER BY created_at")
+                .bind(service_id)
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_alert_rule).collect()
     }
 
     async fn get_alert_rule(&self, id: &Uuid) -> Result<Option<AlertRule>, GatewayError> {
         let row = sqlx::query("SELECT * FROM alert_rules WHERE id = $1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(row_to_alert_rule).transpose()
     }
 
@@ -1473,14 +1535,25 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_alert_rule(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM alert_rules WHERE id = $1").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM alert_rules WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected() > 0)
     }
 
-    async fn list_alert_events(&self, service_id: &Uuid, limit: u32) -> Result<Vec<AlertEvent>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM alert_events WHERE service_id = $1 ORDER BY ts DESC LIMIT $2")
-            .bind(service_id).bind(limit as i64)
-            .fetch_all(&self.pool).await?;
+    async fn list_alert_events(
+        &self,
+        service_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<AlertEvent>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT * FROM alert_events WHERE service_id = $1 ORDER BY ts DESC LIMIT $2",
+        )
+        .bind(service_id)
+        .bind(limit as i64)
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_alert_event).collect()
     }
 
@@ -1502,14 +1575,20 @@ impl Repository for PostgresRepository {
     // ── IP Rules ──
 
     async fn list_ip_rules(&self, service_id: &Uuid) -> Result<Vec<IpRule>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM ip_rules WHERE service_id = $1 ORDER BY priority, created_at")
-            .bind(service_id).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(
+            "SELECT * FROM ip_rules WHERE service_id = $1 ORDER BY priority, created_at",
+        )
+        .bind(service_id)
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_ip_rule).collect()
     }
 
     async fn get_ip_rule(&self, id: &Uuid) -> Result<Option<IpRule>, GatewayError> {
         let row = sqlx::query("SELECT * FROM ip_rules WHERE id = $1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(row_to_ip_rule).transpose()
     }
 
@@ -1532,21 +1611,29 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_ip_rule(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM ip_rules WHERE id = $1").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM ip_rules WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected() > 0)
     }
 
     // ── Error Pages ──
 
     async fn list_error_pages(&self, service_id: &Uuid) -> Result<Vec<ErrorPage>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM error_pages WHERE service_id = $1 ORDER BY status_code")
-            .bind(service_id).fetch_all(&self.pool).await?;
+        let rows =
+            sqlx::query("SELECT * FROM error_pages WHERE service_id = $1 ORDER BY status_code")
+                .bind(service_id)
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_error_page).collect()
     }
 
     async fn get_error_page(&self, id: &Uuid) -> Result<Option<ErrorPage>, GatewayError> {
         let row = sqlx::query("SELECT * FROM error_pages WHERE id = $1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(row_to_error_page).transpose()
     }
 
@@ -1568,21 +1655,32 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_error_page(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM error_pages WHERE id = $1").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM error_pages WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected() > 0)
     }
 
     // ── Consumer Groups ──
 
-    async fn list_consumer_groups(&self, service_id: &Uuid) -> Result<Vec<ConsumerGroup>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM consumer_groups WHERE service_id = $1 ORDER BY created_at")
-            .bind(service_id).fetch_all(&self.pool).await?;
+    async fn list_consumer_groups(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<ConsumerGroup>, GatewayError> {
+        let rows =
+            sqlx::query("SELECT * FROM consumer_groups WHERE service_id = $1 ORDER BY created_at")
+                .bind(service_id)
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_consumer_group).collect()
     }
 
     async fn get_consumer_group(&self, id: &Uuid) -> Result<Option<ConsumerGroup>, GatewayError> {
         let row = sqlx::query("SELECT * FROM consumer_groups WHERE id = $1")
-            .bind(id).fetch_optional(&self.pool).await?;
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         row.map(row_to_consumer_group).transpose()
     }
 
@@ -1595,7 +1693,11 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn update_consumer_group(&self, id: &Uuid, g: &ConsumerGroup) -> Result<(), GatewayError> {
+    async fn update_consumer_group(
+        &self,
+        id: &Uuid,
+        g: &ConsumerGroup,
+    ) -> Result<(), GatewayError> {
         sqlx::query("UPDATE consumer_groups SET name=$1, description=$2, rate_limit=$3, rate_window_seconds=$4, burst_limit=$5 WHERE id=$6")
             .bind(&g.name).bind(&g.description)
             .bind(g.rate_limit).bind(g.rate_window_seconds).bind(g.burst_limit)
@@ -1605,13 +1707,23 @@ impl Repository for PostgresRepository {
     }
 
     async fn delete_consumer_group(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM consumer_groups WHERE id = $1").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM consumer_groups WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         Ok(r.rows_affected() > 0)
     }
 
-    async fn list_consumer_group_members(&self, group_id: &Uuid) -> Result<Vec<ConsumerGroupMember>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM consumer_group_members WHERE group_id = $1 ORDER BY joined_at")
-            .bind(group_id).fetch_all(&self.pool).await?;
+    async fn list_consumer_group_members(
+        &self,
+        group_id: &Uuid,
+    ) -> Result<Vec<ConsumerGroupMember>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT * FROM consumer_group_members WHERE group_id = $1 ORDER BY joined_at",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_consumer_group_member).collect()
     }
 
@@ -1622,10 +1734,18 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn remove_consumer_group_member(&self, group_id: &Uuid, consumer_id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM consumer_group_members WHERE group_id = $1 AND consumer_id = $2")
-            .bind(group_id).bind(consumer_id)
-            .execute(&self.pool).await?;
+    async fn remove_consumer_group_member(
+        &self,
+        group_id: &Uuid,
+        consumer_id: &Uuid,
+    ) -> Result<bool, GatewayError> {
+        let r = sqlx::query(
+            "DELETE FROM consumer_group_members WHERE group_id = $1 AND consumer_id = $2",
+        )
+        .bind(group_id)
+        .bind(consumer_id)
+        .execute(&self.pool)
+        .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -1725,7 +1845,11 @@ impl Repository for PostgresRepository {
 
     // ── Tracing ──
 
-    async fn list_traces(&self, service_id: &Uuid, limit: u32) -> Result<Vec<TraceRecord>, GatewayError> {
+    async fn list_traces(
+        &self,
+        service_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<TraceRecord>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, trace_id, service_id, route_id, method, path, status, duration_ms, span_count, has_errors, metadata, started_at \
              FROM traces WHERE service_id = $1 AND is_deleted = FALSE ORDER BY started_at DESC LIMIT $2",
@@ -1804,7 +1928,10 @@ impl Repository for PostgresRepository {
 
     // ── Transforms ──
 
-    async fn list_transform_rules(&self, service_id: &Uuid) -> Result<Vec<TransformRule>, GatewayError> {
+    async fn list_transform_rules(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<TransformRule>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, route_id, name, phase, action, target, value, condition, priority, enabled, created_at, updated_at \
              FROM transform_rules WHERE service_id = $1 AND is_deleted = FALSE ORDER BY priority, created_at",
@@ -1849,7 +1976,11 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn update_transform_rule(&self, id: &Uuid, rule: &TransformRule) -> Result<(), GatewayError> {
+    async fn update_transform_rule(
+        &self,
+        id: &Uuid,
+        rule: &TransformRule,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE transform_rules SET name = $1, phase = $2, action = $3, target = $4, value = $5, \
              condition = $6, priority = $7, enabled = $8, updated_at = $9 \
@@ -1924,7 +2055,11 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn update_api_version(&self, id: &Uuid, version: &ApiVersion) -> Result<(), GatewayError> {
+    async fn update_api_version(
+        &self,
+        id: &Uuid,
+        version: &ApiVersion,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE api_versions SET version = $1, base_path = $2, upstream_path = $3, status = $4, \
              deprecated_at = $5, sunset_at = $6, updated_at = $7 \
@@ -2026,7 +2161,10 @@ impl Repository for PostgresRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn list_incident_updates(&self, incident_id: &Uuid) -> Result<Vec<IncidentUpdate>, GatewayError> {
+    async fn list_incident_updates(
+        &self,
+        incident_id: &Uuid,
+    ) -> Result<Vec<IncidentUpdate>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, incident_id, status, message, created_at \
              FROM incident_updates WHERE incident_id = $1 ORDER BY created_at",
@@ -2127,7 +2265,11 @@ impl Repository for PostgresRepository {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn list_webhook_deliveries(&self, webhook_id: &Uuid, limit: u32) -> Result<Vec<WebhookDelivery>, GatewayError> {
+    async fn list_webhook_deliveries(
+        &self,
+        webhook_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<WebhookDelivery>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, webhook_id, event_type, payload, response_status, response_body, success, attempts, delivered_at \
              FROM webhook_deliveries WHERE webhook_id = $1 ORDER BY delivered_at DESC LIMIT $2",
@@ -2139,7 +2281,10 @@ impl Repository for PostgresRepository {
         rows.into_iter().map(row_to_webhook_delivery).collect()
     }
 
-    async fn create_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<(), GatewayError> {
+    async fn create_webhook_delivery(
+        &self,
+        delivery: &WebhookDelivery,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO webhook_deliveries (id, webhook_id, event_type, payload, response_status, response_body, success, attempts, delivered_at) \
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
@@ -2258,7 +2403,10 @@ impl Repository for PostgresRepository {
         rows.into_iter().map(row_to_marketplace_plugin).collect()
     }
 
-    async fn get_marketplace_plugin(&self, id: &Uuid) -> Result<Option<MarketplacePlugin>, GatewayError> {
+    async fn get_marketplace_plugin(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<MarketplacePlugin>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, display_name, description, version, author, category, schema, readme, \
              downloads, rating, verified, created_at, updated_at \
@@ -2270,7 +2418,10 @@ impl Repository for PostgresRepository {
         row.map(row_to_marketplace_plugin).transpose()
     }
 
-    async fn create_marketplace_plugin(&self, plugin: &MarketplacePlugin) -> Result<(), GatewayError> {
+    async fn create_marketplace_plugin(
+        &self,
+        plugin: &MarketplacePlugin,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO marketplace_plugins (id, name, display_name, description, version, author, category, \
              schema, readme, downloads, rating, verified, created_at, updated_at) \
@@ -2295,7 +2446,11 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn update_marketplace_plugin(&self, id: &Uuid, plugin: &MarketplacePlugin) -> Result<(), GatewayError> {
+    async fn update_marketplace_plugin(
+        &self,
+        id: &Uuid,
+        plugin: &MarketplacePlugin,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE marketplace_plugins SET name = $1, display_name = $2, description = $3, version = $4, \
              author = $5, category = $6, schema = $7, readme = $8, downloads = $9, rating = $10, \
@@ -2332,7 +2487,12 @@ impl Repository for PostgresRepository {
 
     // ── Cost Analytics ──
 
-    async fn list_cost_records(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CostRecord>, GatewayError> {
+    async fn list_cost_records(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CostRecord>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, bucket_ts, compute_cost, bandwidth_cost, storage_cost, total_cost, \
              currency, requests, bytes_transferred \
@@ -2446,7 +2606,10 @@ impl Repository for PostgresRepository {
 
     // ── Rate Limit Simulator ──
 
-    async fn list_rate_limit_simulations(&self, service_id: &Uuid) -> Result<Vec<RateLimitSimulation>, GatewayError> {
+    async fn list_rate_limit_simulations(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<RateLimitSimulation>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, consumer_id, requests_per_second, duration_seconds, \
              \"limit\", window_seconds, burst, result, created_at \
@@ -2458,7 +2621,10 @@ impl Repository for PostgresRepository {
         rows.into_iter().map(row_to_rate_limit_simulation).collect()
     }
 
-    async fn create_rate_limit_simulation(&self, sim: &RateLimitSimulation) -> Result<(), GatewayError> {
+    async fn create_rate_limit_simulation(
+        &self,
+        sim: &RateLimitSimulation,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO rate_limit_simulations (id, service_id, consumer_id, requests_per_second, duration_seconds, \
              \"limit\", window_seconds, burst, result, created_at) \
@@ -2479,7 +2645,10 @@ impl Repository for PostgresRepository {
         Ok(())
     }
 
-    async fn get_rate_limit_simulation(&self, id: &Uuid) -> Result<Option<RateLimitSimulation>, GatewayError> {
+    async fn get_rate_limit_simulation(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<RateLimitSimulation>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, consumer_id, requests_per_second, duration_seconds, \
              \"limit\", window_seconds, burst, result, created_at \
@@ -2493,7 +2662,10 @@ impl Repository for PostgresRepository {
 
     // ── PKI / Certificates ──
 
-    async fn list_certificates(&self, service_id: Option<&Uuid>) -> Result<Vec<Certificate>, GatewayError> {
+    async fn list_certificates(
+        &self,
+        service_id: Option<&Uuid>,
+    ) -> Result<Vec<Certificate>, GatewayError> {
         let rows = if let Some(sid) = service_id {
             sqlx::query(
                 "SELECT id, service_id, domain, issuer, serial_number, not_before, not_after, \
@@ -2657,13 +2829,37 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         tls_client_cert_path,
         tls_client_key_path,
         tls_ca_path,
-        lb_hash_header: row.try_get::<Option<String>, _>("lb_hash_header").ok().flatten(),
-        lb_hash_query_param: row.try_get::<Option<String>, _>("lb_hash_query_param").ok().flatten(),
-        flush_interval_ms: row.try_get::<Option<i64>, _>("flush_interval_ms").ok().flatten(),
-        stream_timeout_ms: row.try_get::<Option<i64>, _>("stream_timeout_ms").ok().flatten().map(|v| v as u64),
-        stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
-        pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
-        drain_timeout_ms: row.try_get::<Option<i64>, _>("drain_timeout_ms").ok().flatten().map(|v| v as u64),
+        lb_hash_header: row
+            .try_get::<Option<String>, _>("lb_hash_header")
+            .ok()
+            .flatten(),
+        lb_hash_query_param: row
+            .try_get::<Option<String>, _>("lb_hash_query_param")
+            .ok()
+            .flatten(),
+        flush_interval_ms: row
+            .try_get::<Option<i64>, _>("flush_interval_ms")
+            .ok()
+            .flatten(),
+        stream_timeout_ms: row
+            .try_get::<Option<i64>, _>("stream_timeout_ms")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
+        stream_close_delay_ms: row
+            .try_get::<Option<i64>, _>("stream_close_delay_ms")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
+        pass_host_header: row
+            .try_get::<Option<bool>, _>("pass_host_header")
+            .ok()
+            .flatten(),
+        drain_timeout_ms: row
+            .try_get::<Option<i64>, _>("drain_timeout_ms")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
         project_id: row.try_get::<Option<Uuid>, _>("project_id").ok().flatten(),
         domain: row.try_get("domain").unwrap_or_default(),
         subdomain: row.try_get("subdomain").unwrap_or_default(),
@@ -2691,7 +2887,9 @@ fn row_to_target(row: sqlx::postgres::PgRow) -> Result<Target, GatewayError> {
     let weight: i64 = row.try_get("weight")?;
     let enabled: bool = row.try_get("enabled")?;
     let zone: Option<String> = row.try_get("zone").ok();
-    let state_str: String = row.try_get("state").unwrap_or_else(|_| "active".to_string());
+    let state_str: String = row
+        .try_get("state")
+        .unwrap_or_else(|_| "active".to_string());
     let created_at: DateTime<Utc> = row.try_get("created_at")?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at")?;
 
@@ -2857,7 +3055,9 @@ fn row_to_consumer(row: sqlx::postgres::PgRow) -> Result<Consumer, GatewayError>
     })
 }
 
-fn row_to_device_fingerprint(row: sqlx::postgres::PgRow) -> Result<crate::models::DeviceFingerprint, GatewayError> {
+fn row_to_device_fingerprint(
+    row: sqlx::postgres::PgRow,
+) -> Result<crate::models::DeviceFingerprint, GatewayError> {
     let id: Uuid = row.try_get("id")?;
     let customer_id: i64 = row.try_get("customer_id")?;
     let hardware_id: String = row.try_get("hardware_id")?;
@@ -2877,7 +3077,9 @@ fn row_to_device_fingerprint(row: sqlx::postgres::PgRow) -> Result<crate::models
     })
 }
 
-fn row_to_runtime_grant(row: sqlx::postgres::PgRow) -> Result<crate::models::RuntimeGrant, GatewayError> {
+fn row_to_runtime_grant(
+    row: sqlx::postgres::PgRow,
+) -> Result<crate::models::RuntimeGrant, GatewayError> {
     let id: Uuid = row.try_get("id")?;
     let customer_id: i64 = row.try_get("customer_id")?;
     let device_id: Option<Uuid> = row.try_get("device_id")?;
@@ -2918,7 +3120,9 @@ fn row_to_log(row: sqlx::postgres::PgRow) -> Result<LogEntry, GatewayError> {
     })
 }
 
-fn row_to_api_key_row(row: sqlx::postgres::PgRow) -> Result<crate::models::ApiKeyRow, GatewayError> {
+fn row_to_api_key_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<crate::models::ApiKeyRow, GatewayError> {
     let id: i64 = row.try_get("id")?;
     let customer_id: i64 = row.try_get("customer_id")?;
     let name: String = row.try_get("name")?;
@@ -2948,8 +3152,12 @@ fn row_to_metric_bucket(row: sqlx::postgres::PgRow) -> Result<MetricBucket, Gate
         error_4xx: row.try_get::<i32, _>("error_4xx")? as i64,
         error_5xx: row.try_get::<i32, _>("error_5xx")? as i64,
         total_latency_ms: row.try_get("total_latency_ms")?,
-        min_latency_ms: row.try_get::<Option<i32>, _>("min_latency_ms")?.map(|v| v as i64),
-        max_latency_ms: row.try_get::<Option<i32>, _>("max_latency_ms")?.map(|v| v as i64),
+        min_latency_ms: row
+            .try_get::<Option<i32>, _>("min_latency_ms")?
+            .map(|v| v as i64),
+        max_latency_ms: row
+            .try_get::<Option<i32>, _>("max_latency_ms")?
+            .map(|v| v as i64),
         bytes_in: row.try_get("bytes_in")?,
         bytes_out: row.try_get("bytes_out")?,
     })
@@ -3091,7 +3299,9 @@ fn row_to_consumer_group(row: sqlx::postgres::PgRow) -> Result<ConsumerGroup, Ga
     })
 }
 
-fn row_to_consumer_group_member(row: sqlx::postgres::PgRow) -> Result<ConsumerGroupMember, GatewayError> {
+fn row_to_consumer_group_member(
+    row: sqlx::postgres::PgRow,
+) -> Result<ConsumerGroupMember, GatewayError> {
     Ok(ConsumerGroupMember {
         group_id: row.try_get("group_id")?,
         consumer_id: row.try_get("consumer_id")?,
@@ -3254,7 +3464,9 @@ fn row_to_load_test(row: sqlx::postgres::PgRow) -> Result<LoadTest, GatewayError
     })
 }
 
-fn row_to_marketplace_plugin(row: sqlx::postgres::PgRow) -> Result<MarketplacePlugin, GatewayError> {
+fn row_to_marketplace_plugin(
+    row: sqlx::postgres::PgRow,
+) -> Result<MarketplacePlugin, GatewayError> {
     Ok(MarketplacePlugin {
         id: row.try_get("id")?,
         name: row.try_get("name")?,
@@ -3305,7 +3517,9 @@ fn row_to_cluster_node(row: sqlx::postgres::PgRow) -> Result<ClusterNode, Gatewa
     })
 }
 
-fn row_to_rate_limit_simulation(row: sqlx::postgres::PgRow) -> Result<RateLimitSimulation, GatewayError> {
+fn row_to_rate_limit_simulation(
+    row: sqlx::postgres::PgRow,
+) -> Result<RateLimitSimulation, GatewayError> {
     Ok(RateLimitSimulation {
         id: row.try_get("id")?,
         service_id: row.try_get("service_id")?,

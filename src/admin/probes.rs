@@ -25,11 +25,21 @@ pub struct CreateProbeBody {
     pub expected_status: i32,
 }
 
-fn default_method() -> String { "GET".into() }
-fn default_path() -> String { "/".into() }
-fn default_interval() -> i32 { 60 }
-fn default_timeout() -> i32 { 5000 }
-fn default_expected() -> i32 { 200 }
+fn default_method() -> String {
+    "GET".into()
+}
+fn default_path() -> String {
+    "/".into()
+}
+fn default_interval() -> i32 {
+    60
+}
+fn default_timeout() -> i32 {
+    5000
+}
+fn default_expected() -> i32 {
+    200
+}
 
 #[derive(Deserialize)]
 pub struct PatchProbeBody {
@@ -85,13 +95,27 @@ pub async fn patch_probe(
         .await?
         .ok_or(GatewayError::NotFound("probe not found".into()))?;
 
-    if let Some(v) = body.enabled { probe.enabled = v; }
-    if let Some(v) = body.name { probe.name = v; }
-    if let Some(v) = body.method { probe.method = v; }
-    if let Some(v) = body.path { probe.path = v; }
-    if let Some(v) = body.interval_seconds { probe.interval_seconds = v; }
-    if let Some(v) = body.timeout_ms { probe.timeout_ms = v; }
-    if let Some(v) = body.expected_status { probe.expected_status = v; }
+    if let Some(v) = body.enabled {
+        probe.enabled = v;
+    }
+    if let Some(v) = body.name {
+        probe.name = v;
+    }
+    if let Some(v) = body.method {
+        probe.method = v;
+    }
+    if let Some(v) = body.path {
+        probe.path = v;
+    }
+    if let Some(v) = body.interval_seconds {
+        probe.interval_seconds = v;
+    }
+    if let Some(v) = body.timeout_ms {
+        probe.timeout_ms = v;
+    }
+    if let Some(v) = body.expected_status {
+        probe.expected_status = v;
+    }
 
     state.repo.update_probe(&id, &probe).await?;
     Ok(Json(probe))
@@ -148,11 +172,7 @@ pub async fn probe_stats(
     };
 
     let avg_lat = if total > 0 {
-        results
-            .iter()
-            .filter_map(|r| r.latency_ms)
-            .sum::<i32>() as f64
-            / total as f64
+        results.iter().filter_map(|r| r.latency_ms).sum::<i32>() as f64 / total as f64
     } else {
         0.0
     };

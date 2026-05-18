@@ -13,10 +13,7 @@ impl IncidentService {
         Self { repo }
     }
 
-    pub async fn list(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<Incident>, GatewayError> {
+    pub async fn list(&self, service_id: &Uuid) -> Result<Vec<Incident>, GatewayError> {
         self.repo.list_incidents(service_id).await
     }
 

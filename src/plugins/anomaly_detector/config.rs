@@ -10,30 +10,22 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum KeyStrategy {
+    #[default]
     Consumer,
     Ip,
     Global,
 }
 
-impl Default for KeyStrategy {
-    fn default() -> Self {
-        Self::Consumer
-    }
-}
-
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum Mode {
+    #[default]
     LogOnly,
     Challenge,
     Block,
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Self::LogOnly
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

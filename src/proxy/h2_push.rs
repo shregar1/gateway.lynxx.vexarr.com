@@ -84,7 +84,11 @@ pub fn extract_push_promises(
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if !config.content_types.iter().any(|t| ct.starts_with(t.as_str())) {
+    if !config
+        .content_types
+        .iter()
+        .any(|t| ct.starts_with(t.as_str()))
+    {
         return Vec::new();
     }
 
@@ -135,10 +139,7 @@ fn parse_link_preload(link: &str) -> Option<PushPromise> {
     let as_type = params
         .split(';')
         .map(|p| p.trim())
-        .find_map(|p| {
-            p.strip_prefix("as=")
-                .map(|v| v.trim().to_string())
-        });
+        .find_map(|p| p.strip_prefix("as=").map(|v| v.trim().to_string()));
 
     Some(PushPromise {
         path: uri.to_string(),
@@ -150,10 +151,7 @@ fn parse_link_preload(link: &str) -> Option<PushPromise> {
 /// Push is not supported when:
 /// - The connection is HTTP/1.x
 /// - The client sent `Accept-Push-Policy: none`
-pub fn client_supports_push(
-    version: axum::http::Version,
-    request_headers: &HeaderMap,
-) -> bool {
+pub fn client_supports_push(version: axum::http::Version, request_headers: &HeaderMap) -> bool {
     if version != axum::http::Version::HTTP_2 {
         return false;
     }
@@ -236,7 +234,10 @@ mod tests {
     #[test]
     fn client_push_support_h1() {
         let headers = HeaderMap::new();
-        assert!(!client_supports_push(axum::http::Version::HTTP_11, &headers));
+        assert!(!client_supports_push(
+            axum::http::Version::HTTP_11,
+            &headers
+        ));
     }
 
     #[test]

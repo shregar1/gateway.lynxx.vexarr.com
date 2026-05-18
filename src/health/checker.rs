@@ -72,10 +72,7 @@ fn build_probe(
     cfg: &HealthCheckConfig,
 ) -> reqwest::RequestBuilder {
     let url = format!("{}{}", base_url.trim_end_matches('/'), cfg.path);
-    let method: reqwest::Method = cfg
-        .method
-        .parse()
-        .unwrap_or(reqwest::Method::GET);
+    let method: reqwest::Method = cfg.method.parse().unwrap_or(reqwest::Method::GET);
     let mut req = client
         .request(method, &url)
         .timeout(Duration::from_millis(cfg.timeout_ms));

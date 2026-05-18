@@ -149,21 +149,17 @@ impl PkiAuthority {
         };
 
         // Parse the intermediate CA so rcgen can sign the leaf.
-        let inter_key = KeyPair::from_pem(&self.intermediate_key_pem).map_err(|e| {
-            GatewayError::Internal(format!("parse intermediate key: {e}"))
-        })?;
-        let inter_params =
-            CertificateParams::from_ca_cert_pem(&self.intermediate_cert_pem).map_err(|e| {
-                GatewayError::Internal(format!("parse intermediate cert: {e}"))
-            })?;
-        let inter_cert = inter_params.self_signed(&inter_key).map_err(|e| {
-            GatewayError::Internal(format!("reconstruct intermediate cert: {e}"))
-        })?;
+        let inter_key = KeyPair::from_pem(&self.intermediate_key_pem)
+            .map_err(|e| GatewayError::Internal(format!("parse intermediate key: {e}")))?;
+        let inter_params = CertificateParams::from_ca_cert_pem(&self.intermediate_cert_pem)
+            .map_err(|e| GatewayError::Internal(format!("parse intermediate cert: {e}")))?;
+        let inter_cert = inter_params
+            .self_signed(&inter_key)
+            .map_err(|e| GatewayError::Internal(format!("reconstruct intermediate cert: {e}")))?;
 
         // Build leaf params.
-        let mut leaf_params = CertificateParams::new(domains.to_vec()).map_err(|e| {
-            GatewayError::Internal(format!("leaf cert params: {e}"))
-        })?;
+        let mut leaf_params = CertificateParams::new(domains.to_vec())
+            .map_err(|e| GatewayError::Internal(format!("leaf cert params: {e}")))?;
         leaf_params
             .distinguished_name
             .push(DnType::CommonName, domains[0].clone());
@@ -171,8 +167,7 @@ impl PkiAuthority {
             .distinguished_name
             .push(DnType::OrganizationName, "Lynxx PKI");
         leaf_params.not_before = OffsetDateTime::now_utc();
-        leaf_params.not_after =
-            OffsetDateTime::now_utc() + Duration::days(i64::from(validity));
+        leaf_params.not_after = OffsetDateTime::now_utc() + Duration::days(i64::from(validity));
         leaf_params.is_ca = IsCa::NoCa;
         leaf_params.key_usages = vec![
             KeyUsagePurpose::DigitalSignature,
@@ -183,13 +178,12 @@ impl PkiAuthority {
             rcgen::ExtendedKeyUsagePurpose::ClientAuth,
         ];
 
-        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256).map_err(|e| {
-            GatewayError::Internal(format!("generate leaf key: {e}"))
-        })?;
+        let leaf_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)
+            .map_err(|e| GatewayError::Internal(format!("generate leaf key: {e}")))?;
 
-        let leaf_cert = leaf_params.signed_by(&leaf_key, &inter_cert, &inter_key).map_err(|e| {
-            GatewayError::Internal(format!("sign leaf cert: {e}"))
-        })?;
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &inter_cert, &inter_key)
+            .map_err(|e| GatewayError::Internal(format!("sign leaf cert: {e}")))?;
 
         let cert_pem = leaf_cert.pem();
         let key_pem = leaf_key.serialize_pem();
@@ -241,10 +235,7 @@ fn generate_root_ca(cn: &str) -> Result<(String, String), GatewayError> {
         .distinguished_name
         .push(DnType::OrganizationName, "Lynxx PKI");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = OffsetDateTime::now_utc();
     params.not_after = OffsetDateTime::now_utc() + Duration::days(3650);
 
@@ -282,10 +273,7 @@ fn generate_intermediate_ca(
         .distinguished_name
         .push(DnType::OrganizationName, "Lynxx PKI");
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
-    params.key_usages = vec![
-        KeyUsagePurpose::KeyCertSign,
-        KeyUsagePurpose::CrlSign,
-    ];
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     params.not_before = OffsetDateTime::now_utc();
     params.not_after = OffsetDateTime::now_utc() + Duration::days(1825);
 
@@ -316,21 +304,18 @@ fn resolve_storage_dir(configured: &str) -> PathBuf {
 }
 
 fn read_file(path: &Path) -> Result<String, GatewayError> {
-    std::fs::read_to_string(path).map_err(|e| {
-        GatewayError::Internal(format!("read {}: {e}", path.display()))
-    })
+    std::fs::read_to_string(path)
+        .map_err(|e| GatewayError::Internal(format!("read {}: {e}", path.display())))
 }
 
 fn write_pem(path: &Path, contents: &str) -> Result<(), GatewayError> {
-    std::fs::write(path, contents.as_bytes()).map_err(|e| {
-        GatewayError::Internal(format!("write {}: {e}", path.display()))
-    })
+    std::fs::write(path, contents.as_bytes())
+        .map_err(|e| GatewayError::Internal(format!("write {}: {e}", path.display())))
 }
 
 fn write_key(path: &Path, contents: &str) -> Result<(), GatewayError> {
-    std::fs::write(path, contents.as_bytes()).map_err(|e| {
-        GatewayError::Internal(format!("write {}: {e}", path.display()))
-    })?;
+    std::fs::write(path, contents.as_bytes())
+        .map_err(|e| GatewayError::Internal(format!("write {}: {e}", path.display())))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -343,12 +328,10 @@ fn write_key(path: &Path, contents: &str) -> Result<(), GatewayError> {
 /// fail fast with a clear error rather than a cryptic signing failure
 /// later.
 fn validate_pem_keypair(cert_pem: &str, key_pem: &str, label: &str) -> Result<(), GatewayError> {
-    let _key = KeyPair::from_pem(key_pem).map_err(|e| {
-        GatewayError::Internal(format!("invalid {label} key PEM: {e}"))
-    })?;
-    let _params = CertificateParams::from_ca_cert_pem(cert_pem).map_err(|e| {
-        GatewayError::Internal(format!("invalid {label} cert PEM: {e}"))
-    })?;
+    let _key = KeyPair::from_pem(key_pem)
+        .map_err(|e| GatewayError::Internal(format!("invalid {label} key PEM: {e}")))?;
+    let _params = CertificateParams::from_ca_cert_pem(cert_pem)
+        .map_err(|e| GatewayError::Internal(format!("invalid {label} cert PEM: {e}")))?;
     Ok(())
 }
 
@@ -486,7 +469,9 @@ mod tests {
 
         assert!(issued.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(issued.key_pem.contains("BEGIN PRIVATE KEY"));
-        assert!(issued.chain_pem.contains(&issued.cert_pem.trim().to_string()));
+        assert!(issued
+            .chain_pem
+            .contains(&issued.cert_pem.trim().to_string()));
 
         // Parse the leaf and verify SAN + issuer.
         let der = pem_to_der(&issued.cert_pem);
@@ -494,10 +479,7 @@ mod tests {
         assert!(!parsed.is_ca(), "leaf should not be a CA");
 
         let cn = parsed.subject().to_string();
-        assert!(
-            cn.contains("api.internal.local"),
-            "leaf CN mismatch: {cn}"
-        );
+        assert!(cn.contains("api.internal.local"), "leaf CN mismatch: {cn}");
 
         // Issuer should be the intermediate.
         let issuer = parsed.issuer().to_string();
@@ -591,9 +573,7 @@ mod tests {
         cfg.default_validity_days = 45;
 
         let pki = PkiAuthority::load_or_create(&cfg, None).await.unwrap();
-        let issued = pki
-            .issue_cert(&["svc.internal".to_string()], 0)
-            .unwrap();
+        let issued = pki.issue_cert(&["svc.internal".to_string()], 0).unwrap();
 
         let der = pem_to_der(&issued.cert_pem);
         let (_, parsed) = x509_parser::parse_x509_certificate(&der).unwrap();
@@ -618,7 +598,10 @@ mod tests {
 
         // Chain should contain both intermediate and root certs.
         let cert_count = chain.matches("BEGIN CERTIFICATE").count();
-        assert_eq!(cert_count, 2, "chain should have 2 certs (intermediate + root)");
+        assert_eq!(
+            cert_count, 2,
+            "chain should have 2 certs (intermediate + root)"
+        );
         assert!(chain.contains(pki.root_ca_pem().trim()));
     }
 
@@ -635,7 +618,11 @@ mod tests {
 
         // Parse all certs from the chain.
         let chain_certs = parse_pem_chain(&issued.chain_pem);
-        assert_eq!(chain_certs.len(), 3, "chain should have leaf + intermediate + root");
+        assert_eq!(
+            chain_certs.len(),
+            3,
+            "chain should have leaf + intermediate + root"
+        );
 
         // Verify the leaf was signed by the intermediate (issuer DN match).
         let (_, leaf) = x509_parser::parse_x509_certificate(&chain_certs[0]).unwrap();
@@ -652,11 +639,7 @@ mod tests {
             root.subject(),
             "intermediate issuer should match root subject"
         );
-        assert_eq!(
-            root.issuer(),
-            root.subject(),
-            "root should be self-signed"
-        );
+        assert_eq!(root.issuer(), root.subject(), "root should be self-signed");
     }
 
     #[tokio::test]
@@ -665,12 +648,9 @@ mod tests {
         let override_dir = tmp.path().join("custom");
         let cfg = test_config();
 
-        let pki = PkiAuthority::load_or_create(
-            &cfg,
-            Some(override_dir.to_str().unwrap()),
-        )
-        .await
-        .unwrap();
+        let pki = PkiAuthority::load_or_create(&cfg, Some(override_dir.to_str().unwrap()))
+            .await
+            .unwrap();
 
         assert_eq!(pki.storage_dir(), override_dir);
         assert!(override_dir.join("root.pem").exists());

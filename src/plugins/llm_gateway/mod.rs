@@ -82,23 +82,34 @@ pub struct LlmGatewayPlugin {
 }
 
 impl LlmGatewayPlugin {
-
-    fn short_circuit_with_entry(&self, entry: crate::plugins::llm_gateway::cache::CacheEntry) -> Result<Response<Body>, crate::error::GatewayError> {
+    fn short_circuit_with_entry(
+        &self,
+        entry: crate::plugins::llm_gateway::cache::CacheEntry,
+    ) -> Result<Response<Body>, crate::error::GatewayError> {
         let mut headers = entry.headers;
         headers.push(("x-lynxx-llm-cache".into(), "hit_semantic".into()));
-        Err(crate::error::GatewayError::PluginError(crate::error::PluginError::ShortCircuit {
-            status: entry.status,
-            headers,
-            body: entry.body.into(),
-        }))
+        Err(crate::error::GatewayError::PluginError(
+            crate::error::PluginError::ShortCircuit {
+                status: entry.status,
+                headers,
+                body: entry.body.into(),
+            },
+        ))
     }
 
     pub fn from_config(cfg: &serde_json::Value) -> Result<Self, GatewayError> {
         let parsed: LlmGatewayConfig = serde_json::from_value(cfg.clone())
-            .map_err(|e| GatewayError::BadRequest(format!("llm-gateway config: {e}")))? ;
+            .map_err(|e| GatewayError::BadRequest(format!("llm-gateway config: {e}")))?;
         let router = Router::build(&parsed).map_err(GatewayError::BadRequest)?;
 
-        let cache = ResponseCache::new(parsed.cache.enabled, parsed.cache.strategy.clone(), parsed.cache.reusex_url.clone(), parsed.cache.reusex_api_key.clone(), reqwest::Client::new(), parsed.cache.ttl_seconds);
+        let cache = ResponseCache::new(
+            parsed.cache.enabled,
+            parsed.cache.strategy.clone(),
+            parsed.cache.reusex_url.clone(),
+            parsed.cache.reusex_api_key.clone(),
+            reqwest::Client::new(),
+            parsed.cache.ttl_seconds,
+        );
         if parsed.cache.strategy != "exact" {
             tracing::warn!(
                 strategy = %parsed.cache.strategy,
@@ -326,7 +337,7 @@ impl Plugin for LlmGatewayPlugin {
 
         // -- Dispatch with fallback / hedging --------------------------
         let consumer_for_metric = consumer.clone();
-        
+
         let dispatch_result = if self.hedging.enabled {
             // Resolve providers for hedging.
             let mut hedge_list = Vec::new();
@@ -343,7 +354,7 @@ impl Plugin for LlmGatewayPlugin {
                     }
                 }
             }
-            
+
             fallback::dispatch_hedged(
                 &self.http,
                 &hedge_list,
@@ -351,7 +362,9 @@ impl Plugin for LlmGatewayPlugin {
                 &reqwest::Method::POST,
                 &forwarded_headers,
                 &outbound,
-            ).await.map_err(PluginError::Internal)?
+            )
+            .await
+            .map_err(PluginError::Internal)?
         } else {
             fallback::dispatch(
                 &self.http,
@@ -389,21 +402,27 @@ impl Plugin for LlmGatewayPlugin {
                 self.buckets.clone(),
                 est_input,
             );
-            
+
             let mut headers = dispatch_result.headers.clone();
             headers.push((H_PROVIDER.into(), dispatch_result.provider.clone()));
             headers.push((H_CACHE.into(), "MISS".into()));
-            headers.push((H_FALLBACK.into(), dispatch_result.fallback_count.to_string()));
-            
+            headers.push((
+                H_FALLBACK.into(),
+                dispatch_result.fallback_count.to_string(),
+            ));
+
             return Err(PluginError::ShortCircuit {
                 status: dispatch_result.status,
                 headers,
                 body: Body::from_stream(stream).into(),
             });
         }
-        
+
         // BUFFERED HANDLING (non-stream or cacheable)
-        let result_body = dispatch_result.response.bytes().await
+        let result_body = dispatch_result
+            .response
+            .bytes()
+            .await
             .map_err(|e| PluginError::Internal(format!("llm-gateway read body: {e}")))?
             .to_vec();
 
@@ -470,7 +489,10 @@ impl Plugin for LlmGatewayPlugin {
         let mut headers = dispatch_result.headers.clone();
         headers.push((H_PROVIDER.into(), dispatch_result.provider.clone()));
         headers.push((H_CACHE.into(), "MISS".into()));
-        headers.push((H_FALLBACK.into(), dispatch_result.fallback_count.to_string()));
+        headers.push((
+            H_FALLBACK.into(),
+            dispatch_result.fallback_count.to_string(),
+        ));
         headers.push((H_TOKENS_IN.into(), input_tokens.to_string()));
         headers.push((H_TOKENS_OUT.into(), output_tokens.to_string()));
         if self.cost.enabled() {

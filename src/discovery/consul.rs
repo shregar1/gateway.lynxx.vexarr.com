@@ -196,7 +196,9 @@ pub async fn run(config: ConsulProviderConfig, repo: Arc<dyn Repository>) {
         // --- Catalog discovery ---
         match poll_catalog(&config, &client, &mut catalog_index).await {
             Ok(discovered) => reconcile(&discovered, &repo, "catalog").await,
-            Err(e) => tracing::warn!(provider = "consul", mode = "catalog", error = %e, "poll failed"),
+            Err(e) => {
+                tracing::warn!(provider = "consul", mode = "catalog", error = %e, "poll failed")
+            }
         }
 
         // --- KV configuration ---
@@ -222,7 +224,10 @@ async fn poll_catalog(
     last_index: &mut u64,
 ) -> Result<Vec<DiscoveredService>, Box<dyn std::error::Error + Send + Sync>> {
     // Step 1: list all services.
-    let mut url = format!("{}/v1/catalog/services", config.endpoint.trim_end_matches('/'));
+    let mut url = format!(
+        "{}/v1/catalog/services",
+        config.endpoint.trim_end_matches('/')
+    );
     let mut params: Vec<String> = Vec::new();
     if *last_index > 0 {
         params.push(format!("index={last_index}"));
@@ -374,7 +379,8 @@ async fn poll_kv(
             Some(v) => v,
             None => continue,
         };
-        let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw) {
+        let decoded = match base64::Engine::decode(&base64::engine::general_purpose::STANDARD, raw)
+        {
             Ok(d) => d,
             Err(e) => {
                 tracing::warn!(key = %entry.key, error = %e, "consul kv: base64 decode failed");
@@ -390,7 +396,12 @@ async fn poll_kv(
         };
 
         let name = if cfg.name.is_empty() {
-            entry.key.rsplit('/').next().unwrap_or("unnamed").to_string()
+            entry
+                .key
+                .rsplit('/')
+                .next()
+                .unwrap_or("unnamed")
+                .to_string()
         } else {
             cfg.name.clone()
         };

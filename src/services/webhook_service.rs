@@ -13,10 +13,7 @@ impl WebhookService {
         Self { repo }
     }
 
-    pub async fn list(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<Webhook>, GatewayError> {
+    pub async fn list(&self, service_id: &Uuid) -> Result<Vec<Webhook>, GatewayError> {
         self.repo.list_webhooks(service_id).await
     }
 
@@ -44,10 +41,7 @@ impl WebhookService {
         self.repo.list_webhook_deliveries(webhook_id, limit).await
     }
 
-    pub async fn create_delivery(
-        &self,
-        delivery: &WebhookDelivery,
-    ) -> Result<(), GatewayError> {
+    pub async fn create_delivery(&self, delivery: &WebhookDelivery) -> Result<(), GatewayError> {
         self.repo.create_webhook_delivery(delivery).await
     }
 }

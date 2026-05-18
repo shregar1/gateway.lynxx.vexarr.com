@@ -68,7 +68,7 @@ pub fn count_text(model: &str, text: &str) -> usize {
             // OpenAI's published rule of thumb: ~4 chars per token in English.
             // We round up so single short messages still cost at least one
             // token in the bucket accounting.
-            (text.chars().count() + 3) / 4
+            text.chars().count().div_ceil(4)
         }
     }
 }

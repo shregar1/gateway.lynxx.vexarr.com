@@ -13,6 +13,4 @@
 pub mod abstraction;
 pub mod keyx;
 
-pub use abstraction::{
-    AdminPrincipal, HmacVerifier, LicenseVerifier, TokenValidator, VerifierError,
-};
+pub use abstraction::{AdminPrincipal, HmacVerifier, LicenseVerifier, TokenValidator};

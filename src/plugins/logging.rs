@@ -6,6 +6,12 @@ use uuid::Uuid;
 
 pub struct LoggingPlugin;
 
+impl Default for LoggingPlugin {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl LoggingPlugin {
     pub fn new() -> Self {
         Self

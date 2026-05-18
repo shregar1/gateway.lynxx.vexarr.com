@@ -13,10 +13,7 @@ impl TransformService {
         Self { repo }
     }
 
-    pub async fn list(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<TransformRule>, GatewayError> {
+    pub async fn list(&self, service_id: &Uuid) -> Result<Vec<TransformRule>, GatewayError> {
         self.repo.list_transform_rules(service_id).await
     }
 

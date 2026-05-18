@@ -130,11 +130,7 @@ impl DigestAuthPlugin {
     }
 
     /// Validate the digest response against the expected value.
-    fn validate(
-        &self,
-        method: &str,
-        params: &HashMap<String, String>,
-    ) -> bool {
+    fn validate(&self, method: &str, params: &HashMap<String, String>) -> bool {
         let username = match params.get("username") {
             Some(u) => u,
             None => return false,
@@ -185,10 +181,7 @@ impl Plugin for DigestAuthPlugin {
         "digest-auth"
     }
 
-    async fn on_request(
-        &self,
-        req: &mut Request<axum::body::Body>,
-    ) -> Result<(), PluginError> {
+    async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let auth_header = req
             .headers()
             .get("authorization")
@@ -199,18 +192,18 @@ impl Plugin for DigestAuthPlugin {
             None => {
                 // No Authorization header — issue a challenge.
                 let challenge = self.build_challenge();
-                req.extensions_mut()
-                    .insert(DigestChallenge {
-                        www_authenticate: challenge,
-                    });
+                req.extensions_mut().insert(DigestChallenge {
+                    www_authenticate: challenge,
+                });
             }
-            Some(ref header) if !header.starts_with("Digest ") && !header.starts_with("digest ") => {
+            Some(ref header)
+                if !header.starts_with("Digest ") && !header.starts_with("digest ") =>
+            {
                 // Wrong auth scheme.
                 let challenge = self.build_challenge();
-                req.extensions_mut()
-                    .insert(DigestChallenge {
-                        www_authenticate: challenge,
-                    });
+                req.extensions_mut().insert(DigestChallenge {
+                    www_authenticate: challenge,
+                });
             }
             Some(ref header) => {
                 let params = Self::parse_digest_params(header);
@@ -218,10 +211,9 @@ impl Plugin for DigestAuthPlugin {
 
                 if !self.validate(method, &params) {
                     let challenge = self.build_challenge();
-                    req.extensions_mut()
-                        .insert(DigestChallenge {
-                            www_authenticate: challenge,
-                        });
+                    req.extensions_mut().insert(DigestChallenge {
+                        www_authenticate: challenge,
+                    });
                 }
             }
         }
@@ -302,7 +294,7 @@ mod tests {
         let cnonce = "clientnonce";
         let qop = "auth";
 
-        let ha1 = DigestAuthPlugin::sha256_hex(&format!("alice:lynxx:secret"));
+        let ha1 = DigestAuthPlugin::sha256_hex("alice:lynxx:secret");
         let ha2 = DigestAuthPlugin::sha256_hex(&format!("{}:{}", method, uri));
         let response_hash = DigestAuthPlugin::sha256_hex(&format!(
             "{}:{}:{}:{}:{}:{}",

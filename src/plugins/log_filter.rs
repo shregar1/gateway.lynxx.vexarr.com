@@ -47,10 +47,17 @@ impl LogFilterPlugin {
 
         let skip_status = config["skip_status"]
             .as_array()
-            .map(|a| a.iter().filter_map(|v| v.as_u64().map(|n| n as u16)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_u64().map(|n| n as u16))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        let sample_rate = config["sample_rate"].as_f64().unwrap_or(1.0).clamp(0.0, 1.0);
+        let sample_rate = config["sample_rate"]
+            .as_f64()
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
 
         Ok(Self {
             skip_paths,
@@ -89,14 +96,16 @@ impl Plugin for LogFilterPlugin {
         Ok(())
     }
 
-    async fn on_response(&self, resp: &mut axum::http::Response<BoxBody>) -> Result<(), PluginError> {
+    async fn on_response(
+        &self,
+        resp: &mut axum::http::Response<BoxBody>,
+    ) -> Result<(), PluginError> {
         // Post-response status check: mark suppress if status matches skip list.
         if !self.skip_status.is_empty() {
             let status = resp.status().as_u16();
             if self.skip_status.contains(&status) {
-                resp.extensions_mut().insert(LogFilterDecision {
-                    suppress: true,
-                });
+                resp.extensions_mut()
+                    .insert(LogFilterDecision { suppress: true });
             }
         }
         Ok(())

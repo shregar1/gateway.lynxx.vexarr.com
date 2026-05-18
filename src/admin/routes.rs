@@ -120,10 +120,18 @@ async fn cascade_soft_delete_service(state: &AdminState, service_id: Uuid) {
             tracing::warn!(service_id = %service_id, error = %e, "cascade: failed to soft-delete routes for service");
         }
     }
-    if let Err(e) = state.repo.soft_delete_targets_for_service(&service_id).await {
+    if let Err(e) = state
+        .repo
+        .soft_delete_targets_for_service(&service_id)
+        .await
+    {
         tracing::warn!(service_id = %service_id, error = %e, "cascade: failed to soft-delete targets for service");
     }
-    if let Err(e) = state.repo.soft_delete_plugins_for_service(&service_id).await {
+    if let Err(e) = state
+        .repo
+        .soft_delete_plugins_for_service(&service_id)
+        .await
+    {
         tracing::warn!(service_id = %service_id, error = %e, "cascade: failed to soft-delete plugins for service");
     }
     state.route_table.remove_service(&service_id);
@@ -149,10 +157,7 @@ fn json_with_etag<T: Serialize>(entity: T, etag: &str) -> Response {
 }
 
 /// Check If-Match header against current ETag. Returns Err(412) on mismatch.
-fn check_if_match(
-    headers: &HeaderMap,
-    current_etag: &str,
-) -> Result<(), GatewayError> {
+fn check_if_match(headers: &HeaderMap, current_etag: &str) -> Result<(), GatewayError> {
     if let Some(if_match) = headers.get(header::IF_MATCH) {
         let val = if_match.to_str().unwrap_or("");
         if val != "*" && val != current_etag {
@@ -425,8 +430,14 @@ pub async fn update_service(
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
     check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
-    let new_domain = input.domain.clone().unwrap_or_else(|| existing.domain.clone());
-    let new_subdomain = input.subdomain.clone().unwrap_or_else(|| existing.subdomain.clone());
+    let new_domain = input
+        .domain
+        .clone()
+        .unwrap_or_else(|| existing.domain.clone());
+    let new_subdomain = input
+        .subdomain
+        .clone()
+        .unwrap_or_else(|| existing.subdomain.clone());
     validate_domain_subdomain(&new_domain, &new_subdomain, &state.route_table, Some(&id))?;
 
     let new_strategy = input
@@ -445,7 +456,9 @@ pub async fn update_service(
         service_type: input
             .service_type
             .unwrap_or_else(|| existing.service_type.clone()),
-        document_root: input.document_root.or_else(|| existing.document_root.clone()),
+        document_root: input
+            .document_root
+            .or_else(|| existing.document_root.clone()),
         index_file: input
             .index_file
             .unwrap_or_else(|| existing.index_file.clone()),
@@ -462,9 +475,7 @@ pub async fn update_service(
         pass_host_header: existing.pass_host_header,
         drain_timeout_ms: existing.drain_timeout_ms,
         project_id: input.project_id.or(existing.project_id),
-        domain: input
-            .domain
-            .unwrap_or_else(|| existing.domain.clone()),
+        domain: input.domain.unwrap_or_else(|| existing.domain.clone()),
         subdomain: input
             .subdomain
             .unwrap_or_else(|| existing.subdomain.clone()),
@@ -477,7 +488,9 @@ pub async fn update_service(
     state.route_table.update_service(&id, updated.clone());
     state.client_pool.invalidate(&id);
     if url_changed {
-        state.health.reset_on_upstream_change(&id, &updated.name, "upstream URL changed");
+        state
+            .health
+            .reset_on_upstream_change(&id, &updated.name, "upstream URL changed");
     }
 
     if strategy_changed {
@@ -560,9 +573,7 @@ pub async fn get_health(
         .health
         .get(&id)
         .ok_or_else(|| GatewayError::NotFound(format!("health for service {id}")))?;
-    let ts = health
-        .last_check_at
-        .unwrap_or_else(|| DateTime::<Utc>::UNIX_EPOCH);
+    let ts = health.last_check_at.unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
     let etag = entity_etag(&health.service_id, &ts);
     Ok(json_with_etag(health, &etag))
 }
@@ -769,7 +780,10 @@ pub async fn patch_route(
 
     if let Some(ref sid) = input.service_id {
         if state.route_table.get_service(sid).is_none() {
-            return Err(GatewayError::BadRequest(format!("service {} not found", sid)));
+            return Err(GatewayError::BadRequest(format!(
+                "service {} not found",
+                sid
+            )));
         }
     }
 
@@ -840,8 +854,14 @@ pub async fn patch_service(
         .ok_or_else(|| GatewayError::NotFound(format!("service {id}")))?;
     check_if_match(&headers, &entity_etag(&existing.id, &existing.updated_at))?;
 
-    let new_domain = input.domain.clone().unwrap_or_else(|| existing.domain.clone());
-    let new_subdomain = input.subdomain.clone().unwrap_or_else(|| existing.subdomain.clone());
+    let new_domain = input
+        .domain
+        .clone()
+        .unwrap_or_else(|| existing.domain.clone());
+    let new_subdomain = input
+        .subdomain
+        .clone()
+        .unwrap_or_else(|| existing.subdomain.clone());
     validate_domain_subdomain(&new_domain, &new_subdomain, &state.route_table, Some(&id))?;
 
     let new_strategy = input
@@ -851,15 +871,22 @@ pub async fn patch_service(
 
     let updated = Service {
         id,
-        name: input.name.unwrap_or_else(|| existing.name.to_string()).into(),
+        name: input
+            .name
+            .unwrap_or_else(|| existing.name.to_string())
+            .into(),
         url: input.url.unwrap_or_else(|| existing.url.clone()),
         retries: input.retries.unwrap_or(existing.retries),
-        connect_timeout_ms: input.connect_timeout_ms.unwrap_or(existing.connect_timeout_ms),
+        connect_timeout_ms: input
+            .connect_timeout_ms
+            .unwrap_or(existing.connect_timeout_ms),
         lb_strategy: new_strategy,
         service_type: input
             .service_type
             .unwrap_or_else(|| existing.service_type.clone()),
-        document_root: input.document_root.or_else(|| existing.document_root.clone()),
+        document_root: input
+            .document_root
+            .or_else(|| existing.document_root.clone()),
         index_file: input
             .index_file
             .unwrap_or_else(|| existing.index_file.clone()),
@@ -876,9 +903,7 @@ pub async fn patch_service(
         pass_host_header: existing.pass_host_header,
         drain_timeout_ms: existing.drain_timeout_ms,
         project_id: input.project_id.or(existing.project_id),
-        domain: input
-            .domain
-            .unwrap_or_else(|| existing.domain.clone()),
+        domain: input.domain.unwrap_or_else(|| existing.domain.clone()),
         subdomain: input
             .subdomain
             .unwrap_or_else(|| existing.subdomain.clone()),
@@ -891,7 +916,9 @@ pub async fn patch_service(
     state.route_table.update_service(&id, updated.clone());
     state.client_pool.invalidate(&id);
     if url_changed {
-        state.health.reset_on_upstream_change(&id, &updated.name, "upstream URL changed");
+        state
+            .health
+            .reset_on_upstream_change(&id, &updated.name, "upstream URL changed");
     }
 
     if strategy_changed {
@@ -1375,7 +1402,11 @@ pub async fn update_target_handler(
     let updated = Target {
         id: existing.id,
         service_id: existing.service_id,
-        url: input.url.clone().unwrap_or_else(|| existing.url.to_string()).into(),
+        url: input
+            .url
+            .clone()
+            .unwrap_or_else(|| existing.url.to_string())
+            .into(),
         weight: input.weight.unwrap_or(existing.weight).max(1),
         enabled: input.enabled.unwrap_or(existing.enabled),
         zone: input.zone.or(existing.zone.clone()),
@@ -1437,8 +1468,12 @@ pub async fn get_target_handler(
         .map(|ts| ts.lifecycle().as_str())
         .unwrap_or(target.state.as_str());
     let mut val = serde_json::to_value(&target).unwrap();
-    val.as_object_mut().unwrap().insert("in_flight".to_string(), serde_json::json!(in_flight));
-    val.as_object_mut().unwrap().insert("state".to_string(), serde_json::json!(lifecycle));
+    val.as_object_mut()
+        .unwrap()
+        .insert("in_flight".to_string(), serde_json::json!(in_flight));
+    val.as_object_mut()
+        .unwrap()
+        .insert("state".to_string(), serde_json::json!(lifecycle));
     let etag = entity_etag(&target.id, &target.updated_at);
     Ok(json_with_etag(val, &etag))
 }
@@ -1866,9 +1901,7 @@ pub async fn healthz(State(state): State<AdminState>) -> Json<StatusResponse> {
 
 // ---------- circuit breakers ----------
 
-pub async fn list_circuit_breakers(
-    State(state): State<AdminState>,
-) -> Json<Vec<ServiceHealth>> {
+pub async fn list_circuit_breakers(State(state): State<AdminState>) -> Json<Vec<ServiceHealth>> {
     Json(state.health.list())
 }
 
@@ -1881,7 +1914,9 @@ pub async fn reset_circuit_breaker(
         .reset_circuit(&service_id)
         .ok_or_else(|| GatewayError::NotFound(format!("service {service_id}")))?;
     tracing::info!(service_id = %service_id, "circuit breaker manually reset");
-    Ok(Json(serde_json::json!({"reset": true, "service_id": service_id})))
+    Ok(Json(
+        serde_json::json!({"reset": true, "service_id": service_id}),
+    ))
 }
 
 // ---------- per-service circuit breaker state ----------
@@ -2420,10 +2455,7 @@ pub async fn test_route(
     )
     .await;
 
-    Ok(Json(RouteTestResponse {
-        external,
-        internal,
-    }))
+    Ok(Json(RouteTestResponse { external, internal }))
 }
 
 async fn fire_test_request(
@@ -2449,10 +2481,8 @@ async fn fire_test_request(
                 .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
                 .collect();
             let body_bytes = resp.bytes().await.unwrap_or_default();
-            let body_preview = String::from_utf8_lossy(
-                &body_bytes[..body_bytes.len().min(2048)],
-            )
-            .to_string();
+            let body_preview =
+                String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(2048)]).to_string();
 
             RouteTestResult {
                 url: url.to_string(),

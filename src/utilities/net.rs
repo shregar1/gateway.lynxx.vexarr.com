@@ -92,7 +92,11 @@ pub async fn resilient_bind(cfg: &BindConfig) -> anyhow::Result<BoundListener> {
     let std_listener = try_bind(create_reusable_socket()?, fallback_addr, cfg.backlog)?;
     let actual_port = std_listener.local_addr()?.port();
     let listener = TcpListener::from_std(std_listener)?;
-    tracing::warn!(requested_port = cfg.port, actual_port, "bound to fallback port");
+    tracing::warn!(
+        requested_port = cfg.port,
+        actual_port,
+        "bound to fallback port"
+    );
     Ok(BoundListener {
         listener,
         port: actual_port,

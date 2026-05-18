@@ -29,6 +29,12 @@ pub struct WasmWatcher {
     paths: Arc<Mutex<HashMap<PathBuf, SystemTime>>>,
 }
 
+impl Default for WasmWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WasmWatcher {
     pub fn new() -> Self {
         Self {

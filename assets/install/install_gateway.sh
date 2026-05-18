@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lynxx Gateway installer.
 #
-#   curl -fsSL https://backend.lynxx.vexarr.com/install_gateway.sh | sh
+#   curl -fsSL https://backend.lynxx.vexarr.com/install_gateway.sh | bash
 #
 # Detects OS + arch, asks the Lynxx gateway to stream the matching binary
 # from private GCS, installs into /usr/local/bin (or ~/.local/bin).
@@ -10,6 +10,14 @@
 #   LYNXX_INSTALL_DIR  — install destination
 #   LYNXX_API_BASE     — alternate gateway base (default https://backend.lynxx.vexarr.com)
 #   LYNXX_FORCE=1      — reinstall even if already present
+
+# Require bash. Many systems map `sh` to `dash` which lacks `set -o pipefail`,
+# `[[ ... ]]`, and other features used below.
+if [ -z "${BASH_VERSION:-}" ]; then
+  echo "This installer requires bash. Re-run as:" >&2
+  echo "  curl -fsSL <url> | bash" >&2
+  exit 1
+fi
 
 set -euo pipefail
 
@@ -168,7 +176,7 @@ verify_witness_root() {
 }
 
 banner() {
-  [ -t 1 ] || return
+  [ -t 1 ] || return 0
   printf '\n%s' "$C_CYAN"
   cat <<'BANNER'
    _                            ____       _

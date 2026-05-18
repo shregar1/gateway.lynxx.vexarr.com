@@ -5,10 +5,10 @@ use crate::plugins::request_transformer::{
 };
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::header::{HeaderName, HeaderValue};
 use axum::http::{Request, Response};
 use http_body_util::BodyExt;
-use axum::body::Body;
 
 pub struct ResponseTransformerPlugin {
     add: Vec<(HeaderName, HeaderValue)>,

@@ -45,8 +45,8 @@ impl BasicAuthPlugin {
 
     /// Verify `password` against an Argon2id PHC-format hash string.
     fn verify_argon2(hash: &str, password: &str) -> bool {
-        use argon2::Argon2;
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
+        use argon2::Argon2;
         let Ok(parsed) = PasswordHash::new(hash) else {
             return false;
         };
@@ -121,8 +121,8 @@ mod tests {
 
     #[test]
     fn verify_argon2_round_trip() {
+        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
         use argon2::Argon2;
-        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
             .hash_password(b"hunter2", &salt)

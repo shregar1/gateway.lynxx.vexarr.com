@@ -66,6 +66,7 @@ impl LbStrategy {
 }
 
 /// Request-scoped context for hash-based LB strategies.
+#[derive(Default)]
 pub struct RequestContext<'a> {
     pub client_ip: Option<&'a str>,
     pub uri_path: Option<&'a str>,
@@ -75,18 +76,6 @@ pub struct RequestContext<'a> {
     pub header_hash_value: Option<&'a str>,
     /// Value of the query parameter named by `Service.lb_hash_query_param`.
     pub query_hash_value: Option<&'a str>,
-}
-
-impl<'a> Default for RequestContext<'a> {
-    fn default() -> Self {
-        Self {
-            client_ip: None,
-            uri_path: None,
-            sticky_cookie: None,
-            header_hash_value: None,
-            query_hash_value: None,
-        }
-    }
 }
 
 fn hrw_hash(key: &str, target_id: &Uuid) -> u64 {
@@ -249,10 +238,7 @@ impl ServiceLoadBalancer {
                 let zone_targets: Vec<_> = self
                     .targets
                     .iter()
-                    .filter(|s| {
-                        s.is_routable()
-                            && s.target.zone.as_deref() == Some(zone)
-                    })
+                    .filter(|s| s.is_routable() && s.target.zone.as_deref() == Some(zone))
                     .collect();
 
                 if !zone_targets.is_empty() {
@@ -263,9 +249,7 @@ impl ServiceLoadBalancer {
                             self.pick_random_choose_from_subset(&zone_targets)
                         }
                         LbStrategy::First => Some(zone_targets[0].clone()),
-                        LbStrategy::LeastTime => {
-                            self.pick_least_time_from_subset(&zone_targets)
-                        }
+                        LbStrategy::LeastTime => self.pick_least_time_from_subset(&zone_targets),
                         _ => unreachable!(),
                     };
                 }
@@ -284,13 +268,9 @@ impl ServiceLoadBalancer {
             LbStrategy::HeaderHash => {
                 self.pick_hrw(ctx.header_hash_value.unwrap_or("__no_header__"))
             }
-            LbStrategy::QueryHash => {
-                self.pick_hrw(ctx.query_hash_value.unwrap_or("__no_query__"))
-            }
+            LbStrategy::QueryHash => self.pick_hrw(ctx.query_hash_value.unwrap_or("__no_query__")),
             LbStrategy::UriHash => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
-            LbStrategy::ClientIpHash => {
-                self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0"))
-            }
+            LbStrategy::ClientIpHash => self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0")),
             LbStrategy::LeastTime => self.pick_least_time(),
         }
     }
@@ -384,11 +364,7 @@ impl ServiceLoadBalancer {
 
     /// Random selection among healthy, enabled targets.
     fn pick_random(&self) -> Option<Arc<TargetState>> {
-        let healthy: Vec<_> = self
-            .targets
-            .iter()
-            .filter(|s| s.is_routable())
-            .collect();
+        let healthy: Vec<_> = self.targets.iter().filter(|s| s.is_routable()).collect();
         if healthy.is_empty() {
             return None;
         }
@@ -403,11 +379,7 @@ impl ServiceLoadBalancer {
     /// the one with fewer in-flight requests. Statistically near-optimal
     /// distribution without the coordination cost of full least-conn.
     fn pick_random_choose(&self) -> Option<Arc<TargetState>> {
-        let healthy: Vec<_> = self
-            .targets
-            .iter()
-            .filter(|s| s.is_routable())
-            .collect();
+        let healthy: Vec<_> = self.targets.iter().filter(|s| s.is_routable()).collect();
         self.p2c_from(&healthy)
     }
 
@@ -485,10 +457,7 @@ impl ServiceLoadBalancer {
     /// Primary / failover: always pick the first healthy, enabled target in
     /// list order. Traffic only moves to the next when preceding ones are down.
     fn pick_first(&self) -> Option<Arc<TargetState>> {
-        self.targets
-            .iter()
-            .find(|s| s.is_routable())
-            .cloned()
+        self.targets.iter().find(|s| s.is_routable()).cloned()
     }
 }
 
@@ -567,12 +536,7 @@ impl LoadBalancerRegistry {
         }
     }
 
-    pub fn set_target_lifecycle(
-        &self,
-        service_id: &Uuid,
-        target_id: &Uuid,
-        lc: TargetLifecycle,
-    ) {
+    pub fn set_target_lifecycle(&self, service_id: &Uuid, target_id: &Uuid, lc: TargetLifecycle) {
         if let Some(entry) = self.inner.get(service_id) {
             if let Ok(guard) = entry.read() {
                 for s in guard.targets() {
@@ -737,7 +701,10 @@ mod tests {
             *counts.entry(t.target.url.clone()).or_insert(0) += 1;
         }
         // host-0 should get 3x the traffic of host-1
-        assert!(*counts.get("http://host-0:8080").unwrap_or(&0) > *counts.get("http://host-1:8080").unwrap_or(&0));
+        assert!(
+            *counts.get("http://host-0:8080").unwrap_or(&0)
+                > *counts.get("http://host-1:8080").unwrap_or(&0)
+        );
     }
 
     #[test]
@@ -947,7 +914,10 @@ mod tests {
 
     #[test]
     fn strategy_parsing() {
-        assert_eq!(LbStrategy::from_str("random-choose"), LbStrategy::RandomChoose);
+        assert_eq!(
+            LbStrategy::from_str("random-choose"),
+            LbStrategy::RandomChoose
+        );
         assert_eq!(LbStrategy::from_str("p2c"), LbStrategy::RandomChoose);
         assert_eq!(LbStrategy::from_str("first"), LbStrategy::First);
         assert_eq!(LbStrategy::from_str("failover"), LbStrategy::First);
@@ -958,7 +928,10 @@ mod tests {
         assert_eq!(LbStrategy::from_str("least-time"), LbStrategy::LeastTime);
         assert_eq!(LbStrategy::from_str("least_time"), LbStrategy::LeastTime);
         assert_eq!(LbStrategy::from_str("leasttime"), LbStrategy::LeastTime);
-        assert_eq!(LbStrategy::from_str("unknown-thing"), LbStrategy::RoundRobin);
+        assert_eq!(
+            LbStrategy::from_str("unknown-thing"),
+            LbStrategy::RoundRobin
+        );
     }
 
     // ── InFlightGuard ──
@@ -1010,7 +983,10 @@ mod tests {
         let first = lb.pick(None, &ctx).unwrap();
         for _ in 0..20 {
             let t = lb.pick(None, &ctx).unwrap();
-            assert_eq!(t.target.id, first.target.id, "uri_hash not consistent for same path");
+            assert_eq!(
+                t.target.id, first.target.id,
+                "uri_hash not consistent for same path"
+            );
         }
     }
 
@@ -1028,7 +1004,11 @@ mod tests {
             let t = lb.pick(None, &ctx).unwrap();
             seen.insert(t.target.url.clone());
         }
-        assert!(seen.len() > 1, "uri_hash didn't spread across targets: {:?}", seen);
+        assert!(
+            seen.len() > 1,
+            "uri_hash didn't spread across targets: {:?}",
+            seen
+        );
     }
 
     // ── Feature 87: ClientIpHash ──
@@ -1044,7 +1024,10 @@ mod tests {
         let first = lb.pick(None, &ctx).unwrap();
         for _ in 0..20 {
             let t = lb.pick(None, &ctx).unwrap();
-            assert_eq!(t.target.id, first.target.id, "client_ip_hash not consistent");
+            assert_eq!(
+                t.target.id, first.target.id,
+                "client_ip_hash not consistent"
+            );
         }
     }
 
@@ -1160,8 +1143,14 @@ mod tests {
         assert_eq!(LbStrategy::from_str("uri-hash"), LbStrategy::UriHash);
         assert_eq!(LbStrategy::from_str("uri_hash"), LbStrategy::UriHash);
         assert_eq!(LbStrategy::from_str("urihash"), LbStrategy::UriHash);
-        assert_eq!(LbStrategy::from_str("client-ip-hash"), LbStrategy::ClientIpHash);
-        assert_eq!(LbStrategy::from_str("client_ip_hash"), LbStrategy::ClientIpHash);
+        assert_eq!(
+            LbStrategy::from_str("client-ip-hash"),
+            LbStrategy::ClientIpHash
+        );
+        assert_eq!(
+            LbStrategy::from_str("client_ip_hash"),
+            LbStrategy::ClientIpHash
+        );
     }
 
     // ── Drain lifecycle ──

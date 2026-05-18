@@ -8,7 +8,7 @@
 //! TODO(v2): vector-similarity caching. Embed the user's last message,
 //! ANN-search a small in-memory index of recent embeddings, return on cosine
 //! >= threshold. The plumbing for emitting `cache=hit_semantic` metric labels
-//! is already in place; only the index needs to be added.
+//! > is already in place; only the index needs to be added.
 //!
 //! The cache is keyed on a per-instance `DashMap` rather than the shared
 //! global pattern in `proxy_cache.rs`. LLM responses can be large (tens of
@@ -125,7 +125,6 @@ impl ResponseCache {
         }
     }
 
-
     pub async fn get_semantic(&self, model: &str, body: &Value) -> Option<CacheEntry> {
         if !self.enabled || self.strategy != "semantic" {
             return None;
@@ -168,7 +167,15 @@ impl ResponseCache {
         }
         let url = self.reusex_url.as_ref().unwrap();
         let messages = body.get("messages").unwrap();
-        let prompt = messages.as_array().unwrap().last().unwrap().get("content").unwrap().as_str().unwrap();
+        let prompt = messages
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()
+            .get("content")
+            .unwrap()
+            .as_str()
+            .unwrap();
 
         let store_url = format!("{}/v1/cache/store", url.trim_end_matches("/"));
         let payload: Value = serde_json::from_slice(response_body).unwrap_or(Value::Null);

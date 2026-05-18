@@ -1,13 +1,13 @@
 //! Zero-Trust Runtime Capability Tokens (JWT).
 //!
 //! This module handles the generation and verification of short-lived
-//! execution grants. A grant is a signed JWT that 
+//! execution grants. A grant is a signed JWT that
 //! carries the set of features the client is allowed to execute.
 
-use jsonwebtoken::{encode, decode, Header, Validation, EncodingKey, DecodingKey};
+use chrono::{Duration, Utc};
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use chrono::{Utc, Duration};
 
 /// Features or capabilities granted by the server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,10 +61,10 @@ impl GrantManager {
 
     /// Generate a new signed grant for a customer/device pair.
     pub fn create_grant(
-        &self, 
-        customer_urn: &str, 
-        device_id: Uuid, 
-        capabilities: Vec<Capability>
+        &self,
+        customer_urn: &str,
+        device_id: Uuid,
+        capabilities: Vec<Capability>,
     ) -> anyhow::Result<(String, String)> {
         let token_id = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -87,11 +87,8 @@ impl GrantManager {
 
     /// Verify a token and return the claims.
     pub fn verify_grant(&self, token: &str) -> anyhow::Result<GrantClaims> {
-        let token_data = decode::<GrantClaims>(
-            token,
-            &self.decoding_key,
-            &Validation::default(),
-        ).map_err(|e| anyhow::anyhow!("jwt verification failed: {e}"))?;
+        let token_data = decode::<GrantClaims>(token, &self.decoding_key, &Validation::default())
+            .map_err(|e| anyhow::anyhow!("jwt verification failed: {e}"))?;
 
         Ok(token_data.claims)
     }

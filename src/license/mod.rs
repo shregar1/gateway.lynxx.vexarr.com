@@ -56,9 +56,7 @@ pub struct License {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LicenseError {
-    #[error(
-        "[license].payload + [license].signature required when [keyx] is configured"
-    )]
+    #[error("[license].payload + [license].signature required when [keyx] is configured")]
     Missing,
     #[error("licence verification rejected: {0}")]
     Rejected(String),
@@ -343,8 +341,9 @@ pub fn spawn_license_refresher(
                 .await
             {
                 Ok(true) => tracing::debug!("licence re-verify ok"),
-                Ok(false) => state
-                    .flip_inactive("verifier says licence is no longer valid (revoked)"),
+                Ok(false) => {
+                    state.flip_inactive("verifier says licence is no longer valid (revoked)")
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "licence re-verify failed; keeping current state")
                 }
@@ -465,8 +464,9 @@ mod tests {
 
     #[test]
     fn license_state_verified_constructor_reports_verified_mode() {
+        use crate::integrations::abstraction::VerifierError;
+        use crate::integrations::LicenseVerifier;
         use async_trait::async_trait;
-        use crate::integrations::{LicenseVerifier, VerifierError};
 
         struct AlwaysOk;
         #[async_trait]

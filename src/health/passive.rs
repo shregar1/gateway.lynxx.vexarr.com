@@ -151,7 +151,7 @@ mod tests {
         let tid = Uuid::new_v4();
         assert!(!tracker.record_failure(&sid, &tid)); // 1
         assert!(!tracker.record_failure(&sid, &tid)); // 2
-        assert!(tracker.record_failure(&sid, &tid));  // 3 → tripped!
+        assert!(tracker.record_failure(&sid, &tid)); // 3 → tripped!
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
         tracker.record_failure(&sid, &tid);
         tracker.record_failure(&sid, &tid); // tripped
         assert!(!tracker.record_success(&sid, &tid)); // 1 success — not enough
-        assert!(tracker.record_success(&sid, &tid));  // 2 successes → recovered
+        assert!(tracker.record_success(&sid, &tid)); // 2 successes → recovered
     }
 
     #[test]
@@ -201,9 +201,9 @@ mod tests {
         tracker.record_failure(&sid, &tid); // 1
         tracker.record_failure(&sid, &tid); // 2
         tracker.record_success(&sid, &tid); // resets consecutive
-        // Failures still in window, but we need a fresh sequence of
-        // consecutive failures from the tracker's sliding window perspective.
-        // The window still has 2 failures, so one more should trip.
+                                            // Failures still in window, but we need a fresh sequence of
+                                            // consecutive failures from the tracker's sliding window perspective.
+                                            // The window still has 2 failures, so one more should trip.
         assert!(tracker.record_failure(&sid, &tid)); // 3 in window → tripped
     }
 
@@ -250,7 +250,7 @@ mod tests {
         // t1 has 1 failure, t2 has 1 failure — neither should be tripped.
         assert!(tracker.record_failure(&sid, &t1)); // t1 → 2 → tripped
         assert!(!tracker.record_failure(&sid, &t1)); // already tripped
-        // t2 still only has 1 failure.
+                                                     // t2 still only has 1 failure.
         assert!(tracker.record_failure(&sid, &t2)); // t2 → 2 → tripped
     }
 }

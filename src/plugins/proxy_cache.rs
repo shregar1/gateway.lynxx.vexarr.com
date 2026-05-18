@@ -1,12 +1,12 @@
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::{Request, Response};
 use dashmap::DashMap;
 use http_body_util::BodyExt;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use axum::body::Body;
 
 #[derive(Clone)]
 struct CacheEntry {

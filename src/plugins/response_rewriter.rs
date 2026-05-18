@@ -34,19 +34,16 @@ impl ResponseRewriterPlugin {
                     .unwrap_or("")
                     .to_string();
 
-                let is_regex = item
-                    .get("regex")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let is_regex = item.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
 
-                let pattern_str = item
-                    .get("pattern")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        GatewayError::BadRequest(
-                            "response-rewriter: each rule needs a `pattern`".into(),
-                        )
-                    })?;
+                let pattern_str =
+                    item.get("pattern")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            GatewayError::BadRequest(
+                                "response-rewriter: each rule needs a `pattern`".into(),
+                            )
+                        })?;
 
                 let pattern = if is_regex {
                     let re = Regex::new(pattern_str).map_err(|e| {
@@ -155,7 +152,9 @@ impl Plugin for ResponseRewriterPlugin {
         for rule in &self.rules {
             match &rule.pattern {
                 RewritePattern::Regex(re) => {
-                    text = re.replace_all(&text, rule.replacement.as_str()).into_owned();
+                    text = re
+                        .replace_all(&text, rule.replacement.as_str())
+                        .into_owned();
                 }
                 RewritePattern::Literal(lit) => {
                     text = text.replace(lit, &rule.replacement);

@@ -5,10 +5,14 @@
 //! caller once, at creation time. Tokens carry a [`Role`] which the
 //! per-route guard middleware compares against the route's minimum.
 
-pub mod middleware;
 pub mod grant;
 pub mod handshake;
+pub mod middleware;
 
+use argon2::{
+    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
+    Argon2,
+};
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
@@ -19,17 +23,14 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::str::FromStr;
 use uuid::Uuid;
-use argon2::{
-    password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
-    Argon2,
-};
 
 /// Argon2id hashing for commercial API keys.
 /// API keys are hashed with a unique salt and stored in the database.
 pub fn hash_api_key(raw: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();
-    let password_hash = argon2.hash_password(raw.as_bytes(), &salt)
+    let password_hash = argon2
+        .hash_password(raw.as_bytes(), &salt)
         .map_err(|e| anyhow::anyhow!("hashing failed: {e}"))?
         .to_string();
     Ok(password_hash)
@@ -41,7 +42,9 @@ pub fn verify_api_key(raw: &str, hash: &str) -> bool {
         Ok(h) => h,
         Err(_) => return false,
     };
-    Argon2::default().verify_password(raw.as_bytes(), &parsed_hash).is_ok()
+    Argon2::default()
+        .verify_password(raw.as_bytes(), &parsed_hash)
+        .is_ok()
 }
 
 /// Role assigned to an admin token.

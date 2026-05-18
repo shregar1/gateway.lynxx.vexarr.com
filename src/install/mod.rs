@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use axum::{
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
     Router,
@@ -116,7 +116,10 @@ pub fn router(state: Arc<InstallState>) -> Router {
         .route("/install_gateway.ps1", get(serve_install_gateway_ps1))
         .route("/v1/install/binary", get(stream_binary))
         .route("/v1/install/transparency", get(fetch_transparency_entry))
-        .route("/v1/install/transparency-root", get(fetch_transparency_root))
+        .route(
+            "/v1/install/transparency-root",
+            get(fetch_transparency_root),
+        )
         .with_state(state)
 }
 
@@ -176,12 +179,7 @@ async fn stream_binary(
     };
     let arch = match q.arch.as_str() {
         "amd64" | "arm64" => q.arch.as_str(),
-        _ => {
-            return error_response(
-                StatusCode::BAD_REQUEST,
-                "arch must be 'amd64' or 'arm64'",
-            )
-        }
+        _ => return error_response(StatusCode::BAD_REQUEST, "arch must be 'amd64' or 'arm64'"),
     };
     let bin_name = bin_name_for(artifact, os);
     let object = format!("{artifact}/{os}/{arch}/{bin_name}");
@@ -190,10 +188,7 @@ async fn stream_binary(
         Ok(t) => t,
         Err(e) => {
             tracing::error!(error = %e, "failed to obtain GCS access token");
-            return error_response(
-                StatusCode::BAD_GATEWAY,
-                "failed to obtain GCS access token",
-            );
+            return error_response(StatusCode::BAD_GATEWAY, "failed to obtain GCS access token");
         }
     };
 
@@ -226,10 +221,7 @@ async fn stream_binary(
         let (mapped, body) = if status == reqwest::StatusCode::NOT_FOUND {
             (StatusCode::NOT_FOUND, format!("no binary at {object}"))
         } else {
-            (
-                StatusCode::BAD_GATEWAY,
-                format!("upstream status {status}"),
-            )
+            (StatusCode::BAD_GATEWAY, format!("upstream status {status}"))
         };
         tracing::warn!(status = %status, object = %object, "GCS returned non-success");
         return error_response(mapped, &body);
@@ -381,9 +373,14 @@ async fn fetch_transparency_entry(
     }
 
     #[derive(Deserialize)]
-    struct ListItem { name: String }
+    struct ListItem {
+        name: String,
+    }
     #[derive(Deserialize)]
-    struct ListResp { #[serde(default)] items: Vec<ListItem> }
+    struct ListResp {
+        #[serde(default)]
+        items: Vec<ListItem>,
+    }
 
     let parsed: ListResp = match list.json().await {
         Ok(p) => p,
@@ -401,7 +398,12 @@ async fn fetch_transparency_entry(
         .max()
     {
         Some(n) => n.to_string(),
-        None => return error_response(StatusCode::NOT_FOUND, "no transparency log entry for this sha256"),
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "no transparency log entry for this sha256",
+            )
+        }
     };
     let sig_name = format!("{entry_name}.sig");
 
@@ -413,22 +415,34 @@ async fn fetch_transparency_entry(
     );
 
     let entry_body = match entry_resp {
-        Ok(r) if r.status().is_success() => match r.bytes().await { Ok(b) => b, Err(_) => return error_response(StatusCode::BAD_GATEWAY, "entry body unreadable") },
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b,
+            Err(_) => return error_response(StatusCode::BAD_GATEWAY, "entry body unreadable"),
+        },
         _ => return error_response(StatusCode::BAD_GATEWAY, "entry fetch failed"),
     };
     let sig_bytes = match sig_resp {
-        Ok(r) if r.status().is_success() => match r.bytes().await { Ok(b) => b, Err(_) => return error_response(StatusCode::BAD_GATEWAY, "sig body unreadable") },
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b,
+            Err(_) => return error_response(StatusCode::BAD_GATEWAY, "sig body unreadable"),
+        },
         _ => return error_response(StatusCode::BAD_GATEWAY, "sig fetch failed"),
     };
     if sig_bytes.len() != 64 {
-        return error_response(StatusCode::BAD_GATEWAY, "transparency log entry signature malformed");
+        return error_response(
+            StatusCode::BAD_GATEWAY,
+            "transparency log entry signature malformed",
+        );
     }
 
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let sig_b64 = B64.encode(&sig_bytes);
 
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     if let Ok(v) = HeaderValue::from_str(&sig_b64) {
         headers.insert("x-transparency-signature", v);
     }
@@ -447,11 +461,11 @@ async fn fetch_transparency_entry(
 /// transparency entry isn't included in any witness-signed root indicates
 /// the release key + bucket were used together off-the-record. Requiring
 /// witness coverage forces the attacker to also compromise the witness key.
-async fn fetch_transparency_root(
-    State(state): State<Arc<InstallState>>,
-) -> Response {
-    let root_url = format!("https://storage.googleapis.com/{TRANSPARENCY_BUCKET}/roots/latest-root.json");
-    let sig_url = format!("https://storage.googleapis.com/{TRANSPARENCY_BUCKET}/roots/latest-root.json.sig");
+async fn fetch_transparency_root(State(state): State<Arc<InstallState>>) -> Response {
+    let root_url =
+        format!("https://storage.googleapis.com/{TRANSPARENCY_BUCKET}/roots/latest-root.json");
+    let sig_url =
+        format!("https://storage.googleapis.com/{TRANSPARENCY_BUCKET}/roots/latest-root.json.sig");
 
     let (root_resp, sig_resp) = tokio::join!(
         state.client.get(&root_url).send(),
@@ -459,12 +473,23 @@ async fn fetch_transparency_root(
     );
 
     let root_body = match root_resp {
-        Ok(r) if r.status().is_success() => match r.bytes().await { Ok(b) => b, Err(_) => return error_response(StatusCode::BAD_GATEWAY, "root body unreadable") },
-        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => return error_response(StatusCode::NOT_FOUND, "no witness-signed root yet — run scripts/witness-log.sh"),
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b,
+            Err(_) => return error_response(StatusCode::BAD_GATEWAY, "root body unreadable"),
+        },
+        Ok(r) if r.status() == reqwest::StatusCode::NOT_FOUND => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                "no witness-signed root yet — run scripts/witness-log.sh",
+            )
+        }
         _ => return error_response(StatusCode::BAD_GATEWAY, "root fetch failed"),
     };
     let sig_bytes = match sig_resp {
-        Ok(r) if r.status().is_success() => match r.bytes().await { Ok(b) => b, Err(_) => return error_response(StatusCode::BAD_GATEWAY, "root sig unreadable") },
+        Ok(r) if r.status().is_success() => match r.bytes().await {
+            Ok(b) => b,
+            Err(_) => return error_response(StatusCode::BAD_GATEWAY, "root sig unreadable"),
+        },
         _ => return error_response(StatusCode::BAD_GATEWAY, "root sig fetch failed"),
     };
     if sig_bytes.len() != 64 {
@@ -473,7 +498,10 @@ async fn fetch_transparency_root(
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let sig_b64 = B64.encode(&sig_bytes);
     let mut headers = HeaderMap::new();
-    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
     if let Ok(v) = HeaderValue::from_str(&sig_b64) {
         headers.insert("x-witness-signature", v);
     }

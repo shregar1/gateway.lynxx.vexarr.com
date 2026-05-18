@@ -25,11 +25,7 @@ impl MarketplaceService {
         self.repo.create_marketplace_plugin(plugin).await
     }
 
-    pub async fn update(
-        &self,
-        id: &Uuid,
-        plugin: &MarketplacePlugin,
-    ) -> Result<(), GatewayError> {
+    pub async fn update(&self, id: &Uuid, plugin: &MarketplacePlugin) -> Result<(), GatewayError> {
         self.repo.update_marketplace_plugin(id, plugin).await
     }
 

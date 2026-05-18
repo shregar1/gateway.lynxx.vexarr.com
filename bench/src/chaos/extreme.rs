@@ -202,8 +202,7 @@ pub async fn run(admin: &AdminClient, args: &Args) -> Result<Report> {
         admin.disable_global_ratelimit().await;
 
         // Warmup — discard results, let connections and caches settle.
-        let r = run_tier(&client, &proxy_url, rps, warmup).await;
-        drop(r);
+        let _ = run_tier(&client, &proxy_url, rps, warmup).await;
 
         // Measure: gateway
         let gw = run_tier(&client, &proxy_url, rps, measure).await;

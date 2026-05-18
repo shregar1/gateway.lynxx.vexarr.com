@@ -362,7 +362,9 @@ mod tests {
     }
 
     fn req_with_hmac_header(b64_sig: &str) -> Request<Body> {
-        let date = chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT").to_string();
+        let date = chrono::Utc::now()
+            .format("%a, %d %b %Y %H:%M:%S GMT")
+            .to_string();
         Request::builder()
             .method("POST")
             .uri("/v1/things")
@@ -389,7 +391,9 @@ mod tests {
     async fn keyx_mode_accepts_when_keyx_says_valid() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(wm_path("/v1/keys/00000000-0000-0000-0000-0000000000bb/verify-hmac"))
+            .and(wm_path(
+                "/v1/keys/00000000-0000-0000-0000-0000000000bb/verify-hmac",
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(envelope(true)))
             .expect(1)
             .mount(&server)
@@ -435,11 +439,8 @@ mod tests {
 
     #[tokio::test]
     async fn keyx_urn_without_context_verifier_errors() {
-        let res = HmacAuthPlugin::from_config(
-            &cfg_keyx_urn_only(),
-            None,
-            &PluginContext::default(),
-        );
+        let res =
+            HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &PluginContext::default());
         match res {
             Ok(_) => panic!("expected error when keyx_urn is set without a context verifier"),
             Err(e) => {
@@ -468,7 +469,10 @@ mod tests {
         // Local mode without repo = "no repository" internal error path,
         // not a signature failure — that's fine, we're just asserting
         // the remote branch wasn't taken.
-        assert!(matches!(err, PluginError::Internal(_) | PluginError::Unauthorized(_)));
+        assert!(matches!(
+            err,
+            PluginError::Internal(_) | PluginError::Unauthorized(_)
+        ));
     }
 
     #[test]

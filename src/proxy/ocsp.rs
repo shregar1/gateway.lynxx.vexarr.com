@@ -258,7 +258,8 @@ fn parse_ocsp_next_update(response_der: &[u8]) -> Option<chrono::DateTime<chrono
         return None;
     }
     // Unwrap the EXPLICIT [0] wrapper
-    let (_, response_bytes_seq) = read_der_sequence(strip_explicit_tag(response_bytes_explicit, 0)?)?;
+    let (_, response_bytes_seq) =
+        read_der_sequence(strip_explicit_tag(response_bytes_explicit, 0)?)?;
 
     // ResponseBytes ::= SEQUENCE { responseType OID, response OCTET STRING }
     let (rest2, _response_type) = read_der_element(response_bytes_seq)?;
@@ -468,7 +469,12 @@ fn oid_arcs_to_dotted(arcs: &[u64]) -> String {
 /// the issuer.
 fn extract_issuer_public_key_bytes(issuer_der: &[u8]) -> Option<Vec<u8>> {
     let (_, parsed) = x509_parser::parse_x509_certificate(issuer_der).ok()?;
-    let spki = parsed.tbs_certificate.subject_pki.subject_public_key.data.to_vec();
+    let spki = parsed
+        .tbs_certificate
+        .subject_pki
+        .subject_public_key
+        .data
+        .to_vec();
     Some(spki)
 }
 
@@ -500,6 +506,12 @@ struct CachedOcsp {
 pub struct OcspStapler {
     cache: RwLock<HashMap<Vec<u8>, CachedOcsp>>,
     http: reqwest::Client,
+}
+
+impl Default for OcspStapler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OcspStapler {
@@ -640,8 +652,7 @@ impl OcspStapler {
         };
 
         // 5. Build and send the OCSP request.
-        let ocsp_req =
-            build_ocsp_request(&issuer_name_hash, &issuer_key_hash, serial_bytes);
+        let ocsp_req = build_ocsp_request(&issuer_name_hash, &issuer_key_hash, serial_bytes);
 
         let http_resp = self
             .http
@@ -753,8 +764,8 @@ mod tests {
         // OID 1.3.6.1.5.5.7.48.1
         let result = der_oid(OID_AD_OCSP);
         assert_eq!(result[0], 0x06); // OID tag
-        // 1.3 -> 0x2B, 6 -> 0x06, 1 -> 0x01, 5 -> 0x05, 5 -> 0x05,
-        // 7 -> 0x07, 48 -> 0x30, 1 -> 0x01
+                                     // 1.3 -> 0x2B, 6 -> 0x06, 1 -> 0x01, 5 -> 0x05, 5 -> 0x05,
+                                     // 7 -> 0x07, 48 -> 0x30, 1 -> 0x01
         let expected_body = [0x2B, 0x06, 0x01, 0x05, 0x05, 0x07, 0x30, 0x01];
         assert_eq!(result[1], expected_body.len() as u8);
         assert_eq!(&result[2..], &expected_body);
@@ -800,7 +811,7 @@ mod tests {
 
         // The serial bytes should appear inside the request
         assert!(
-            req.windows(3).any(|w| w == &serial),
+            req.windows(3).any(|w| w == serial),
             "serial number must appear in the OCSP request"
         );
     }
@@ -813,11 +824,11 @@ mod tests {
         let req = build_ocsp_request(&name_hash, &key_hash, &serial);
 
         assert!(
-            req.windows(20).any(|w| w == &name_hash),
+            req.windows(20).any(|w| w == name_hash),
             "issuer name hash must appear"
         );
         assert!(
-            req.windows(20).any(|w| w == &key_hash),
+            req.windows(20).any(|w| w == key_hash),
             "issuer key hash must appear"
         );
     }
@@ -997,7 +1008,10 @@ mod tests {
         let ocsp_response = der_tlv(0x30, &ocsp_body);
 
         let parsed = parse_ocsp_next_update(&ocsp_response);
-        assert!(parsed.is_some(), "should parse nextUpdate from synthetic response");
+        assert!(
+            parsed.is_some(),
+            "should parse nextUpdate from synthetic response"
+        );
         let dt = parsed.unwrap();
         assert_eq!(dt.to_rfc3339(), "2026-01-01T12:00:00+00:00");
     }
@@ -1077,6 +1091,9 @@ mod tests {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let ck = crate::proxy::tls_alpn::build_challenge_cert("example.com", "auth").unwrap();
         let url = extract_ocsp_responder_url(ck.cert[0].as_ref());
-        assert!(url.is_none(), "self-signed cert should have no AIA/OCSP URL");
+        assert!(
+            url.is_none(),
+            "self-signed cert should have no AIA/OCSP URL"
+        );
     }
 }

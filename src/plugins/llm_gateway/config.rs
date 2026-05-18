@@ -168,14 +168,18 @@ pub struct CacheCfg {
     /// v1 supports `"exact"` only. The field is kept so configs forward-compat
     /// with v2 (`"semantic"` via vector similarity).
     #[serde(default = "default_cache_strategy")]
-    pub strategy: String, pub reusex_url: Option<String>, pub reusex_api_key: Option<String>,
+    pub strategy: String,
+    pub reusex_url: Option<String>,
+    pub reusex_api_key: Option<String>,
 }
 
 impl Default for CacheCfg {
     fn default() -> Self {
         Self {
             enabled: false,
-            ttl_seconds: default_cache_ttl(), reusex_url: None, reusex_api_key: None,
+            ttl_seconds: default_cache_ttl(),
+            reusex_url: None,
+            reusex_api_key: None,
             strategy: default_cache_strategy(),
         }
     }

@@ -22,8 +22,7 @@ pub struct ProxyHeader {
 
 /// PROXY protocol v2 magic signature (12 bytes).
 const V2_SIGNATURE: [u8; 12] = [
-    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51,
-    0x55, 0x49, 0x54, 0x0A,
+    0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A,
 ];
 
 /// Read and parse a PROXY protocol header from the given stream.
@@ -34,7 +33,9 @@ const V2_SIGNATURE: [u8; 12] = [
 ///
 /// The stream is advanced past the header; subsequent reads get the raw
 /// HTTP data.
-pub async fn read_proxy_header(stream: &mut BufReader<TcpStream>) -> Result<ProxyHeader, ProxyError> {
+pub async fn read_proxy_header(
+    stream: &mut BufReader<TcpStream>,
+) -> Result<ProxyHeader, ProxyError> {
     // Peek 13 bytes: enough to distinguish v1 "PROXY " from v2 signature.
     let buf = stream.fill_buf().await.map_err(ProxyError::Io)?;
     if buf.len() < 6 {
@@ -69,7 +70,10 @@ async fn parse_v1(reader: &mut BufReader<TcpStream>) -> Result<ProxyHeader, Prox
 
     // PROXY UNKNOWN — local/health-check connection
     if parts[1] == "UNKNOWN" {
-        return Ok(ProxyHeader { src_addr: None, dst_addr: None });
+        return Ok(ProxyHeader {
+            src_addr: None,
+            dst_addr: None,
+        });
     }
 
     if parts.len() != 6 {
@@ -81,14 +85,10 @@ async fn parse_v1(reader: &mut BufReader<TcpStream>) -> Result<ProxyHeader, Prox
         return Err(ProxyError::UnsupportedProtocol(proto.to_string()));
     }
 
-    let src_ip: std::net::IpAddr = parts[2].parse()
-        .map_err(|_| ProxyError::InvalidAddress)?;
-    let dst_ip: std::net::IpAddr = parts[3].parse()
-        .map_err(|_| ProxyError::InvalidAddress)?;
-    let src_port: u16 = parts[4].parse()
-        .map_err(|_| ProxyError::InvalidPort)?;
-    let dst_port: u16 = parts[5].parse()
-        .map_err(|_| ProxyError::InvalidPort)?;
+    let src_ip: std::net::IpAddr = parts[2].parse().map_err(|_| ProxyError::InvalidAddress)?;
+    let dst_ip: std::net::IpAddr = parts[3].parse().map_err(|_| ProxyError::InvalidAddress)?;
+    let src_port: u16 = parts[4].parse().map_err(|_| ProxyError::InvalidPort)?;
+    let dst_port: u16 = parts[5].parse().map_err(|_| ProxyError::InvalidPort)?;
 
     Ok(ProxyHeader {
         src_addr: Some(SocketAddr::new(src_ip, src_port)),
@@ -129,12 +129,18 @@ async fn parse_v2(reader: &mut BufReader<TcpStream>) -> Result<ProxyHeader, Prox
     // Read address data + TLVs
     let mut addr_data = vec![0u8; addr_len];
     if addr_len > 0 {
-        reader.read_exact(&mut addr_data).await.map_err(ProxyError::Io)?;
+        reader
+            .read_exact(&mut addr_data)
+            .await
+            .map_err(ProxyError::Io)?;
     }
 
     // LOCAL command = health check / internal
     if command == 0x00 {
-        return Ok(ProxyHeader { src_addr: None, dst_addr: None });
+        return Ok(ProxyHeader {
+            src_addr: None,
+            dst_addr: None,
+        });
     }
 
     // PROXY command
@@ -145,12 +151,10 @@ async fn parse_v2(reader: &mut BufReader<TcpStream>) -> Result<ProxyHeader, Prox
     match family {
         // AF_INET (IPv4): 4+4+2+2 = 12 bytes
         0x01 if addr_data.len() >= 12 => {
-            let src_ip = std::net::Ipv4Addr::new(
-                addr_data[0], addr_data[1], addr_data[2], addr_data[3],
-            );
-            let dst_ip = std::net::Ipv4Addr::new(
-                addr_data[4], addr_data[5], addr_data[6], addr_data[7],
-            );
+            let src_ip =
+                std::net::Ipv4Addr::new(addr_data[0], addr_data[1], addr_data[2], addr_data[3]);
+            let dst_ip =
+                std::net::Ipv4Addr::new(addr_data[4], addr_data[5], addr_data[6], addr_data[7]);
             let src_port = u16::from_be_bytes([addr_data[8], addr_data[9]]);
             let dst_port = u16::from_be_bytes([addr_data[10], addr_data[11]]);
             Ok(ProxyHeader {
@@ -174,7 +178,10 @@ async fn parse_v2(reader: &mut BufReader<TcpStream>) -> Result<ProxyHeader, Prox
             })
         }
         // AF_UNIX or unsupported
-        _ => Ok(ProxyHeader { src_addr: None, dst_addr: None }),
+        _ => Ok(ProxyHeader {
+            src_addr: None,
+            dst_addr: None,
+        }),
     }
 }
 
@@ -217,8 +224,15 @@ pub fn encode_v1(src: Option<&SocketAddr>, dst: Option<&SocketAddr>) -> Vec<u8> 
     match (src, dst) {
         (Some(s), Some(d)) => {
             let proto = if s.ip().is_ipv4() { "TCP4" } else { "TCP6" };
-            format!("PROXY {} {} {} {} {}\r\n", proto, s.ip(), d.ip(), s.port(), d.port())
-                .into_bytes()
+            format!(
+                "PROXY {} {} {} {} {}\r\n",
+                proto,
+                s.ip(),
+                d.ip(),
+                s.port(),
+                d.port()
+            )
+            .into_bytes()
         }
         _ => b"PROXY UNKNOWN\r\n".to_vec(),
     }
@@ -323,17 +337,13 @@ mod tests {
         // Verify v2 header layout parsing (addresses only, no IO).
         let addr_data: Vec<u8> = vec![
             // src IPv4: 192.168.0.1
-            192, 168, 0, 1,
-            // dst IPv4: 10.0.0.1
-            10, 0, 0, 1,
-            // src port: 12345 = 0x3039
-            0x30, 0x39,
-            // dst port: 443 = 0x01BB
+            192, 168, 0, 1, // dst IPv4: 10.0.0.1
+            10, 0, 0, 1, // src port: 12345 = 0x3039
+            0x30, 0x39, // dst port: 443 = 0x01BB
             0x01, 0xBB,
         ];
-        let src_ip = std::net::Ipv4Addr::new(
-            addr_data[0], addr_data[1], addr_data[2], addr_data[3],
-        );
+        let src_ip =
+            std::net::Ipv4Addr::new(addr_data[0], addr_data[1], addr_data[2], addr_data[3]);
         let src_port = u16::from_be_bytes([addr_data[8], addr_data[9]]);
         assert_eq!(src_ip.to_string(), "192.168.0.1");
         assert_eq!(src_port, 12345);

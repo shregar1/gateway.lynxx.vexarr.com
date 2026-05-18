@@ -569,7 +569,7 @@ impl AccessLogger {
         Ok(AccessLogger {
             loggers,
             default_writer: default_writer.unwrap_or_else(|| Arc::new(StdoutWriter)),
-            })
+        })
     }
 
     /// Log an access entry.
@@ -589,9 +589,7 @@ impl AccessLogger {
         } else {
             self.loggers
                 .iter()
-                .find(|(cfg, _)| {
-                    cfg.hosts.is_empty() || cfg.hosts.iter().any(|h| h == &entry.host)
-                })
+                .find(|(cfg, _)| cfg.hosts.is_empty() || cfg.hosts.iter().any(|h| h == &entry.host))
                 .map(|(cfg, w)| (cfg, w.clone()))
         }
         .unwrap_or_else(|| {
@@ -709,14 +707,24 @@ mod tests {
     #[test]
     fn transform_delete_field() {
         let mut v = entry_to_value(&sample_entry());
-        apply_transforms(&mut v, &[FieldTransform::Delete { field: "user_agent".into() }]);
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Delete {
+                field: "user_agent".into(),
+            }],
+        );
         assert!(v.get("user_agent").is_none());
     }
 
     #[test]
     fn transform_delete_nested() {
         let mut v = entry_to_value(&sample_entry());
-        apply_transforms(&mut v, &[FieldTransform::Delete { field: "headers.Authorization".into() }]);
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Delete {
+                field: "headers.Authorization".into(),
+            }],
+        );
         let hdrs = v.get("headers").unwrap().as_object().unwrap();
         assert!(!hdrs.contains_key("Authorization"));
         // Other header should still be present.
@@ -726,7 +734,12 @@ mod tests {
     #[test]
     fn transform_hash_field() {
         let mut v = entry_to_value(&sample_entry());
-        apply_transforms(&mut v, &[FieldTransform::Hash { field: "client_ip".into() }]);
+        apply_transforms(
+            &mut v,
+            &[FieldTransform::Hash {
+                field: "client_ip".into(),
+            }],
+        );
         let hashed = v.get("client_ip").unwrap().as_str().unwrap();
         // SHA-256 hex is 64 chars.
         assert_eq!(hashed.len(), 64);
@@ -738,7 +751,9 @@ mod tests {
     fn transform_hash_deterministic() {
         let mut v1 = entry_to_value(&sample_entry());
         let mut v2 = entry_to_value(&sample_entry());
-        let t = [FieldTransform::Hash { field: "client_ip".into() }];
+        let t = [FieldTransform::Hash {
+            field: "client_ip".into(),
+        }];
         apply_transforms(&mut v1, &t);
         apply_transforms(&mut v2, &t);
         assert_eq!(
@@ -826,9 +841,16 @@ mod tests {
         apply_transforms(
             &mut v,
             &[
-                FieldTransform::Delete { field: "nonexistent".into() },
-                FieldTransform::Hash { field: "nonexistent".into() },
-                FieldTransform::Replace { field: "no.such.path".into(), value: "x".into() },
+                FieldTransform::Delete {
+                    field: "nonexistent".into(),
+                },
+                FieldTransform::Hash {
+                    field: "nonexistent".into(),
+                },
+                FieldTransform::Replace {
+                    field: "no.such.path".into(),
+                    value: "x".into(),
+                },
             ],
         );
         assert_eq!(v, before);
@@ -841,10 +863,16 @@ mod tests {
         let mut v = entry_to_value(&sample_entry());
         apply_renames(
             &mut v,
-            &[FieldRename { from: "client_ip".into(), to: "remote_addr".into() }],
+            &[FieldRename {
+                from: "client_ip".into(),
+                to: "remote_addr".into(),
+            }],
         );
         assert!(v.get("client_ip").is_none());
-        assert_eq!(v.get("remote_addr").unwrap().as_str().unwrap(), "192.168.1.100");
+        assert_eq!(
+            v.get("remote_addr").unwrap().as_str().unwrap(),
+            "192.168.1.100"
+        );
     }
 
     #[test]
@@ -871,7 +899,10 @@ mod tests {
         let before = v.clone();
         apply_renames(
             &mut v,
-            &[FieldRename { from: "no_such_field".into(), to: "whatever".into() }],
+            &[FieldRename {
+                from: "no_such_field".into(),
+                to: "whatever".into(),
+            }],
         );
         assert_eq!(v, before);
     }
@@ -935,9 +966,18 @@ mod tests {
         let mut v = entry_to_value(&sample_entry());
         let map = v.as_object_mut().unwrap();
         let fields = vec![
-            LogAppendField { key: "env".into(), value: json!("staging") },
-            LogAppendField { key: "region".into(), value: json!("us-east-1") },
-            LogAppendField { key: "version".into(), value: json!(42) },
+            LogAppendField {
+                key: "env".into(),
+                value: json!("staging"),
+            },
+            LogAppendField {
+                key: "region".into(),
+                value: json!("us-east-1"),
+            },
+            LogAppendField {
+                key: "version".into(),
+                value: json!(42),
+            },
         ];
         for f in &fields {
             map.insert(f.key.clone(), f.value.clone());
@@ -1004,9 +1044,14 @@ mod tests {
                 name: "api-logger".into(),
                 hosts: vec!["api.example.com".into()],
                 output: LogOutput::Discard,
-                transforms: vec![FieldTransform::Delete { field: "user_agent".into() }],
+                transforms: vec![FieldTransform::Delete {
+                    field: "user_agent".into(),
+                }],
                 renames: vec![],
-                append: vec![LogAppendField { key: "matched".into(), value: json!("api") }],
+                append: vec![LogAppendField {
+                    key: "matched".into(),
+                    value: json!("api"),
+                }],
                 include_headers: false,
                 include_cookies: false,
                 include_query_params: false,
@@ -1018,7 +1063,10 @@ mod tests {
                 output: LogOutput::Discard,
                 transforms: vec![],
                 renames: vec![],
-                append: vec![LogAppendField { key: "matched".into(), value: json!("default") }],
+                append: vec![LogAppendField {
+                    key: "matched".into(),
+                    value: json!("default"),
+                }],
                 include_headers: false,
                 include_cookies: false,
                 include_query_params: false,
@@ -1028,9 +1076,9 @@ mod tests {
 
         // Entry with host=api.example.com should match the first logger.
         let entry = sample_entry(); // host = "api.example.com"
-        // We can't easily inspect which writer was chosen, but we can verify
-        // the logger doesn't panic and the match logic works by checking the
-        // internal match directly.
+                                    // We can't easily inspect which writer was chosen, but we can verify
+                                    // the logger doesn't panic and the match logic works by checking the
+                                    // internal match directly.
         let matched = logger
             .loggers
             .iter()
@@ -1258,9 +1306,12 @@ mod tests {
 
         let mut entry = sample_entry();
         entry.path = "/healthz".into(); // does NOT match prefix "/health" exactly, but starts with it
-        // Wait — "/healthz".starts_with("/health") is true!
+                                        // Wait — "/healthz".starts_with("/health") is true!
         logger.log(entry).await;
-        assert!(!wrote.load(Ordering::SeqCst), "should skip /healthz (prefix match)");
+        assert!(
+            !wrote.load(Ordering::SeqCst),
+            "should skip /healthz (prefix match)"
+        );
 
         wrote.store(false, Ordering::SeqCst);
         let mut entry2 = sample_entry();
@@ -1374,8 +1425,14 @@ mod tests {
         entry.log_name_override = Some("special".into());
         logger.log(entry).await;
 
-        assert!(named_wrote.load(Ordering::SeqCst), "should route to 'special' logger");
-        assert!(!default_wrote.load(Ordering::SeqCst), "should NOT route to default");
+        assert!(
+            named_wrote.load(Ordering::SeqCst),
+            "should route to 'special' logger"
+        );
+        assert!(
+            !default_wrote.load(Ordering::SeqCst),
+            "should NOT route to default"
+        );
     }
 
     #[tokio::test]
@@ -1418,6 +1475,9 @@ mod tests {
         let entry = sample_entry(); // log_name_override = None
         logger.log(entry).await;
 
-        assert!(default_wrote.load(Ordering::SeqCst), "should use host-based matching");
+        assert!(
+            default_wrote.load(Ordering::SeqCst),
+            "should use host-based matching"
+        );
     }
 }

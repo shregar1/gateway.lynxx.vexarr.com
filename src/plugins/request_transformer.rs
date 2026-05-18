@@ -100,7 +100,10 @@ fn parse_string_list(val: Option<&serde_json::Value>) -> Vec<String> {
 ///   `{time.now.unix}`.
 ///
 /// Unknown placeholders are left as-is.
-pub(crate) fn expand_placeholders(template: &str, req: &axum::http::Request<axum::body::Body>) -> String {
+pub(crate) fn expand_placeholders(
+    template: &str,
+    req: &axum::http::Request<axum::body::Body>,
+) -> String {
     if !template.contains('{') {
         return template.to_string();
     }
@@ -240,7 +243,12 @@ impl Plugin for RequestTransformerPlugin {
                 Some((n.clone(), HeaderValue::from_str(&expanded).ok()?))
             })
             .collect();
-        apply_transforms(req.headers_mut(), &expanded_add, &self.remove, &expanded_replace);
+        apply_transforms(
+            req.headers_mut(),
+            &expanded_add,
+            &self.remove,
+            &expanded_replace,
+        );
 
         // --- body transforms ---
         if !self.has_body_transforms() || !is_json_content_type(req.headers()) {

@@ -96,7 +96,9 @@ pub fn build_server_config(settings: &TlsSettings) -> Result<ServerConfig, Gatew
     let keylog_path = if !settings.sslkeylogfile.is_empty() {
         Some(settings.sslkeylogfile.clone())
     } else {
-        std::env::var("SSLKEYLOGFILE").ok().filter(|s| !s.is_empty())
+        std::env::var("SSLKEYLOGFILE")
+            .ok()
+            .filter(|s| !s.is_empty())
     };
     if let Some(ref path) = keylog_path {
         config.key_log = Arc::new(rustls::KeyLogFile::new());
@@ -326,9 +328,10 @@ fn resolve_crypto_provider(
                 }
             };
             // Avoid duplicates while preserving operator ordering.
-            if !selected.iter().any(|g: &&dyn rustls::crypto::SupportedKxGroup| {
-                g.name() == group.name()
-            }) {
+            if !selected
+                .iter()
+                .any(|g: &&dyn rustls::crypto::SupportedKxGroup| g.name() == group.name())
+            {
                 selected.push(group);
             }
         }
@@ -357,9 +360,10 @@ fn resolve_cipher_suites(
             .cloned();
         match found {
             Some(cs) => {
-                if !selected.iter().any(|s: &rustls::SupportedCipherSuite| {
-                    s.suite() == cs.suite()
-                }) {
+                if !selected
+                    .iter()
+                    .any(|s: &rustls::SupportedCipherSuite| s.suite() == cs.suite())
+                {
                     selected.push(cs);
                 }
             }
@@ -546,53 +550,31 @@ mod tests {
     fn resolve_provider_single_curve() {
         let p = resolve_crypto_provider(&["x25519".to_string()], "ring").unwrap();
         assert_eq!(p.kx_groups.len(), 1);
-        assert_eq!(
-            p.kx_groups[0].name(),
-            rustls::NamedGroup::X25519
-        );
+        assert_eq!(p.kx_groups[0].name(), rustls::NamedGroup::X25519);
     }
 
     #[test]
     fn resolve_provider_multiple_curves() {
-        let p = resolve_crypto_provider(
-            &["secp384r1".to_string(), "x25519".to_string()],
-            "ring",
-        )
-        .unwrap();
+        let p = resolve_crypto_provider(&["secp384r1".to_string(), "x25519".to_string()], "ring")
+            .unwrap();
         assert_eq!(p.kx_groups.len(), 2);
         // Order preserved from config.
-        assert_eq!(
-            p.kx_groups[0].name(),
-            rustls::NamedGroup::secp384r1
-        );
-        assert_eq!(
-            p.kx_groups[1].name(),
-            rustls::NamedGroup::X25519
-        );
+        assert_eq!(p.kx_groups[0].name(), rustls::NamedGroup::secp384r1);
+        assert_eq!(p.kx_groups[1].name(), rustls::NamedGroup::X25519);
     }
 
     #[test]
     fn resolve_provider_deduplicates() {
-        let p = resolve_crypto_provider(
-            &["x25519".to_string(), "x25519".to_string()],
-            "ring",
-        )
-        .unwrap();
+        let p =
+            resolve_crypto_provider(&["x25519".to_string(), "x25519".to_string()], "ring").unwrap();
         assert_eq!(p.kx_groups.len(), 1);
     }
 
     #[test]
     fn resolve_provider_aliases() {
-        let p = resolve_crypto_provider(
-            &["p256".to_string(), "p384".to_string()],
-            "ring",
-        )
-        .unwrap();
+        let p = resolve_crypto_provider(&["p256".to_string(), "p384".to_string()], "ring").unwrap();
         assert_eq!(p.kx_groups.len(), 2);
-        assert_eq!(
-            p.kx_groups[0].name(),
-            rustls::NamedGroup::secp256r1
-        );
+        assert_eq!(p.kx_groups[0].name(), rustls::NamedGroup::secp256r1);
     }
 
     #[test]
@@ -671,8 +653,7 @@ mod tests {
 
     #[test]
     fn x25519mlkem768_requires_aws_lc_rs() {
-        let err =
-            resolve_crypto_provider(&["x25519mlkem768".to_string()], "ring").unwrap_err();
+        let err = resolve_crypto_provider(&["x25519mlkem768".to_string()], "ring").unwrap_err();
         assert!(err.to_string().contains("x25519mlkem768"));
         assert!(err.to_string().contains("aws-lc-rs"));
     }

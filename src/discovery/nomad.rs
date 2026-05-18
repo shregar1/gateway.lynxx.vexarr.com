@@ -198,7 +198,7 @@ async fn poll_services(
 
     for (svc_name, stub_tags) in &all_names {
         // Check if this service should be exposed.
-        let tag_map = parse_tag_labels(&stub_tags, &config.prefix);
+        let tag_map = parse_tag_labels(stub_tags, &config.prefix);
         let enabled = tag_map
             .get(&format!("{}.enable", config.prefix))
             .map(|v| matches!(v.as_str(), "true" | "1" | "yes"))
@@ -235,11 +235,8 @@ async fn poll_services(
                 .or_else(|| {
                     // Traefik-style rule parsing: Host(`example.com`)
                     reg_tag_map
-                        .get(&format!(
-                            "{}.http.routers.{}.rule",
-                            config.prefix, svc_name
-                        ))
-                        .and_then(|_| None::<&String>) // simplified — full rule parser not implemented
+                        .get(&format!("{}.http.routers.{}.rule", config.prefix, svc_name))
+                        .and(None::<&String>) // simplified — full rule parser not implemented
                 })
                 .map(|v| v.split(',').map(|s| s.trim().to_string()).collect())
                 .unwrap_or_default();

@@ -21,10 +21,7 @@ impl TargetService {
         self.repo.get_target(id).await
     }
 
-    pub async fn get_for_service(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<Target>, GatewayError> {
+    pub async fn get_for_service(&self, service_id: &Uuid) -> Result<Vec<Target>, GatewayError> {
         self.repo.list_targets_for_service(service_id).await
     }
 

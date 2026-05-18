@@ -13,10 +13,7 @@ impl LoadTestService {
         Self { repo }
     }
 
-    pub async fn list(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<LoadTest>, GatewayError> {
+    pub async fn list(&self, service_id: &Uuid) -> Result<Vec<LoadTest>, GatewayError> {
         self.repo.list_load_tests(service_id).await
     }
 

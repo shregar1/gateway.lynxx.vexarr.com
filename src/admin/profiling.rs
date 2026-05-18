@@ -131,11 +131,7 @@ fn enumerate_threads() -> Vec<ThreadInfo> {
         let mut out = Vec::new();
         if let Ok(entries) = std::fs::read_dir("/proc/self/task") {
             for entry in entries.flatten() {
-                let tid: u64 = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .parse()
-                    .unwrap_or(0);
+                let tid: u64 = entry.file_name().to_string_lossy().parse().unwrap_or(0);
                 let name = std::fs::read_to_string(format!("/proc/self/task/{tid}/comm"))
                     .unwrap_or_default()
                     .trim()
@@ -180,7 +176,8 @@ fn thread_count_macos() -> usize {
         unsafe {
             let mut info: libc::mach_task_basic_info_data_t = mem::zeroed();
             let mut count = (mem::size_of::<libc::mach_task_basic_info_data_t>()
-                / mem::size_of::<libc::natural_t>()) as libc::mach_msg_type_number_t;
+                / mem::size_of::<libc::natural_t>())
+                as libc::mach_msg_type_number_t;
             #[allow(deprecated)] // libc deprecated in favor of mach2 crate
             let task = libc::mach_task_self();
             let kr = libc::task_info(

@@ -193,10 +193,7 @@ async fn poll_keys(
     conn: &mut ConnectionManager,
 ) -> Result<Vec<DiscoveredService>, Box<dyn std::error::Error + Send + Sync>> {
     let pattern = format!("{}*", config.prefix);
-    let keys: Vec<String> = redis::cmd("KEYS")
-        .arg(&pattern)
-        .query_async(conn)
-        .await?;
+    let keys: Vec<String> = redis::cmd("KEYS").arg(&pattern).query_async(conn).await?;
 
     let mut discovered: Vec<DiscoveredService> = Vec::new();
 
@@ -221,9 +218,7 @@ async fn poll_keys(
         };
 
         let name = if cfg.name.is_empty() {
-            key.strip_prefix(&config.prefix)
-                .unwrap_or(key)
-                .to_string()
+            key.strip_prefix(&config.prefix).unwrap_or(key).to_string()
         } else {
             cfg.name.clone()
         };
@@ -406,7 +401,10 @@ mod tests {
             ..Default::default()
         };
         let url = build_connection_url(&cfg);
-        assert!(url.contains(":secret@"), "URL should contain password: {url}");
+        assert!(
+            url.contains(":secret@"),
+            "URL should contain password: {url}"
+        );
         assert!(url.contains("/3"), "URL should contain db number: {url}");
     }
 

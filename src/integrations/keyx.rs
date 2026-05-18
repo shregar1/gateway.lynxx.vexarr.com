@@ -59,7 +59,10 @@ impl KeyxConfig {
 
 #[derive(Debug, thiserror::Error)]
 pub enum KeyxError {
-    #[error("keyx not configured (set KEYX_BASE_URL, KEYX_SERVICE_TOKEN, KEYX_LICENSE_URN)")]
+    #[error(
+        "keyx not configured (set VEXARR_KEYX_URL, VEXARR_SERVICE_API_KEY, VEXARR_KEYX_LICENSE_URN \
+         — or the legacy KEYX_BASE_URL / KEYX_SERVICE_TOKEN / KEYX_LICENSE_URN)"
+    )]
     NotConfigured,
     #[error("keyx request failed: {0}")]
     Transport(String),
@@ -194,11 +197,7 @@ impl KeyxClient {
     /// `Ok(false)` when keyx says the signature does not verify (either
     /// because the bytes are wrong or the key has been revoked), and
     /// `Err` for transport / HTTP / parse failures.
-    pub async fn verify_license(
-        &self,
-        payload: &[u8],
-        signature: &str,
-    ) -> Result<bool, KeyxError> {
+    pub async fn verify_license(&self, payload: &[u8], signature: &str) -> Result<bool, KeyxError> {
         let url = format!(
             "{}/v1/keys/{}/verify-license",
             self.config.base_url.trim_end_matches('/'),
@@ -299,11 +298,7 @@ impl From<KeyxError> for VerifierError {
 
 #[async_trait]
 impl LicenseVerifier for KeyxClient {
-    async fn verify_license(
-        &self,
-        payload: &[u8],
-        signature: &str,
-    ) -> Result<bool, VerifierError> {
+    async fn verify_license(&self, payload: &[u8], signature: &str) -> Result<bool, VerifierError> {
         KeyxClient::verify_license(self, payload, signature)
             .await
             .map_err(Into::into)
@@ -369,7 +364,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_config() {
         let empty = KeyxConfig::default();
-        assert!(matches!(KeyxClient::new(empty), Err(KeyxError::NotConfigured)));
+        assert!(matches!(
+            KeyxClient::new(empty),
+            Err(KeyxError::NotConfigured)
+        ));
     }
 
     #[tokio::test]
@@ -385,17 +383,15 @@ mod tests {
                 "signature": "sig-bytes",
             })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(envelope(serde_json::json!({ "valid": true }))),
+                ResponseTemplate::new(200)
+                    .set_body_json(envelope(serde_json::json!({ "valid": true }))),
             )
             .expect(1)
             .mount(&server)
             .await;
 
         let client = KeyxClient::new(cfg(server.uri())).unwrap();
-        let ok = client
-            .verify_license(b"hello", "sig-bytes")
-            .await
-            .unwrap();
+        let ok = client.verify_license(b"hello", "sig-bytes").await.unwrap();
         assert!(ok);
     }
 
@@ -459,7 +455,8 @@ mod tests {
                 "signature": "deadbeef",
             })))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(envelope(serde_json::json!({ "valid": true }))),
+                ResponseTemplate::new(200)
+                    .set_body_json(envelope(serde_json::json!({ "valid": true }))),
             )
             .expect(1)
             .mount(&server)
@@ -540,7 +537,8 @@ mod tests {
                 "/v1/keys/00000000-0000-0000-0000-000000000001/verify-license",
             ))
             .respond_with(
-                ResponseTemplate::new(200).set_body_json(envelope(serde_json::json!({ "valid": true }))),
+                ResponseTemplate::new(200)
+                    .set_body_json(envelope(serde_json::json!({ "valid": true }))),
             )
             .expect(1)
             .mount(&server)

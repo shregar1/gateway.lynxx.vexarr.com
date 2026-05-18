@@ -95,8 +95,7 @@ impl SrvDnsProvider {
             if let Err(e) = self.reconcile().await {
                 tracing::warn!(error = %e, "srv-dns provider initial reconcile failed");
             }
-            let interval =
-                Duration::from_secs(self.config.poll_interval_secs.max(5));
+            let interval = Duration::from_secs(self.config.poll_interval_secs.max(5));
             loop {
                 sleep(interval).await;
                 if let Err(e) = self.reconcile().await {
@@ -129,7 +128,11 @@ impl SrvDnsProvider {
 
         let mut desired: HashMap<String, (String, u16)> = HashMap::new();
         for record in records.iter() {
-            let host = record.target().to_string().trim_end_matches('.').to_string();
+            let host = record
+                .target()
+                .to_string()
+                .trim_end_matches('.')
+                .to_string();
             let port = record.port();
             let url = format!("{}://{}:{}", entry.scheme, host, port);
             desired.insert(url.clone(), (host, port));
@@ -138,7 +141,10 @@ impl SrvDnsProvider {
         let mut owned = self.owned.lock().await;
         let existing_ids = owned.entry(entry.service_id).or_default();
 
-        let existing_targets = self.repo.list_targets_for_service(&entry.service_id).await?;
+        let existing_targets = self
+            .repo
+            .list_targets_for_service(&entry.service_id)
+            .await?;
         let mut existing_urls: HashMap<String, Uuid> = HashMap::new();
         for t in &existing_targets {
             if existing_ids.contains(&t.id) {
@@ -149,10 +155,7 @@ impl SrvDnsProvider {
         // Add new targets.
         for url in desired.keys() {
             if !existing_urls.contains_key(url) {
-                let target_id = Uuid::new_v5(
-                    &entry.service_id,
-                    format!("srv:{}", url).as_bytes(),
-                );
+                let target_id = Uuid::new_v5(&entry.service_id, format!("srv:{}", url).as_bytes());
                 let target = Target {
                     id: target_id,
                     service_id: entry.service_id,

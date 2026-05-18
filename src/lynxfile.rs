@@ -38,9 +38,7 @@
 //! The parser converts this DSL into a `GatewayConfig` struct, which is
 //! then serialised to TOML for the rest of the system.
 
-use crate::config::{
-    GatewayConfig, GatewaySettings, PluginConfig, RouteConfig, ServiceConfig,
-};
+use crate::config::{GatewayConfig, GatewaySettings, PluginConfig, RouteConfig, ServiceConfig};
 use std::collections::HashMap;
 
 /// Parse a Lynxfile DSL string into a `GatewayConfig`.
@@ -91,12 +89,7 @@ impl<'a> Parser<'a> {
                     self.advance_token();
                     self.skip_whitespace_and_comments();
                     self.expect("{")?;
-                    self.parse_service_block(
-                        &name,
-                        &mut services,
-                        &mut routes,
-                        &mut plugins,
-                    )?;
+                    self.parse_service_block(&name, &mut services, &mut routes, &mut plugins)?;
                 }
                 None => break,
             }
@@ -109,10 +102,7 @@ impl<'a> Parser<'a> {
         Ok(config)
     }
 
-    fn parse_global_block(
-        &mut self,
-        settings: &mut GatewaySettings,
-    ) -> Result<(), LynxfileError> {
+    fn parse_global_block(&mut self, settings: &mut GatewaySettings) -> Result<(), LynxfileError> {
         loop {
             self.skip_whitespace_and_comments();
             let token = self.peek_token();
@@ -295,10 +285,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_plugin_block(
-        &mut self,
-        name: &str,
-    ) -> Result<PluginConfig, LynxfileError> {
+    fn parse_plugin_block(&mut self, name: &str) -> Result<PluginConfig, LynxfileError> {
         let mut map = serde_json::Map::new();
 
         loop {
@@ -386,8 +373,7 @@ impl<'a> Parser<'a> {
 
         // Bare word
         let start = pos;
-        while pos < bytes.len()
-            && !matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n' | b'{' | b'}')
+        while pos < bytes.len() && !matches!(bytes[pos], b' ' | b'\t' | b'\r' | b'\n' | b'{' | b'}')
         {
             pos += 1;
         }

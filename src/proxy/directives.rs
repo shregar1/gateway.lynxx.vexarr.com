@@ -76,10 +76,8 @@ pub fn evaluate_handles(
             }
         }
         // Then check inline matchers.
-        if passes && !block.matchers.is_empty() {
-            if !matchers::evaluate_all(&block.matchers, ctx) {
-                passes = false;
-            }
+        if passes && !block.matchers.is_empty() && !matchers::evaluate_all(&block.matchers, ctx) {
+            passes = false;
         }
         if passes {
             return Some((block.action.clone(), block.strip_path_prefix.clone()));

@@ -38,7 +38,8 @@ pub trait CertStore: Send + Sync {
     /// Upsert a key-value pair. When `ttl_secs` is `Some`, the backend
     /// should auto-expire the entry after that many seconds. A `None`
     /// TTL means "persist indefinitely".
-    async fn put(&self, key: &str, value: &[u8], ttl_secs: Option<u64>) -> Result<(), GatewayError>;
+    async fn put(&self, key: &str, value: &[u8], ttl_secs: Option<u64>)
+        -> Result<(), GatewayError>;
 
     /// Delete a key. No-op if the key doesn't exist.
     async fn delete(&self, key: &str) -> Result<(), GatewayError>;
@@ -89,7 +90,12 @@ pub async fn from_config(
 
 fn default_file_dir() -> String {
     dirs::home_dir()
-        .map(|h| h.join(".lynxx").join("certs").to_string_lossy().into_owned())
+        .map(|h| {
+            h.join(".lynxx")
+                .join("certs")
+                .to_string_lossy()
+                .into_owned()
+        })
         .unwrap_or_else(|| "/var/lib/lynxx/certs".to_string())
 }
 
@@ -138,17 +144,11 @@ impl CertStore for FileCertStore {
         let path = self.full_path(key);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                GatewayError::Internal(format!(
-                    "cert_store file mkdir {}: {e}",
-                    parent.display()
-                ))
+                GatewayError::Internal(format!("cert_store file mkdir {}: {e}", parent.display()))
             })?;
         }
         tokio::fs::write(&path, value).await.map_err(|e| {
-            GatewayError::Internal(format!(
-                "cert_store file write {}: {e}",
-                path.display()
-            ))
+            GatewayError::Internal(format!("cert_store file write {}: {e}", path.display()))
         })
     }
 
@@ -221,14 +221,11 @@ impl RedisCertStore {
     const PREFIX: &'static str = "lynxx:certs:";
 
     pub async fn connect(url: &str) -> Result<Self, GatewayError> {
-        let client = redis::Client::open(url).map_err(|e| {
-            GatewayError::Internal(format!("cert_store redis open: {e}"))
-        })?;
+        let client = redis::Client::open(url)
+            .map_err(|e| GatewayError::Internal(format!("cert_store redis open: {e}")))?;
         let conn = redis::aio::ConnectionManager::new(client)
             .await
-            .map_err(|e| {
-                GatewayError::Internal(format!("cert_store redis connect: {e}"))
-            })?;
+            .map_err(|e| GatewayError::Internal(format!("cert_store redis connect: {e}")))?;
         Ok(Self { conn })
     }
 
@@ -320,9 +317,7 @@ impl PostgresCertStore {
             .max_connections(4)
             .connect(database_url)
             .await
-            .map_err(|e| {
-                GatewayError::Internal(format!("cert_store postgres connect: {e}"))
-            })?;
+            .map_err(|e| GatewayError::Internal(format!("cert_store postgres connect: {e}")))?;
 
         // Auto-create the table on first connect.
         sqlx::query(
@@ -334,9 +329,7 @@ impl PostgresCertStore {
         )
         .execute(&pool)
         .await
-        .map_err(|e| {
-            GatewayError::Internal(format!("cert_store postgres migrate: {e}"))
-        })?;
+        .map_err(|e| GatewayError::Internal(format!("cert_store postgres migrate: {e}")))?;
 
         Ok(Self { pool })
     }
@@ -363,9 +356,7 @@ impl CertStore for PostgresCertStore {
         value: &[u8],
         ttl_secs: Option<u64>,
     ) -> Result<(), GatewayError> {
-        let expires = ttl_secs.map(|t| {
-            chrono::Utc::now() + chrono::Duration::seconds(t as i64)
-        });
+        let expires = ttl_secs.map(|t| chrono::Utc::now() + chrono::Duration::seconds(t as i64));
         sqlx::query(
             "INSERT INTO cert_store (key, value, expires_at) \
              VALUES ($1, $2, $3) \
@@ -423,17 +414,34 @@ mod tests {
         assert!(store.get("missing").await.unwrap().is_none());
 
         // put + get
-        store.put("acme/example.com/cert.pem", b"CERT", None).await.unwrap();
-        let val = store.get("acme/example.com/cert.pem").await.unwrap().unwrap();
+        store
+            .put("acme/example.com/cert.pem", b"CERT", None)
+            .await
+            .unwrap();
+        let val = store
+            .get("acme/example.com/cert.pem")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(val, b"CERT");
 
         // overwrite
-        store.put("acme/example.com/cert.pem", b"CERT2", None).await.unwrap();
-        let val = store.get("acme/example.com/cert.pem").await.unwrap().unwrap();
+        store
+            .put("acme/example.com/cert.pem", b"CERT2", None)
+            .await
+            .unwrap();
+        let val = store
+            .get("acme/example.com/cert.pem")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(val, b"CERT2");
 
         // second key
-        store.put("acme/example.com/key.pem", b"KEY", None).await.unwrap();
+        store
+            .put("acme/example.com/key.pem", b"KEY", None)
+            .await
+            .unwrap();
 
         // list by prefix
         let keys = store.list_keys("acme/example.com/").await.unwrap();
@@ -443,7 +451,11 @@ mod tests {
 
         // delete
         store.delete("acme/example.com/cert.pem").await.unwrap();
-        assert!(store.get("acme/example.com/cert.pem").await.unwrap().is_none());
+        assert!(store
+            .get("acme/example.com/cert.pem")
+            .await
+            .unwrap()
+            .is_none());
 
         // delete non-existent is fine
         store.delete("nope").await.unwrap();

@@ -30,10 +30,7 @@ pub struct RedirectPlugin {
 
 impl RedirectPlugin {
     pub fn from_config(cfg: &serde_json::Value) -> Result<Self, GatewayError> {
-        let status_code = cfg
-            .get("status")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(302) as u16;
+        let status_code = cfg.get("status").and_then(|v| v.as_u64()).unwrap_or(302) as u16;
 
         let status = StatusCode::from_u16(status_code).map_err(|_| {
             GatewayError::BadRequest(format!("redirect: invalid status code {status_code}"))

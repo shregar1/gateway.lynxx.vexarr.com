@@ -47,11 +47,7 @@ pub enum VerifierError {
 /// whatever the implementation considers an active signing key.
 #[async_trait]
 pub trait LicenseVerifier: Send + Sync {
-    async fn verify_license(
-        &self,
-        payload: &[u8],
-        signature: &str,
-    ) -> Result<bool, VerifierError>;
+    async fn verify_license(&self, payload: &[u8], signature: &str) -> Result<bool, VerifierError>;
 }
 
 /// Validates an opaque admin token (e.g. a keyx-issued bearer) and

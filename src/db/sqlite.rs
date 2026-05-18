@@ -3,16 +3,15 @@ use crate::auth::{AdminToken, Role};
 use crate::cluster::sqlite::SqliteBus;
 use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
+use crate::db::LogFilter;
 use crate::db::{AdminTokenPatch, NewAdminToken, Repository};
 use crate::error::GatewayError;
-use crate::db::LogFilter;
 use crate::models::{
-    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate,
-    ClusterNode, Consumer, ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage,
-    GeoBucket, Incident, IncidentUpdate, IpRule, LoadTest, LogEntry, MarketplacePlugin,
-    MetricBucket, PluginInstance, Probe, ProbeResult, Project, RateLimitBucket,
-    RateLimitSimulation, Route, Service, Snapshot, SpanRecord, Target, TraceRecord,
-    TransformRule, Webhook, WebhookDelivery,
+    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate, ClusterNode, Consumer,
+    ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage, GeoBucket, Incident, IncidentUpdate,
+    IpRule, LoadTest, LogEntry, MarketplacePlugin, MetricBucket, PluginInstance, Probe,
+    ProbeResult, Project, RateLimitBucket, RateLimitSimulation, Route, Service, Snapshot,
+    SpanRecord, Target, TraceRecord, TransformRule, Webhook, WebhookDelivery,
 };
 use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
@@ -334,10 +333,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_target(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE targets SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE targets SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -428,10 +428,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_route(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE routes SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE routes SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -499,10 +500,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE plugins SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE plugins SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -547,16 +549,12 @@ impl Repository for SqliteRepository {
 
     // ---------- cascade soft-delete ----------
 
-    async fn soft_delete_plugins_for_route(
-        &self,
-        route_id: &Uuid,
-    ) -> Result<u64, GatewayError> {
-        let result = sqlx::query(
-            "UPDATE plugins SET is_deleted = 1 WHERE route_id = ? AND is_deleted = 0",
-        )
-        .bind(route_id.to_string())
-        .execute(&self.pool)
-        .await?;
+    async fn soft_delete_plugins_for_route(&self, route_id: &Uuid) -> Result<u64, GatewayError> {
+        let result =
+            sqlx::query("UPDATE plugins SET is_deleted = 1 WHERE route_id = ? AND is_deleted = 0")
+                .bind(route_id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected())
     }
 
@@ -577,24 +575,21 @@ impl Repository for SqliteRepository {
         &self,
         service_id: &Uuid,
     ) -> Result<Vec<Uuid>, GatewayError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT id FROM routes WHERE service_id = ? AND is_deleted = 0",
-        )
-        .bind(service_id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM routes WHERE service_id = ? AND is_deleted = 0")
+                .bind(service_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
 
         let ids: Vec<Uuid> = rows
             .iter()
             .filter_map(|(id,)| Uuid::from_str(id).ok())
             .collect();
 
-        sqlx::query(
-            "UPDATE routes SET is_deleted = 1 WHERE service_id = ? AND is_deleted = 0",
-        )
-        .bind(service_id.to_string())
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("UPDATE routes SET is_deleted = 1 WHERE service_id = ? AND is_deleted = 0")
+            .bind(service_id.to_string())
+            .execute(&self.pool)
+            .await?;
 
         Ok(ids)
     }
@@ -616,12 +611,11 @@ impl Repository for SqliteRepository {
         &self,
         project_id: &Uuid,
     ) -> Result<Vec<Uuid>, GatewayError> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT id FROM services WHERE project_id = ? AND is_deleted = 0",
-        )
-        .bind(project_id.to_string())
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT id FROM services WHERE project_id = ? AND is_deleted = 0")
+                .bind(project_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
 
         let ids: Vec<Uuid> = rows
             .iter()
@@ -818,9 +812,10 @@ impl Repository for SqliteRepository {
     }
 
     async fn has_any_admin_token(&self) -> Result<bool, GatewayError> {
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens WHERE is_deleted = 0")
-            .fetch_one(&self.pool)
-            .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_tokens WHERE is_deleted = 0")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count > 0)
     }
 
@@ -839,7 +834,7 @@ impl Repository for SqliteRepository {
         let diff_str = entry
             .diff
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()
             .map_err(|e| GatewayError::Internal(format!("audit diff serialize: {e}")))?;
 
@@ -881,7 +876,11 @@ impl Repository for SqliteRepository {
         let limit = filter.effective_limit() as i64;
         // QueryBuilder would be nice but we avoid it for parity with the
         // rest of this file; manual params it is.
-        let diff_col = if filter.include_diff { "diff" } else { "NULL AS diff" };
+        let diff_col = if filter.include_diff {
+            "diff"
+        } else {
+            "NULL AS diff"
+        };
         let mut sql = format!(
             "SELECT id, ts, actor_id, actor_name, actor_role, action, resource_type, resource_id, {diff_col}, hash, prev_hash FROM audit_log WHERE 1=1",
         );
@@ -1014,18 +1013,20 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_recording(&self, id: &str) -> Result<bool, GatewayError> {
-        let result = sqlx::query("UPDATE recordings SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE recordings SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id)
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 
     async fn delete_recordings_before(&self, ts: DateTime<Utc>) -> Result<u64, GatewayError> {
-        let result = sqlx::query("UPDATE recordings SET is_deleted = 1 WHERE ts < ? AND is_deleted = 0")
-            .bind(ts.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE recordings SET is_deleted = 1 WHERE ts < ? AND is_deleted = 0")
+                .bind(ts.to_rfc3339())
+                .execute(&self.pool)
+                .await?;
         Ok(result.rows_affected())
     }
 
@@ -1219,7 +1220,7 @@ impl Repository for SqliteRepository {
             "INSERT INTO metric_buckets (id, service_id, route_id, bucket_ts, granularity, \
              total_requests, success_count, error_4xx, error_5xx, total_latency_ms, \
              min_latency_ms, max_latency_ms, bytes_in, bytes_out) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(b.id.to_string())
         .bind(b.service_id.to_string())
@@ -1241,7 +1242,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn list_metric_buckets(
-        &self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>, granularity: &str,
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        granularity: &str,
     ) -> Result<Vec<MetricBucket>, GatewayError> {
         let rows = sqlx::query(
             "SELECT * FROM metric_buckets WHERE service_id = ? AND bucket_ts >= ? AND bucket_ts <= ? AND granularity = ? ORDER BY bucket_ts"
@@ -1272,7 +1277,10 @@ impl Repository for SqliteRepository {
     }
 
     async fn list_geo_buckets(
-        &self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>,
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
     ) -> Result<Vec<GeoBucket>, GatewayError> {
         let rows = sqlx::query(
             "SELECT * FROM geo_buckets WHERE service_id = ? AND bucket_ts >= ? AND bucket_ts <= ? ORDER BY bucket_ts"
@@ -1302,7 +1310,10 @@ impl Repository for SqliteRepository {
     }
 
     async fn list_rate_limit_buckets(
-        &self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>,
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
     ) -> Result<Vec<RateLimitBucket>, GatewayError> {
         let rows = sqlx::query(
             "SELECT * FROM rate_limit_buckets WHERE service_id = ? AND bucket_ts >= ? AND bucket_ts <= ? ORDER BY bucket_ts"
@@ -1396,22 +1407,28 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn list_probe_results(&self, probe_id: &Uuid, limit: u32) -> Result<Vec<ProbeResult>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM probe_results WHERE probe_id = ? ORDER BY ts DESC LIMIT ?")
-            .bind(probe_id.to_string())
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+    async fn list_probe_results(
+        &self,
+        probe_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<ProbeResult>, GatewayError> {
+        let rows =
+            sqlx::query("SELECT * FROM probe_results WHERE probe_id = ? ORDER BY ts DESC LIMIT ?")
+                .bind(probe_id.to_string())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_probe_result).collect()
     }
 
     // ── Snapshots ──
 
     async fn list_snapshots(&self, service_id: &Uuid) -> Result<Vec<Snapshot>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM snapshots WHERE service_id = ? ORDER BY created_at DESC")
-            .bind(service_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT * FROM snapshots WHERE service_id = ? ORDER BY created_at DESC")
+                .bind(service_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_snapshot).collect()
     }
 
@@ -1425,14 +1442,16 @@ impl Repository for SqliteRepository {
 
     async fn create_snapshot(&self, s: &Snapshot) -> Result<(), GatewayError> {
         let data_str = serde_json::to_string(&s.data).unwrap_or_default();
-        sqlx::query("INSERT INTO snapshots (id, service_id, name, data, created_at) VALUES (?, ?, ?, ?, ?)")
-            .bind(s.id.to_string())
-            .bind(s.service_id.to_string())
-            .bind(&s.name)
-            .bind(&data_str)
-            .bind(s.created_at.to_rfc3339())
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "INSERT INTO snapshots (id, service_id, name, data, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(s.id.to_string())
+        .bind(s.service_id.to_string())
+        .bind(&s.name)
+        .bind(&data_str)
+        .bind(s.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1447,10 +1466,11 @@ impl Repository for SqliteRepository {
     // ── Alerts ──
 
     async fn list_alert_rules(&self, service_id: &Uuid) -> Result<Vec<AlertRule>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM alert_rules WHERE service_id = ? ORDER BY created_at")
-            .bind(service_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT * FROM alert_rules WHERE service_id = ? ORDER BY created_at")
+                .bind(service_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_alert_rule).collect()
     }
 
@@ -1512,12 +1532,17 @@ impl Repository for SqliteRepository {
         Ok(r.rows_affected() > 0)
     }
 
-    async fn list_alert_events(&self, service_id: &Uuid, limit: u32) -> Result<Vec<AlertEvent>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM alert_events WHERE service_id = ? ORDER BY ts DESC LIMIT ?")
-            .bind(service_id.to_string())
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+    async fn list_alert_events(
+        &self,
+        service_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<AlertEvent>, GatewayError> {
+        let rows =
+            sqlx::query("SELECT * FROM alert_events WHERE service_id = ? ORDER BY ts DESC LIMIT ?")
+                .bind(service_id.to_string())
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_alert_event).collect()
     }
 
@@ -1551,10 +1576,12 @@ impl Repository for SqliteRepository {
     // ── IP Rules ──
 
     async fn list_ip_rules(&self, service_id: &Uuid) -> Result<Vec<IpRule>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM ip_rules WHERE service_id = ? ORDER BY priority, created_at")
-            .bind(service_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(
+            "SELECT * FROM ip_rules WHERE service_id = ? ORDER BY priority, created_at",
+        )
+        .bind(service_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_ip_rule).collect()
     }
 
@@ -1589,7 +1616,7 @@ impl Repository for SqliteRepository {
 
     async fn update_ip_rule(&self, id: &Uuid, r: &IpRule) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE ip_rules SET cidr=?, action=?, description=?, priority=?, enabled=? WHERE id=?"
+            "UPDATE ip_rules SET cidr=?, action=?, description=?, priority=?, enabled=? WHERE id=?",
         )
         .bind(&r.cidr)
         .bind(&r.action)
@@ -1613,10 +1640,11 @@ impl Repository for SqliteRepository {
     // ── Error Pages ──
 
     async fn list_error_pages(&self, service_id: &Uuid) -> Result<Vec<ErrorPage>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM error_pages WHERE service_id = ? ORDER BY status_code")
-            .bind(service_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT * FROM error_pages WHERE service_id = ? ORDER BY status_code")
+                .bind(service_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_error_page).collect()
     }
 
@@ -1648,7 +1676,7 @@ impl Repository for SqliteRepository {
 
     async fn update_error_page(&self, id: &Uuid, p: &ErrorPage) -> Result<(), GatewayError> {
         sqlx::query(
-            "UPDATE error_pages SET status_code=?, content_type=?, body=?, enabled=? WHERE id=?"
+            "UPDATE error_pages SET status_code=?, content_type=?, body=?, enabled=? WHERE id=?",
         )
         .bind(p.status_code)
         .bind(&p.content_type)
@@ -1670,11 +1698,15 @@ impl Repository for SqliteRepository {
 
     // ── Consumer Groups ──
 
-    async fn list_consumer_groups(&self, service_id: &Uuid) -> Result<Vec<ConsumerGroup>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM consumer_groups WHERE service_id = ? ORDER BY created_at")
-            .bind(service_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+    async fn list_consumer_groups(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<ConsumerGroup>, GatewayError> {
+        let rows =
+            sqlx::query("SELECT * FROM consumer_groups WHERE service_id = ? ORDER BY created_at")
+                .bind(service_id.to_string())
+                .fetch_all(&self.pool)
+                .await?;
         rows.into_iter().map(row_to_consumer_group).collect()
     }
 
@@ -1705,7 +1737,11 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn update_consumer_group(&self, id: &Uuid, g: &ConsumerGroup) -> Result<(), GatewayError> {
+    async fn update_consumer_group(
+        &self,
+        id: &Uuid,
+        g: &ConsumerGroup,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE consumer_groups SET name=?, description=?, rate_limit=?, rate_window_seconds=?, burst_limit=? WHERE id=?"
         )
@@ -1728,11 +1764,16 @@ impl Repository for SqliteRepository {
         Ok(r.rows_affected() > 0)
     }
 
-    async fn list_consumer_group_members(&self, group_id: &Uuid) -> Result<Vec<ConsumerGroupMember>, GatewayError> {
-        let rows = sqlx::query("SELECT * FROM consumer_group_members WHERE group_id = ? ORDER BY joined_at")
-            .bind(group_id.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+    async fn list_consumer_group_members(
+        &self,
+        group_id: &Uuid,
+    ) -> Result<Vec<ConsumerGroupMember>, GatewayError> {
+        let rows = sqlx::query(
+            "SELECT * FROM consumer_group_members WHERE group_id = ? ORDER BY joined_at",
+        )
+        .bind(group_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         rows.into_iter().map(row_to_consumer_group_member).collect()
     }
 
@@ -1748,12 +1789,18 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn remove_consumer_group_member(&self, group_id: &Uuid, consumer_id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("DELETE FROM consumer_group_members WHERE group_id = ? AND consumer_id = ?")
-            .bind(group_id.to_string())
-            .bind(consumer_id.to_string())
-            .execute(&self.pool)
-            .await?;
+    async fn remove_consumer_group_member(
+        &self,
+        group_id: &Uuid,
+        consumer_id: &Uuid,
+    ) -> Result<bool, GatewayError> {
+        let r = sqlx::query(
+            "DELETE FROM consumer_group_members WHERE group_id = ? AND consumer_id = ?",
+        )
+        .bind(group_id.to_string())
+        .bind(consumer_id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -1807,10 +1854,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_cache_entry(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("UPDATE cache_entries SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let r =
+            sqlx::query("UPDATE cache_entries SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -1852,7 +1900,11 @@ impl Repository for SqliteRepository {
 
     // ── Tracing ──
 
-    async fn list_traces(&self, service_id: &Uuid, limit: u32) -> Result<Vec<TraceRecord>, GatewayError> {
+    async fn list_traces(
+        &self,
+        service_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<TraceRecord>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, trace_id, service_id, route_id, method, path, status, duration_ms, \
                     span_count, has_errors, metadata, started_at \
@@ -1878,7 +1930,10 @@ impl Repository for SqliteRepository {
     }
 
     async fn create_trace(&self, t: &TraceRecord) -> Result<(), GatewayError> {
-        let metadata_str = t.metadata.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+        let metadata_str = t
+            .metadata
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         sqlx::query(
             "INSERT INTO traces (id, trace_id, service_id, route_id, method, path, status, duration_ms, \
                                  span_count, has_errors, metadata, started_at) \
@@ -1914,8 +1969,14 @@ impl Repository for SqliteRepository {
     }
 
     async fn create_span(&self, s: &SpanRecord) -> Result<(), GatewayError> {
-        let tags_str = s.tags.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-        let logs_str = s.logs.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+        let tags_str = s
+            .tags
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let logs_str = s
+            .logs
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         sqlx::query(
             "INSERT INTO spans (id, trace_id, span_id, parent_span_id, operation, service_name, status, \
                                 duration_ms, tags, logs, started_at) \
@@ -1939,7 +2000,10 @@ impl Repository for SqliteRepository {
 
     // ── Transforms ──
 
-    async fn list_transform_rules(&self, service_id: &Uuid) -> Result<Vec<TransformRule>, GatewayError> {
+    async fn list_transform_rules(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<TransformRule>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, route_id, name, phase, action, target, value, condition, priority, enabled, created_at, updated_at \
              FROM transform_rules WHERE service_id = ? AND is_deleted = 0 ORDER BY priority, created_at",
@@ -1984,7 +2048,11 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn update_transform_rule(&self, id: &Uuid, r: &TransformRule) -> Result<(), GatewayError> {
+    async fn update_transform_rule(
+        &self,
+        id: &Uuid,
+        r: &TransformRule,
+    ) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE transform_rules SET name=?, phase=?, action=?, target=?, value=?, condition=?, priority=?, enabled=?, updated_at=? \
              WHERE id=? AND is_deleted = 0",
@@ -2005,10 +2073,12 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_transform_rule(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("UPDATE transform_rules SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let r = sqlx::query(
+            "UPDATE transform_rules SET is_deleted = 1 WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -2075,10 +2145,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_api_version(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("UPDATE api_versions SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let r =
+            sqlx::query("UPDATE api_versions SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -2152,7 +2223,10 @@ impl Repository for SqliteRepository {
         Ok(r.rows_affected() > 0)
     }
 
-    async fn list_incident_updates(&self, incident_id: &Uuid) -> Result<Vec<IncidentUpdate>, GatewayError> {
+    async fn list_incident_updates(
+        &self,
+        incident_id: &Uuid,
+    ) -> Result<Vec<IncidentUpdate>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, incident_id, status, message, created_at \
              FROM incident_updates WHERE incident_id = ? ORDER BY created_at",
@@ -2252,7 +2326,11 @@ impl Repository for SqliteRepository {
         Ok(r.rows_affected() > 0)
     }
 
-    async fn list_webhook_deliveries(&self, webhook_id: &Uuid, limit: u32) -> Result<Vec<WebhookDelivery>, GatewayError> {
+    async fn list_webhook_deliveries(
+        &self,
+        webhook_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<WebhookDelivery>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, webhook_id, event_type, payload, response_status, response_body, success, attempts, delivered_at \
              FROM webhook_deliveries WHERE webhook_id = ? ORDER BY delivered_at DESC LIMIT ?",
@@ -2311,8 +2389,14 @@ impl Repository for SqliteRepository {
     }
 
     async fn create_load_test(&self, t: &LoadTest) -> Result<(), GatewayError> {
-        let headers_str = t.headers.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-        let result_str = t.result.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+        let headers_str = t
+            .headers
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let result_str = t
+            .result
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         sqlx::query(
             "INSERT INTO load_tests (id, service_id, name, target_rps, duration_seconds, concurrent_users, method, path, \
                                      headers, body, status, result, started_at, completed_at, created_at) \
@@ -2339,8 +2423,14 @@ impl Repository for SqliteRepository {
     }
 
     async fn update_load_test(&self, id: &Uuid, t: &LoadTest) -> Result<(), GatewayError> {
-        let headers_str = t.headers.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-        let result_str = t.result.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+        let headers_str = t
+            .headers
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
+        let result_str = t
+            .result
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         sqlx::query(
             "UPDATE load_tests SET name=?, target_rps=?, duration_seconds=?, concurrent_users=?, method=?, path=?, \
                                    headers=?, body=?, status=?, result=?, started_at=?, completed_at=? \
@@ -2385,7 +2475,10 @@ impl Repository for SqliteRepository {
         rows.into_iter().map(row_to_marketplace_plugin).collect()
     }
 
-    async fn get_marketplace_plugin(&self, id: &Uuid) -> Result<Option<MarketplacePlugin>, GatewayError> {
+    async fn get_marketplace_plugin(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<MarketplacePlugin>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, display_name, description, version, author, category, schema, readme, \
                     downloads, rating, verified, created_at, updated_at \
@@ -2423,7 +2516,11 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn update_marketplace_plugin(&self, id: &Uuid, p: &MarketplacePlugin) -> Result<(), GatewayError> {
+    async fn update_marketplace_plugin(
+        &self,
+        id: &Uuid,
+        p: &MarketplacePlugin,
+    ) -> Result<(), GatewayError> {
         let schema_str = serde_json::to_string(&p.schema).unwrap_or_default();
         sqlx::query(
             "UPDATE marketplace_plugins SET name=?, display_name=?, description=?, version=?, author=?, category=?, \
@@ -2449,16 +2546,23 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_marketplace_plugin(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("UPDATE marketplace_plugins SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let r = sqlx::query(
+            "UPDATE marketplace_plugins SET is_deleted = 1 WHERE id = ? AND is_deleted = 0",
+        )
+        .bind(id.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(r.rows_affected() > 0)
     }
 
     // ── Cost Analytics ──
 
-    async fn list_cost_records(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CostRecord>, GatewayError> {
+    async fn list_cost_records(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CostRecord>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, bucket_ts, compute_cost, bandwidth_cost, storage_cost, total_cost, \
                     currency, requests, bytes_transferred \
@@ -2560,16 +2664,20 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_cluster_node(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("UPDATE cluster_nodes SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let r =
+            sqlx::query("UPDATE cluster_nodes SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(r.rows_affected() > 0)
     }
 
     // ── Rate Limit Simulator ──
 
-    async fn list_rate_limit_simulations(&self, service_id: &Uuid) -> Result<Vec<RateLimitSimulation>, GatewayError> {
+    async fn list_rate_limit_simulations(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<RateLimitSimulation>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, service_id, consumer_id, requests_per_second, duration_seconds, \
                     \"limit\", window_seconds, burst, result, created_at \
@@ -2581,8 +2689,14 @@ impl Repository for SqliteRepository {
         rows.into_iter().map(row_to_rate_limit_simulation).collect()
     }
 
-    async fn create_rate_limit_simulation(&self, s: &RateLimitSimulation) -> Result<(), GatewayError> {
-        let result_str = s.result.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    async fn create_rate_limit_simulation(
+        &self,
+        s: &RateLimitSimulation,
+    ) -> Result<(), GatewayError> {
+        let result_str = s
+            .result
+            .as_ref()
+            .map(|v| serde_json::to_string(v).unwrap_or_default());
         sqlx::query(
             "INSERT INTO rate_limit_simulations (id, service_id, consumer_id, requests_per_second, duration_seconds, \
                                                  \"limit\", window_seconds, burst, result, created_at) \
@@ -2603,7 +2717,10 @@ impl Repository for SqliteRepository {
         Ok(())
     }
 
-    async fn get_rate_limit_simulation(&self, id: &Uuid) -> Result<Option<RateLimitSimulation>, GatewayError> {
+    async fn get_rate_limit_simulation(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<RateLimitSimulation>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, service_id, consumer_id, requests_per_second, duration_seconds, \
                     \"limit\", window_seconds, burst, result, created_at \
@@ -2617,7 +2734,10 @@ impl Repository for SqliteRepository {
 
     // ── PKI / Certificates ──
 
-    async fn list_certificates(&self, service_id: Option<&Uuid>) -> Result<Vec<Certificate>, GatewayError> {
+    async fn list_certificates(
+        &self,
+        service_id: Option<&Uuid>,
+    ) -> Result<Vec<Certificate>, GatewayError> {
         let rows = if let Some(sid) = service_id {
             sqlx::query(
                 "SELECT id, service_id, domain, issuer, serial_number, not_before, not_after, \
@@ -2696,10 +2816,11 @@ impl Repository for SqliteRepository {
     }
 
     async fn delete_certificate(&self, id: &Uuid) -> Result<bool, GatewayError> {
-        let r = sqlx::query("UPDATE certificates SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
+        let r =
+            sqlx::query("UPDATE certificates SET is_deleted = 1 WHERE id = ? AND is_deleted = 0")
+                .bind(id.to_string())
+                .execute(&self.pool)
+                .await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -2763,9 +2884,18 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 retries: svc_cfg.retries,
                 connect_timeout_ms: svc_cfg.connect_timeout_ms,
                 lb_strategy: existing.lb_strategy.clone(),
-                service_type: svc_cfg.service_type.clone().unwrap_or_else(|| existing.service_type.clone()),
-                document_root: svc_cfg.document_root.clone().or_else(|| existing.document_root.clone()),
-                index_file: svc_cfg.index_file.clone().unwrap_or_else(|| existing.index_file.clone()),
+                service_type: svc_cfg
+                    .service_type
+                    .clone()
+                    .unwrap_or_else(|| existing.service_type.clone()),
+                document_root: svc_cfg
+                    .document_root
+                    .clone()
+                    .or_else(|| existing.document_root.clone()),
+                index_file: svc_cfg
+                    .index_file
+                    .clone()
+                    .unwrap_or_else(|| existing.index_file.clone()),
                 spa_fallback: svc_cfg.spa_fallback.unwrap_or(existing.spa_fallback),
                 tls_verify: existing.tls_verify,
                 tls_client_cert_path: existing.tls_client_cert_path.clone(),
@@ -2828,9 +2958,9 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
         };
 
         // Check if a route with the same hosts+service already exists.
-        let already = existing_routes.iter().find(|r| {
-            r.service_id == service_id && r.hosts == rt_cfg.hosts
-        });
+        let already = existing_routes
+            .iter()
+            .find(|r| r.service_id == service_id && r.hosts == rt_cfg.hosts);
 
         if let Some(existing) = already {
             // Update in place.
@@ -2885,9 +3015,9 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
             serde_json::to_value(&plugin_cfg.config).unwrap_or(serde_json::Value::Null);
 
         // Match global plugins (no service/route scope) by name.
-        let already = existing_plugins.iter().find(|p| {
-            p.name == plugin_cfg.name && p.service_id.is_none() && p.route_id.is_none()
-        });
+        let already = existing_plugins
+            .iter()
+            .find(|p| p.name == plugin_cfg.name && p.service_id.is_none() && p.route_id.is_none());
 
         if let Some(existing) = already {
             let updated = PluginInstance {
@@ -2935,8 +3065,7 @@ fn parse_dt(s: &str) -> Result<DateTime<Utc>, GatewayError> {
     DateTime::parse_from_rfc3339(s)
         .map(|dt| dt.with_timezone(&Utc))
         .or_else(|_| {
-            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
-                .map(|ndt| ndt.and_utc())
+            chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").map(|ndt| ndt.and_utc())
         })
         .map_err(|e| GatewayError::Internal(format!("invalid timestamp in db: {e}")))
 }
@@ -3006,13 +3135,37 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         tls_client_cert_path,
         tls_client_key_path,
         tls_ca_path,
-        lb_hash_header: row.try_get::<Option<String>, _>("lb_hash_header").ok().flatten(),
-        lb_hash_query_param: row.try_get::<Option<String>, _>("lb_hash_query_param").ok().flatten(),
-        flush_interval_ms: row.try_get::<Option<i64>, _>("flush_interval_ms").ok().flatten(),
-        stream_timeout_ms: row.try_get::<Option<i64>, _>("stream_timeout_ms").ok().flatten().map(|v| v as u64),
-        stream_close_delay_ms: row.try_get::<Option<i64>, _>("stream_close_delay_ms").ok().flatten().map(|v| v as u64),
-        pass_host_header: row.try_get::<Option<bool>, _>("pass_host_header").ok().flatten(),
-        drain_timeout_ms: row.try_get::<Option<i64>, _>("drain_timeout_ms").ok().flatten().map(|v| v as u64),
+        lb_hash_header: row
+            .try_get::<Option<String>, _>("lb_hash_header")
+            .ok()
+            .flatten(),
+        lb_hash_query_param: row
+            .try_get::<Option<String>, _>("lb_hash_query_param")
+            .ok()
+            .flatten(),
+        flush_interval_ms: row
+            .try_get::<Option<i64>, _>("flush_interval_ms")
+            .ok()
+            .flatten(),
+        stream_timeout_ms: row
+            .try_get::<Option<i64>, _>("stream_timeout_ms")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
+        stream_close_delay_ms: row
+            .try_get::<Option<i64>, _>("stream_close_delay_ms")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
+        pass_host_header: row
+            .try_get::<Option<bool>, _>("pass_host_header")
+            .ok()
+            .flatten(),
+        drain_timeout_ms: row
+            .try_get::<Option<i64>, _>("drain_timeout_ms")
+            .ok()
+            .flatten()
+            .map(|v| v as u64),
         project_id: row
             .try_get::<Option<String>, _>("project_id")
             .ok()
@@ -3044,7 +3197,9 @@ fn row_to_target(row: sqlx::sqlite::SqliteRow) -> Result<Target, GatewayError> {
     let weight: i64 = row.try_get("weight")?;
     let enabled: i64 = row.try_get("enabled")?;
     let zone: Option<String> = row.try_get("zone").ok();
-    let state_str: String = row.try_get("state").unwrap_or_else(|_| "active".to_string());
+    let state_str: String = row
+        .try_get("state")
+        .unwrap_or_else(|_| "active".to_string());
     let created_at: String = row.try_get("created_at")?;
     let updated_at: String = row.try_get("updated_at")?;
 
@@ -3271,7 +3426,9 @@ fn row_to_metric_bucket(row: sqlx::sqlite::SqliteRow) -> Result<MetricBucket, Ga
     Ok(MetricBucket {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        route_id: row.try_get::<Option<String>, _>("route_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        route_id: row
+            .try_get::<Option<String>, _>("route_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         bucket_ts: parse_dt(&row.try_get::<String, _>("bucket_ts")?)?,
         granularity: row.try_get("granularity")?,
         total_requests: row.try_get("total_requests")?,
@@ -3301,7 +3458,9 @@ fn row_to_rate_limit_bucket(row: sqlx::sqlite::SqliteRow) -> Result<RateLimitBuc
     Ok(RateLimitBucket {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        consumer_id: row.try_get::<Option<String>, _>("consumer_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        consumer_id: row
+            .try_get::<Option<String>, _>("consumer_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         bucket_ts: parse_dt(&row.try_get::<String, _>("bucket_ts")?)?,
         allowed: row.try_get("allowed")?,
         throttled: row.try_get("throttled")?,
@@ -3312,7 +3471,9 @@ fn row_to_probe(row: sqlx::sqlite::SqliteRow) -> Result<Probe, GatewayError> {
     Ok(Probe {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        route_id: row.try_get::<Option<String>, _>("route_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        route_id: row
+            .try_get::<Option<String>, _>("route_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         name: row.try_get("name")?,
         method: row.try_get("method")?,
         path: row.try_get("path")?,
@@ -3386,7 +3547,9 @@ fn row_to_ip_rule(row: sqlx::sqlite::SqliteRow) -> Result<IpRule, GatewayError> 
     Ok(IpRule {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        route_id: row.try_get::<Option<String>, _>("route_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        route_id: row
+            .try_get::<Option<String>, _>("route_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         cidr: row.try_get("cidr")?,
         action: row.try_get("action")?,
         description: row.try_get("description")?,
@@ -3425,7 +3588,9 @@ fn row_to_consumer_group(row: sqlx::sqlite::SqliteRow) -> Result<ConsumerGroup, 
     })
 }
 
-fn row_to_consumer_group_member(row: sqlx::sqlite::SqliteRow) -> Result<ConsumerGroupMember, GatewayError> {
+fn row_to_consumer_group_member(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<ConsumerGroupMember, GatewayError> {
     Ok(ConsumerGroupMember {
         group_id: parse_uuid(&row.try_get::<String, _>("group_id")?)?,
         consumer_id: parse_uuid(&row.try_get::<String, _>("consumer_id")?)?,
@@ -3453,7 +3618,9 @@ fn row_to_trace(row: sqlx::sqlite::SqliteRow) -> Result<TraceRecord, GatewayErro
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         trace_id: row.try_get("trace_id")?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        route_id: row.try_get::<Option<String>, _>("route_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        route_id: row
+            .try_get::<Option<String>, _>("route_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         method: row.try_get("method")?,
         path: row.try_get("path")?,
         status: row.try_get("status")?,
@@ -3487,7 +3654,9 @@ fn row_to_transform_rule(row: sqlx::sqlite::SqliteRow) -> Result<TransformRule, 
     Ok(TransformRule {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        route_id: row.try_get::<Option<String>, _>("route_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        route_id: row
+            .try_get::<Option<String>, _>("route_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         name: row.try_get("name")?,
         phase: row.try_get("phase")?,
         action: row.try_get("action")?,
@@ -3600,7 +3769,9 @@ fn row_to_load_test(row: sqlx::sqlite::SqliteRow) -> Result<LoadTest, GatewayErr
     })
 }
 
-fn row_to_marketplace_plugin(row: sqlx::sqlite::SqliteRow) -> Result<MarketplacePlugin, GatewayError> {
+fn row_to_marketplace_plugin(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<MarketplacePlugin, GatewayError> {
     let schema_str: String = row.try_get("schema")?;
     Ok(MarketplacePlugin {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
@@ -3652,12 +3823,16 @@ fn row_to_cluster_node(row: sqlx::sqlite::SqliteRow) -> Result<ClusterNode, Gate
     })
 }
 
-fn row_to_rate_limit_simulation(row: sqlx::sqlite::SqliteRow) -> Result<RateLimitSimulation, GatewayError> {
+fn row_to_rate_limit_simulation(
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<RateLimitSimulation, GatewayError> {
     let result: Option<String> = row.try_get("result")?;
     Ok(RateLimitSimulation {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
         service_id: parse_uuid(&row.try_get::<String, _>("service_id")?)?,
-        consumer_id: row.try_get::<Option<String>, _>("consumer_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        consumer_id: row
+            .try_get::<Option<String>, _>("consumer_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         requests_per_second: row.try_get("requests_per_second")?,
         duration_seconds: row.try_get("duration_seconds")?,
         limit: row.try_get("limit")?,
@@ -3671,7 +3846,9 @@ fn row_to_rate_limit_simulation(row: sqlx::sqlite::SqliteRow) -> Result<RateLimi
 fn row_to_certificate(row: sqlx::sqlite::SqliteRow) -> Result<Certificate, GatewayError> {
     Ok(Certificate {
         id: parse_uuid(&row.try_get::<String, _>("id")?)?,
-        service_id: row.try_get::<Option<String>, _>("service_id")?.and_then(|s| Uuid::from_str(&s).ok()),
+        service_id: row
+            .try_get::<Option<String>, _>("service_id")?
+            .and_then(|s| Uuid::from_str(&s).ok()),
         domain: row.try_get("domain")?,
         issuer: row.try_get("issuer")?,
         serial_number: row.try_get("serial_number")?,

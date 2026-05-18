@@ -110,7 +110,10 @@ pub async fn validate_grant(
     next: Next,
 ) -> Response {
     let auth_header = req.headers().get(header::AUTHORIZATION);
-    let token = match auth_header.and_then(|h| h.to_str().ok()).and_then(|s| s.strip_prefix("Bearer ")) {
+    let token = match auth_header
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+    {
         Some(t) => t,
         None => return unauthorized("missing runtime grant token"),
     };
@@ -123,12 +126,12 @@ pub async fn validate_grant(
     // Check revocation in DB
     match state.repo.get_runtime_grant_by_token_id(&claims.jti).await {
         Ok(Some(grant)) if grant.revoked_at.is_some() => return unauthorized("grant revoked"),
-        Ok(Some(_)) => {},
+        Ok(Some(_)) => {}
         _ => return unauthorized("grant session not found"),
     };
 
     let device_id = Uuid::parse_str(&claims.device_id).unwrap_or_else(|_| Uuid::nil());
-    
+
     req.extensions_mut().insert(GrantActor {
         customer_urn: claims.sub,
         device_id,
@@ -388,6 +391,22 @@ async fn enforce_role(min: Role, req: Request<axum::body::Body>, next: Next) -> 
     }
 }
 
+/// Convenience: pick the right concrete guard for a role. Returns a fn
+/// pointer (`Copy`/`Send`/`Sync`/`'static`) so it composes with
+/// `axum::middleware::from_fn`.
+pub fn require_role(
+    min: Role,
+) -> fn(
+    Request<axum::body::Body>,
+    Next,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    match min {
+        Role::Viewer => |req, next| Box::pin(require_viewer(req, next)),
+        Role::Operator => |req, next| Box::pin(require_operator(req, next)),
+        Role::Admin => |req, next| Box::pin(require_admin(req, next)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,7 +486,9 @@ mod tests {
             .mount(&server)
             .await;
         let client = keyx_client(server.uri());
-        let resp = resolve_via_validator(&client, "ak_live_xxx").await.unwrap_err();
+        let resp = resolve_via_validator(&client, "ak_live_xxx")
+            .await
+            .unwrap_err();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
@@ -548,10 +569,7 @@ mod tests {
 
     #[test]
     fn scope_check_wildcard_satisfies_anything() {
-        let actor = CurrentActor(Some(token_with_scopes(
-            Role::Viewer,
-            vec!["*".into()],
-        )));
+        let actor = CurrentActor(Some(token_with_scopes(Role::Viewer, vec!["*".into()])));
         assert!(actor_has_scope(&actor, "anything.at.all"));
     }
 
@@ -575,21 +593,5 @@ mod tests {
     fn scope_check_bootstrap_mode_passes() {
         let actor = CurrentActor(None);
         assert!(actor_has_scope(&actor, "services.write"));
-    }
-}
-
-/// Convenience: pick the right concrete guard for a role. Returns a fn
-/// pointer (`Copy`/`Send`/`Sync`/`'static`) so it composes with
-/// `axum::middleware::from_fn`.
-pub fn require_role(
-    min: Role,
-) -> fn(
-    Request<axum::body::Body>,
-    Next,
-) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
-    match min {
-        Role::Viewer => |req, next| Box::pin(require_viewer(req, next)),
-        Role::Operator => |req, next| Box::pin(require_operator(req, next)),
-        Role::Admin => |req, next| Box::pin(require_admin(req, next)),
     }
 }

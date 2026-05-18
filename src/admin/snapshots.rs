@@ -34,12 +34,17 @@ pub async fn create_snapshot(
         .ok_or(GatewayError::NotFound("service not found".into()))?;
 
     let routes = state.repo.list_routes().await?;
-    let svc_routes: Vec<_> = routes.into_iter().filter(|r| r.service_id == service_id).collect();
+    let svc_routes: Vec<_> = routes
+        .into_iter()
+        .filter(|r| r.service_id == service_id)
+        .collect();
 
     let plugins = state.repo.list_plugins().await?;
     let svc_plugins: Vec<_> = plugins
         .into_iter()
-        .filter(|p| p.service_id == Some(service_id) || svc_routes.iter().any(|r| p.route_id == Some(r.id)))
+        .filter(|p| {
+            p.service_id == Some(service_id) || svc_routes.iter().any(|r| p.route_id == Some(r.id))
+        })
         .collect();
 
     let targets = state.repo.list_targets_for_service(&service_id).await?;
@@ -96,7 +101,10 @@ pub async fn snapshot_diff(
 
     let svc = state.repo.get_service(&service_id).await?;
     let routes = state.repo.list_routes().await?;
-    let svc_routes: Vec<_> = routes.into_iter().filter(|r| r.service_id == service_id).collect();
+    let svc_routes: Vec<_> = routes
+        .into_iter()
+        .filter(|r| r.service_id == service_id)
+        .collect();
     let plugins = state.repo.list_plugins().await?;
     let targets = state.repo.list_targets_for_service(&service_id).await?;
 
@@ -138,7 +146,10 @@ fn compute_diff(snapshot: &serde_json::Value, current: &serde_json::Value) -> Sn
 
         for id in curr_ids.difference(&snap_ids) {
             let name = curr_arr
-                .and_then(|arr| arr.iter().find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id)))
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id))
+                })
                 .and_then(|v| v.get("name").and_then(|n| n.as_str()))
                 .unwrap_or("")
                 .to_string();
@@ -151,7 +162,10 @@ fn compute_diff(snapshot: &serde_json::Value, current: &serde_json::Value) -> Sn
 
         for id in snap_ids.difference(&curr_ids) {
             let name = snap_arr
-                .and_then(|arr| arr.iter().find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id)))
+                .and_then(|arr| {
+                    arr.iter()
+                        .find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id))
+                })
                 .and_then(|v| v.get("name").and_then(|n| n.as_str()))
                 .unwrap_or("")
                 .to_string();
@@ -164,10 +178,12 @@ fn compute_diff(snapshot: &serde_json::Value, current: &serde_json::Value) -> Sn
 
         for id in snap_ids.intersection(&curr_ids) {
             let snap_obj = snap_arr.and_then(|arr| {
-                arr.iter().find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id))
+                arr.iter()
+                    .find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id))
             });
             let curr_obj = curr_arr.and_then(|arr| {
-                arr.iter().find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id))
+                arr.iter()
+                    .find(|v| v.get("id").and_then(|i| i.as_str()) == Some(id))
             });
 
             if let (Some(s), Some(c)) = (snap_obj, curr_obj) {
@@ -193,7 +209,11 @@ fn compute_diff(snapshot: &serde_json::Value, current: &serde_json::Value) -> Sn
         }
     }
 
-    SnapshotDiff { added, removed, changed }
+    SnapshotDiff {
+        added,
+        removed,
+        changed,
+    }
 }
 
 pub async fn rollback_snapshot(
@@ -222,7 +242,9 @@ pub async fn rollback_snapshot(
 
     let _ = state.reload.trigger().await;
 
-    Ok(Json(json!({ "status": "rolled_back", "snapshot_id": snapshot_id })))
+    Ok(Json(
+        json!({ "status": "rolled_back", "snapshot_id": snapshot_id }),
+    ))
 }
 
 pub async fn delete_snapshot(

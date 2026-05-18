@@ -220,9 +220,9 @@ async fn run_script(
         cmd.current_dir(dir);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| PluginError::Internal(format!("script-runner: spawn `{}`: {e}", def.command)))?;
+    let mut child = cmd.spawn().map_err(|e| {
+        PluginError::Internal(format!("script-runner: spawn `{}`: {e}", def.command))
+    })?;
 
     // Write input to stdin.
     if let Some(mut stdin) = child.stdin.take() {
@@ -237,9 +237,7 @@ async fn run_script(
     let exit_status = match wait_result {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
-            return Err(PluginError::Internal(format!(
-                "script-runner: wait: {e}"
-            )));
+            return Err(PluginError::Internal(format!("script-runner: wait: {e}")));
         }
         Err(_) => {
             child.kill().await.ok();

@@ -1,15 +1,15 @@
 //! Zero-Trust Handshake Handlers (Init & Heartbeat).
 
-use axum::extract::{State, Json};
+use axum::extract::{Json, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use chrono::{Utc, DateTime};
 
+use crate::auth::grant::{Capability, GrantManager};
 use crate::db::Repository;
-use crate::auth::grant::{GrantManager, Capability};
 use crate::error::GatewayError;
 
 #[derive(Debug, Deserialize)]
@@ -78,8 +78,9 @@ pub async fn execute_premium(
                 "error": "capability missing",
                 "required": required,
                 "message": "This feature requires a premium subscription."
-            }))
-        ).into_response());
+            })),
+        )
+            .into_response());
     }
 
     // Logic is executed HERE, on the server.
@@ -112,7 +113,7 @@ pub async fn init_handshake(
     let prefix = parts[0];
 
     let api_key_row = state.repo.get_api_key_by_prefix(prefix).await?;
-    
+
     let key_row = match api_key_row {
         Some(row) if crate::auth::verify_api_key(&req.api_key, &row.key_hash) => row,
         _ => return Ok((StatusCode::UNAUTHORIZED, "invalid api key").into_response()),
@@ -121,24 +122,32 @@ pub async fn init_handshake(
     let customer_id = key_row.customer_id;
 
     // 2. Register/Update Device
-    let mut device = state.repo.get_device_fingerprint(customer_id, &req.hardware_id).await?;
-    if device.is_none() {
-        let new_device = crate::models::DeviceFingerprint {
-            id: Uuid::new_v4(),
-            customer_id,
-            hardware_id: req.hardware_id.clone(),
-            name: req.device_name.clone(),
-            os_info: req.os_info.clone(),
-            is_blocked: false,
-            last_seen_at: Utc::now(),
-        };
-        state.repo.create_device_fingerprint(&new_device).await?;
-        device = Some(new_device);
-    } else {
-        state.repo.update_device_last_seen(&device.as_ref().unwrap().id, Utc::now()).await?;
-    }
-
-    let device = device.unwrap();
+    let device = match state
+        .repo
+        .get_device_fingerprint(customer_id, &req.hardware_id)
+        .await?
+    {
+        Some(existing) => {
+            state
+                .repo
+                .update_device_last_seen(&existing.id, Utc::now())
+                .await?;
+            existing
+        }
+        None => {
+            let new_device = crate::models::DeviceFingerprint {
+                id: Uuid::new_v4(),
+                customer_id,
+                hardware_id: req.hardware_id.clone(),
+                name: req.device_name.clone(),
+                os_info: req.os_info.clone(),
+                is_blocked: false,
+                last_seen_at: Utc::now(),
+            };
+            state.repo.create_device_fingerprint(&new_device).await?;
+            new_device
+        }
+    };
     if device.is_blocked {
         return Ok((StatusCode::FORBIDDEN, "device blocked").into_response());
     }
@@ -187,22 +196,29 @@ pub async fn init_handshake(
         capabilities,
         server_time: Utc::now(),
         expires_at: grant.expires_at,
-    }).into_response())
+    })
+    .into_response())
 }
 
 pub async fn heartbeat(
     State(state): State<Arc<HandshakeState>>,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<impl IntoResponse, GatewayError> {
-    let grant = state.repo.get_runtime_grant_by_token_id(&req.token_id).await?;
-    
+    let grant = state
+        .repo
+        .get_runtime_grant_by_token_id(&req.token_id)
+        .await?;
+
     let grant = match grant {
         Some(g) if g.revoked_at.is_none() && g.expires_at > Utc::now() => g,
         _ => return Ok((StatusCode::UNAUTHORIZED, "grant expired or revoked").into_response()),
     };
 
     // Update heartbeat
-    state.repo.update_grant_heartbeat(&req.token_id, Utc::now()).await?;
+    state
+        .repo
+        .update_grant_heartbeat(&req.token_id, Utc::now())
+        .await?;
 
     // Check device status again
     if let Some(_device_id) = grant.device_id {
@@ -213,7 +229,7 @@ pub async fn heartbeat(
     // Re-issue a fresh token (rolling refresh)
     // We should really fetch the API key again to see if scopes changed.
     let capabilities = vec![Capability::ProxyBasic, Capability::LlmGateway]; // Should be read from grant or DB
-    
+
     let (token, _) = state.grant_manager.create_grant(
         &format!("cus_{}", grant.customer_id),
         grant.device_id.unwrap_or_else(Uuid::new_v4), // fallback
@@ -223,5 +239,6 @@ pub async fn heartbeat(
     Ok(Json(HeartbeatResponse {
         grant_token: token,
         server_time: Utc::now(),
-    }).into_response())
+    })
+    .into_response())
 }

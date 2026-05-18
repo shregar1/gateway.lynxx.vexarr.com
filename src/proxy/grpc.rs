@@ -10,8 +10,7 @@ use hyper_util::rt::{TokioExecutor, TokioTimer};
 /// HTTP/2 (h2c) client used for gRPC streaming. Built once and shared.
 pub type GrpcClient = Client<HttpConnector, Body>;
 /// HTTPS-capable gRPC client (h2 over TLS).
-pub type GrpcTlsClient =
-    Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
+pub type GrpcTlsClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>;
 
 pub fn build_grpc_client() -> GrpcClient {
     let mut connector = HttpConnector::new();
@@ -58,9 +57,9 @@ pub async fn handle_grpc(
         "https" => {
             // For HTTPS gRPC, use the TLS-capable client.
             let tls_client = build_grpc_tls_client();
-            let uri: Uri = upstream_url.parse().map_err(|e| {
-                GatewayError::BadRequest(format!("invalid upstream uri: {e}"))
-            })?;
+            let uri: Uri = upstream_url
+                .parse()
+                .map_err(|e| GatewayError::BadRequest(format!("invalid upstream uri: {e}")))?;
             let (mut parts, body) = req.into_parts();
             parts.uri = uri;
             parts.headers.remove("host");
@@ -154,7 +153,7 @@ pub async fn handle_grpc_web(
             .uri(upstream_url.clone())
             .header(axum::http::header::CONTENT_TYPE, "application/grpc")
             .body(Body::from(decoded))
-            .unwrap();
+            .map_err(|e| GatewayError::BadRequest(format!("grpc-web rebuild: {e}")))?;
     } else {
         // Just change content-type to application/grpc for the upstream.
         req.headers_mut().insert(

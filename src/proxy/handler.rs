@@ -88,7 +88,9 @@ impl ProxyState {
         status: &'static str,
         target: &str,
     ) {
-        if self.minimal_telemetry { return; }
+        if self.minimal_telemetry {
+            return;
+        }
         metrics::counter!(
             "lynxx_requests_total",
             "service" => svc.to_string(),
@@ -109,7 +111,9 @@ impl ProxyState {
         target: &str,
         seconds: f64,
     ) {
-        if self.minimal_telemetry { return; }
+        if self.minimal_telemetry {
+            return;
+        }
         metrics::histogram!(
             "lynxx_request_duration_seconds",
             "service" => svc.to_string(),
@@ -135,11 +139,20 @@ impl ProxyState {
         level: &str,
         message: &str,
     ) {
-        if self.minimal_telemetry { return; }
+        if self.minimal_telemetry {
+            return;
+        }
         self.log_writer.log(
-            method, path, client_ip,
-            service_id, route_id, project_id,
-            status, duration_ms, level, message,
+            method,
+            path,
+            client_ip,
+            service_id,
+            route_id,
+            project_id,
+            status,
+            duration_ms,
+            level,
+            message,
         );
     }
 }
@@ -236,16 +249,12 @@ async fn proxy_via_unix(
 ) -> Result<Response<Body>, GatewayError> {
     let stream = tokio::net::UnixStream::connect(socket_path)
         .await
-        .map_err(|e| {
-            GatewayError::UpstreamError(format!("unix connect {socket_path}: {e}"))
-        })?;
+        .map_err(|e| GatewayError::UpstreamError(format!("unix connect {socket_path}: {e}")))?;
     let io = TokioIo::new(stream);
 
     let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
         .await
-        .map_err(|e| {
-            GatewayError::UpstreamError(format!("unix handshake {socket_path}: {e}"))
-        })?;
+        .map_err(|e| GatewayError::UpstreamError(format!("unix handshake {socket_path}: {e}")))?;
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -260,9 +269,10 @@ async fn proxy_via_unix(
         }
     }
 
-    let resp = sender.send_request(req).await.map_err(|e| {
-        GatewayError::UpstreamError(format!("unix upstream send: {e}"))
-    })?;
+    let resp = sender
+        .send_request(req)
+        .await
+        .map_err(|e| GatewayError::UpstreamError(format!("unix upstream send: {e}")))?;
 
     let (parts, incoming) = resp.into_parts();
     Ok(Response::from_parts(parts, Body::new(incoming)))
@@ -325,7 +335,18 @@ pub async fn proxy_handler(
         Some(pair) => pair,
         None => {
             state.record_request_metric("-", "-", method, "no_route", "-");
-            state.log_request(method, path, &peer_ip_early, None, None, None, None, start.elapsed().as_millis() as i64, "error", "no matching route");
+            state.log_request(
+                method,
+                path,
+                &peer_ip_early,
+                None,
+                None,
+                None,
+                None,
+                start.elapsed().as_millis() as i64,
+                "error",
+                "no matching route",
+            );
             // Browsers (Accept: text/html) get a branded page with instructions
             // for registering the missing route. API/SDK callers fall through
             // to the existing JSON error body so machine parsers don't break.
@@ -348,7 +369,18 @@ pub async fn proxy_handler(
 
     if route.health_gate && !state.lb.has_healthy_active_target(&service.id) {
         state.record_request_metric(&svc_name, &route_id, method, "health_gated", "-");
-        state.log_request(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "health gated — no healthy targets");
+        state.log_request(
+            method,
+            path,
+            &peer_ip_early,
+            log_svc_id,
+            log_route_id,
+            log_project_id,
+            Some(503),
+            start.elapsed().as_millis() as i64,
+            "error",
+            "health gated — no healthy targets",
+        );
         return Err(GatewayError::ServiceUnavailable(format!(
             "service {} has no healthy targets",
             service.name
@@ -361,7 +393,18 @@ pub async fn proxy_handler(
         .should_allow_request(&service.id, open_duration_ms)
     {
         state.record_request_metric(&svc_name, &route_id, method, "circuit_open", "-");
-        state.log_request(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(503), start.elapsed().as_millis() as i64, "error", "circuit breaker open");
+        state.log_request(
+            method,
+            path,
+            &peer_ip_early,
+            log_svc_id,
+            log_route_id,
+            log_project_id,
+            Some(503),
+            start.elapsed().as_millis() as i64,
+            "error",
+            "circuit breaker open",
+        );
         return Err(GatewayError::CircuitOpen(format!(
             "service {} circuit breaker open",
             service.name
@@ -374,14 +417,36 @@ pub async fn proxy_handler(
     // signal rather than a generic 5xx.
     if !state.license.is_active() {
         state.record_request_metric(&svc_name, &route_id, method, "license_revoked", "-");
-        state.log_request(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(402), start.elapsed().as_millis() as i64, "error", "license revoked");
+        state.log_request(
+            method,
+            path,
+            &peer_ip_early,
+            log_svc_id,
+            log_route_id,
+            log_project_id,
+            Some(402),
+            start.elapsed().as_millis() as i64,
+            "error",
+            "license revoked",
+        );
         return Err(GatewayError::LicenseRevoked);
     }
 
     let quota_result = state.quota.check_and_count();
     if quota_result == crate::quota::QuotaResult::Rejected {
         state.record_request_metric(&svc_name, &route_id, method, "quota_exceeded", "-");
-        state.log_request(method, path, &peer_ip_early, log_svc_id, log_route_id, log_project_id, Some(429), start.elapsed().as_millis() as i64, "error", "quota exceeded");
+        state.log_request(
+            method,
+            path,
+            &peer_ip_early,
+            log_svc_id,
+            log_route_id,
+            log_project_id,
+            Some(429),
+            start.elapsed().as_millis() as i64,
+            "error",
+            "quota exceeded",
+        );
         return Err(GatewayError::QuotaExceeded);
     }
     let is_overage = quota_result == crate::quota::QuotaResult::Overage;
@@ -435,24 +500,21 @@ pub async fn proxy_handler(
 
     // Pick a target via load balancer if one is configured for this service.
     // Falls back to `service.url` if no targets exist.
-    let picked = state.lb.pick(&service.id, state.local_zone.as_deref(), &lb_ctx);
+    let picked = state
+        .lb
+        .pick(&service.id, state.local_zone.as_deref(), &lb_ctx);
     let mut picked_target_id = picked.as_ref().map(|ts| ts.target.id);
-    let (upstream_base, mut target_label, _in_flight): (Arc<str>, Arc<str>, _) =
-        match &picked {
-            Some(ts) => {
-                let guard = InFlightGuard::new(ts.clone());
-                (ts.target.url.clone(), ts.target.url.clone(), Some(guard))
-            }
-            // Fallback: no LB targets — use the service's default URL. The
-            // `Arc::from(&str)` allocates once here (cold path; only hit when
-            // a service has no `targets` rows) so downstream consumers can
-            // treat `upstream_base` uniformly as `Arc<str>`.
-            None => (
-                Arc::from(service.url.as_str()),
-                Arc::from("-"),
-                None,
-            ),
-        };
+    let (upstream_base, mut target_label, _in_flight): (Arc<str>, Arc<str>, _) = match &picked {
+        Some(ts) => {
+            let guard = InFlightGuard::new(ts.clone());
+            (ts.target.url.clone(), ts.target.url.clone(), Some(guard))
+        }
+        // Fallback: no LB targets — use the service's default URL. The
+        // `Arc::from(&str)` allocates once here (cold path; only hit when
+        // a service has no `targets` rows) so downstream consumers can
+        // treat `upstream_base` uniformly as `Arc<str>`.
+        None => (Arc::from(service.url.as_str()), Arc::from("-"), None),
+    };
 
     // Compute upstream_url up-front so we can attach it to the MatchContext
     // before plugins run; the recorder needs it to populate `Recording.upstream_url`.
@@ -549,7 +611,10 @@ pub async fn proxy_handler(
 
             // Transfer request extensions so script-runner's on_response
             // can access the ScriptRequestContext stashed during on_request.
-            if let Some(ctx) = req.extensions().get::<crate::plugins::script_runner::ScriptRequestContext>() {
+            if let Some(ctx) = req
+                .extensions()
+                .get::<crate::plugins::script_runner::ScriptRequestContext>()
+            {
                 file_resp.extensions_mut().insert(ctx.clone());
             }
 
@@ -561,9 +626,26 @@ pub async fn proxy_handler(
 
             let bucket = gw_metrics::status_bucket(file_resp.status().as_u16());
             state.record_request_metric(&svc_name, &route_id, method, bucket, "static");
-            state.record_request_duration(&svc_name, &route_id, method, "static", start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                "static",
+                start.elapsed().as_secs_f64(),
+            );
 
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(file_resp.status().as_u16()), start.elapsed().as_millis() as i64, "info", "");
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                Some(file_resp.status().as_u16()),
+                start.elapsed().as_millis() as i64,
+                "info",
+                "",
+            );
             return Ok(file_resp);
         }
     }
@@ -578,10 +660,27 @@ pub async fn proxy_handler(
                 Err(_) => "5xx",
             };
             state.record_request_metric(&svc_name, &route_id, method, status_label, &target_label);
-            state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                &target_label,
+                start.elapsed().as_secs_f64(),
+            );
             let ws_status = result.as_ref().ok().map(|r| r.status().as_u16());
             let ws_level = if result.is_err() { "error" } else { "info" };
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, ws_status, start.elapsed().as_millis() as i64, ws_level, "");
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                ws_status,
+                start.elapsed().as_millis() as i64,
+                ws_level,
+                "",
+            );
             return result;
         }
         ProtocolKind::GrpcWeb => {
@@ -600,10 +699,27 @@ pub async fn proxy_handler(
                 ),
             }
             state.record_request_metric(&svc_name, &route_id, method, status_label, &target_label);
-            state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                &target_label,
+                start.elapsed().as_secs_f64(),
+            );
             let gw_status = result.as_ref().ok().map(|r| r.status().as_u16());
             let gw_level = if result.is_err() { "error" } else { "info" };
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, gw_status, start.elapsed().as_millis() as i64, gw_level, "");
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                gw_status,
+                start.elapsed().as_millis() as i64,
+                gw_level,
+                "",
+            );
             return result;
         }
         ProtocolKind::Grpc => {
@@ -621,10 +737,27 @@ pub async fn proxy_handler(
                 ),
             }
             state.record_request_metric(&svc_name, &route_id, method, status_label, &target_label);
-            state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                &target_label,
+                start.elapsed().as_secs_f64(),
+            );
             let grpc_status = result.as_ref().ok().map(|r| r.status().as_u16());
             let grpc_level = if result.is_err() { "error" } else { "info" };
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, grpc_status, start.elapsed().as_millis() as i64, grpc_level, "");
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                grpc_status,
+                start.elapsed().as_millis() as i64,
+                grpc_level,
+                "",
+            );
             return result;
         }
         ProtocolKind::Http => {}
@@ -645,13 +778,10 @@ pub async fn proxy_handler(
 
             let (mut parts, body) = req.into_parts();
 
-            let unix_uri: Uri = http_path
-                .parse()
-                .unwrap_or_else(|_| Uri::from_static("/"));
+            let unix_uri: Uri = http_path.parse().unwrap_or_else(|_| Uri::from_static("/"));
             parts.uri = unix_uri;
 
-            let extensions =
-                std::mem::replace(&mut parts.extensions, axum::http::Extensions::default());
+            let extensions = std::mem::take(&mut parts.extensions);
 
             parts
                 .headers
@@ -682,7 +812,18 @@ pub async fn proxy_handler(
                         format!("unix socket upstream: {e}"),
                     );
                     state.record_request_metric(&svc_name, &route_id, method, "5xx", &target_label);
-                    state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix socket: {e}"));
+                    state.log_request(
+                        method,
+                        path,
+                        &client_ip_owned,
+                        log_svc_id,
+                        log_route_id,
+                        log_project_id,
+                        None,
+                        start.elapsed().as_millis() as i64,
+                        "error",
+                        &format!("unix socket: {e}"),
+                    );
                     return Err(e);
                 }
             };
@@ -692,10 +833,19 @@ pub async fn proxy_handler(
             let resp_body = match axum::body::to_bytes(Body::new(incoming), usize::MAX).await {
                 Ok(b) => b,
                 Err(e) => {
-                    state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("unix body read: {e}"));
-                    return Err(GatewayError::UpstreamError(format!(
-                        "unix body read: {e}"
-                    )));
+                    state.log_request(
+                        method,
+                        path,
+                        &client_ip_owned,
+                        log_svc_id,
+                        log_route_id,
+                        log_project_id,
+                        None,
+                        start.elapsed().as_millis() as i64,
+                        "error",
+                        &format!("unix body read: {e}"),
+                    );
+                    return Err(GatewayError::UpstreamError(format!("unix body read: {e}")));
                 }
             };
 
@@ -717,9 +867,7 @@ pub async fn proxy_handler(
                     .insert(crate::plugins::proxy_cache::CACHE_KEY_HEADER, v);
             }
             if let Some(v) = recorder_id {
-                plugin_resp
-                    .headers_mut()
-                    .insert("x-lynxx-recorder-id", v);
+                plugin_resp.headers_mut().insert("x-lynxx-recorder-id", v);
             }
 
             state
@@ -740,10 +888,31 @@ pub async fn proxy_handler(
 
             let bucket = gw_metrics::status_bucket(status.as_u16());
             state.record_request_metric(&svc_name, &route_id, method, bucket, &target_label);
-            state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                &target_label,
+                start.elapsed().as_secs_f64(),
+            );
 
-            let unix_level = if status.is_server_error() { "error" } else { "info" };
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, unix_level, "");
+            let unix_level = if status.is_server_error() {
+                "error"
+            } else {
+                "info"
+            };
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                Some(status.as_u16()),
+                start.elapsed().as_millis() as i64,
+                unix_level,
+                "",
+            );
             return Ok(final_resp);
         }
     }
@@ -788,10 +957,10 @@ pub async fn proxy_handler(
     // Move parts out so we don't clone the HeaderMap. `req` is consumed.
     let (mut parts, body) = req.into_parts();
     parts.uri = upstream_uri;
-    
-    // Capture extensions before they are lost so we can re-attach them to 
+
+    // Capture extensions before they are lost so we can re-attach them to
     // the response for the plugin chain.
-    let extensions = std::mem::replace(&mut parts.extensions, axum::http::Extensions::default());
+    let extensions = std::mem::take(&mut parts.extensions);
 
     // Strip hop-by-hop and our internal proxy-cache marker.
     parts
@@ -846,10 +1015,8 @@ pub async fn proxy_handler(
 
     let max_attempts = (service.retries + 1).max(1) as usize;
     let retry_on_status = &route.retry_on_status;
-    let force_buffer = route.buffer_request
-        || !retry_on_status.is_empty()
-        || deploy_active
-        || target_is_draining;
+    let force_buffer =
+        route.buffer_request || !retry_on_status.is_empty() || deploy_active || target_is_draining;
     let mut last_err = String::new();
     let mut upstream_resp = None;
     let mut deploy_retried = false;
@@ -1018,13 +1185,30 @@ pub async fn proxy_handler(
         Some(r) => r,
         None => {
             state.record_request_metric(&svc_name, &route_id, method, "5xx", &target_label);
-            state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                &target_label,
+                start.elapsed().as_secs_f64(),
+            );
             state.health.record_failure(
                 &service.id,
                 &svc_name,
                 format!("upstream send error: {last_err}"),
             );
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &last_err);
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                None,
+                start.elapsed().as_millis() as i64,
+                "error",
+                &last_err,
+            );
             return Err(GatewayError::UpstreamError(last_err));
         }
     };
@@ -1046,13 +1230,30 @@ pub async fn proxy_handler(
                 .increment(1);
             }
             state.record_request_metric(&svc_name, &route_id, method, "5xx", &target_label);
-            state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
+            state.record_request_duration(
+                &svc_name,
+                &route_id,
+                method,
+                &target_label,
+                start.elapsed().as_secs_f64(),
+            );
             state.health.record_failure(
                 &service.id,
                 &svc_name,
                 format!("upstream body error: {e}"),
             );
-            state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, None, start.elapsed().as_millis() as i64, "error", &format!("upstream body error: {e}"));
+            state.log_request(
+                method,
+                path,
+                &client_ip_owned,
+                log_svc_id,
+                log_route_id,
+                log_project_id,
+                None,
+                start.elapsed().as_millis() as i64,
+                "error",
+                &format!("upstream body error: {e}"),
+            );
             return Err(GatewayError::UpstreamError(e.to_string()));
         }
     };
@@ -1152,9 +1353,7 @@ pub async fn proxy_handler(
     }
     if deploy_retried {
         if let Ok(v) = "true".parse() {
-            final_resp
-                .headers_mut()
-                .insert("x-lynxx-deploy-retry", v);
+            final_resp.headers_mut().insert("x-lynxx-deploy-retry", v);
         }
     }
 
@@ -1163,9 +1362,30 @@ pub async fn proxy_handler(
     // config knob is on these three calls cost ~3 bool loads + branches.
     let bucket = gw_metrics::status_bucket(status.as_u16());
     state.record_request_metric(&svc_name, &route_id, method, bucket, &target_label);
-    state.record_request_duration(&svc_name, &route_id, method, &target_label, start.elapsed().as_secs_f64());
-    let http_level = if status.is_server_error() { "error" } else { "info" };
-    state.log_request(method, path, &client_ip_owned, log_svc_id, log_route_id, log_project_id, Some(status.as_u16()), start.elapsed().as_millis() as i64, http_level, "");
+    state.record_request_duration(
+        &svc_name,
+        &route_id,
+        method,
+        &target_label,
+        start.elapsed().as_secs_f64(),
+    );
+    let http_level = if status.is_server_error() {
+        "error"
+    } else {
+        "info"
+    };
+    state.log_request(
+        method,
+        path,
+        &client_ip_owned,
+        log_svc_id,
+        log_route_id,
+        log_project_id,
+        Some(status.as_u16()),
+        start.elapsed().as_millis() as i64,
+        http_level,
+        "",
+    );
 
     Ok(final_resp)
 }

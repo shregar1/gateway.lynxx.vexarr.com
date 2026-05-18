@@ -51,17 +51,17 @@ pub mod request_validator;
 pub mod response_cleaner;
 pub mod response_compression;
 pub mod response_filter;
-pub mod response_rewriter;
 pub mod response_ratelimiting;
+pub mod response_rewriter;
 pub mod response_transformer;
 pub mod script_runner;
 pub mod security_headers;
 pub mod session;
 pub mod shadow;
-pub mod template;
 pub mod splunk;
 pub mod statsd;
 pub mod syslog;
+pub mod template;
 pub mod wasm;
 pub mod websocket_size_limit;
 
@@ -228,23 +228,19 @@ impl PluginExecutor {
                 );
                 continue;
             }
-            let plugin = match factory::build(
-                &row.name,
-                &row.config,
-                Some(repo.clone()),
-                &self.context,
-            ) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!(
-                        plugin = %row.name,
-                        id = %row.id,
-                        error = %e,
-                        "failed to build plugin; skipping"
-                    );
-                    continue;
-                }
-            };
+            let plugin =
+                match factory::build(&row.name, &row.config, Some(repo.clone()), &self.context) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            plugin = %row.name,
+                            id = %row.id,
+                            error = %e,
+                            "failed to build plugin; skipping"
+                        );
+                        continue;
+                    }
+                };
 
             match (row.service_id, row.route_id) {
                 (_, Some(route_id)) => {
@@ -271,8 +267,12 @@ impl PluginExecutor {
                 ids.sort_by(|a, b| {
                     let name_a = built.get(a).map(|p| p.name().to_string());
                     let name_b = built.get(b).map(|p| p.name().to_string());
-                    let pos_a = name_a.as_ref().and_then(|n| order.iter().position(|o| o == n));
-                    let pos_b = name_b.as_ref().and_then(|n| order.iter().position(|o| o == n));
+                    let pos_a = name_a
+                        .as_ref()
+                        .and_then(|n| order.iter().position(|o| o == n));
+                    let pos_b = name_b
+                        .as_ref()
+                        .and_then(|n| order.iter().position(|o| o == n));
                     match (pos_a, pos_b) {
                         (Some(pa), Some(pb)) => pa.cmp(&pb),
                         (Some(_), None) => std::cmp::Ordering::Less,
@@ -428,7 +428,11 @@ mod tests {
     #[test]
     fn order_sorts_plugins() {
         let (mut ids, names) = make_ids(&["cors", "logging", "rate-limit"]);
-        let order = vec!["rate-limit".to_string(), "cors".to_string(), "logging".to_string()];
+        let order = vec![
+            "rate-limit".to_string(),
+            "cors".to_string(),
+            "logging".to_string(),
+        ];
 
         sort_ids_by_order(&mut ids, &names, &order);
 

@@ -20,10 +20,7 @@ impl RateLimitService {
         self.repo.list_rate_limit_simulations(service_id).await
     }
 
-    pub async fn create_simulation(
-        &self,
-        sim: &RateLimitSimulation,
-    ) -> Result<(), GatewayError> {
+    pub async fn create_simulation(&self, sim: &RateLimitSimulation) -> Result<(), GatewayError> {
         self.repo.create_rate_limit_simulation(sim).await
     }
 

@@ -183,12 +183,11 @@ pub async fn run(config: HttpProviderConfig, repo: Arc<dyn Repository>) {
 }
 
 fn build_client(config: &HttpProviderConfig) -> reqwest::Client {
-    let mut builder = reqwest::Client::builder()
-        .redirect(if config.follow_redirects {
-            reqwest::redirect::Policy::limited(10)
-        } else {
-            reqwest::redirect::Policy::none()
-        });
+    let mut builder = reqwest::Client::builder().redirect(if config.follow_redirects {
+        reqwest::redirect::Policy::limited(10)
+    } else {
+        reqwest::redirect::Policy::none()
+    });
 
     if !config.tls_ca.is_empty() {
         if let Ok(pem) = std::fs::read(&config.tls_ca) {

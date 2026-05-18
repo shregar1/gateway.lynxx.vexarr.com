@@ -20,7 +20,6 @@ const TUNING_PARAMS: &[SysctlParam] = &[
         value: "2097152",
         description: "per-process fd ceiling (2M)",
     },
-
     // --- TCP listen backlog ---
     SysctlParam {
         key: "net.core.somaxconn",
@@ -32,7 +31,6 @@ const TUNING_PARAMS: &[SysctlParam] = &[
         value: "65535",
         description: "SYN queue depth",
     },
-
     // --- Network buffers ---
     SysctlParam {
         key: "net.core.rmem_max",
@@ -64,7 +62,6 @@ const TUNING_PARAMS: &[SysctlParam] = &[
         value: "4096 1048576 16777216",
         description: "TCP send buffer (min/default/max)",
     },
-
     // --- Connection reuse / TIME_WAIT ---
     SysctlParam {
         key: "net.ipv4.tcp_tw_reuse",
@@ -81,7 +78,6 @@ const TUNING_PARAMS: &[SysctlParam] = &[
         value: "2000000",
         description: "max TIME_WAIT sockets (2M)",
     },
-
     // --- Keepalive ---
     SysctlParam {
         key: "net.ipv4.tcp_keepalive_time",
@@ -98,7 +94,6 @@ const TUNING_PARAMS: &[SysctlParam] = &[
         value: "6",
         description: "keepalive probes before drop",
     },
-
     // --- Congestion / performance ---
     SysctlParam {
         key: "net.core.netdev_max_backlog",
@@ -115,7 +110,6 @@ const TUNING_PARAMS: &[SysctlParam] = &[
         value: "1",
         description: "enable MTU probing for jumbo paths",
     },
-
     // --- Ephemeral ports ---
     SysctlParam {
         key: "net.ipv4.ip_local_port_range",
@@ -237,11 +231,7 @@ fn raise_fd_limit() {
                     "raised fd soft limit to hard limit"
                 );
             } else {
-                tracing::warn!(
-                    current = rlim.rlim_cur,
-                    target,
-                    "could not raise fd limit"
-                );
+                tracing::warn!(current = rlim.rlim_cur, target, "could not raise fd limit");
             }
         }
     }

@@ -143,7 +143,11 @@ impl QuotaTracker {
         let val = new_limit.unwrap_or(0);
         let old = self.limit.swap(val, Ordering::Relaxed);
         if old != val {
-            info!(old_limit = old, new_limit = val, "quota limit updated from server");
+            info!(
+                old_limit = old,
+                new_limit = val,
+                "quota limit updated from server"
+            );
         }
     }
 
@@ -176,7 +180,11 @@ impl QuotaTracker {
         let rejected = self.rejected.load(Ordering::Relaxed);
         let overage = self.overage.load(Ordering::Relaxed);
         let raw_limit = self.limit.load(Ordering::Relaxed);
-        let limit = if raw_limit == 0 { None } else { Some(raw_limit) };
+        let limit = if raw_limit == 0 {
+            None
+        } else {
+            Some(raw_limit)
+        };
         QuotaSnapshot {
             plan: self.plan,
             period,

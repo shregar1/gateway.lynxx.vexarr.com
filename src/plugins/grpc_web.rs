@@ -1,10 +1,10 @@
 use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
+use axum::body::Body;
 use axum::http::{HeaderValue, Request, Response};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use http_body_util::BodyExt;
-use axum::body::Body;
 
 /// Translate gRPC-Web (`application/grpc-web+proto` or `-text`) to standard
 /// gRPC over HTTP/2 before the proxy hands the request to the gRPC dispatch

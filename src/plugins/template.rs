@@ -76,8 +76,14 @@ impl TemplatePlugin {
     }
 
     fn is_template_type(&self, content_type: &str) -> bool {
-        let ct = content_type.split(';').next().unwrap_or(content_type).trim();
-        self.content_types.iter().any(|t| ct.eq_ignore_ascii_case(t))
+        let ct = content_type
+            .split(';')
+            .next()
+            .unwrap_or(content_type)
+            .trim();
+        self.content_types
+            .iter()
+            .any(|t| ct.eq_ignore_ascii_case(t))
     }
 
     fn render(&self, template: &str, ctx: &TemplateContext) -> String {
@@ -90,11 +96,11 @@ impl TemplatePlugin {
         result = result.replace(&format!("{open}.Path{close}"), &ctx.path);
         result = result.replace(&format!("{open}.Method{close}"), &ctx.method);
         result = result.replace(&format!("{open}.RemoteAddr{close}"), &ctx.remote_addr);
-        result = result.replace(&format!("{open}now{close}"), &chrono::Utc::now().to_rfc3339());
         result = result.replace(
-            &format!("{open}httpStatus{close}"),
-            &ctx.status.to_string(),
+            &format!("{open}now{close}"),
+            &chrono::Utc::now().to_rfc3339(),
         );
+        result = result.replace(&format!("{open}httpStatus{close}"), &ctx.status.to_string());
 
         // Replace user-defined variables
         for (key, value) in &self.variables {
@@ -205,7 +211,8 @@ impl Plugin for TemplatePlugin {
         }
 
         let rendered = self.render(body_str, &ctx);
-        resp.headers_mut().remove(axum::http::header::CONTENT_LENGTH);
+        resp.headers_mut()
+            .remove(axum::http::header::CONTENT_LENGTH);
         *resp.body_mut() = Body::from(rendered);
         Ok(())
     }

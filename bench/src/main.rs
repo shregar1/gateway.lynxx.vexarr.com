@@ -172,11 +172,10 @@ async fn run_one(name: &str, url: &str, args: &Args) -> Result<Stats> {
     // Token bucket: emit one tick per request at the configured RPS.
     let total_secs = args.warmup_secs + args.duration_secs;
     let total_requests = args.rps.saturating_mul(total_secs);
-    let interval = if args.rps == 0 {
-        Duration::from_millis(1)
-    } else {
-        Duration::from_nanos(1_000_000_000 / args.rps)
-    };
+    let interval = (1_000_000_000u64)
+        .checked_div(args.rps)
+        .map(Duration::from_nanos)
+        .unwrap_or_else(|| Duration::from_millis(1));
 
     let (tx, rx) = mpsc::channel::<Ticket>(args.connections * 4);
     let rx = Arc::new(Mutex::new(rx));
@@ -285,7 +284,7 @@ fn fmt_count(n: u64) -> String {
     let bytes = s.as_bytes();
     let mut out = String::new();
     for (i, b) in bytes.iter().enumerate() {
-        if i > 0 && (bytes.len() - i) % 3 == 0 {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(*b as char);

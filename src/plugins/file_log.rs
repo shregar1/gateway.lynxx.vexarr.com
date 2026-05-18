@@ -281,10 +281,23 @@ impl FileLogPlugin {
         let tmpl_for_task = custom_template.clone();
         let rot_cfg = rotation_config;
         tokio::spawn(async move {
-            writer_task(target, rx, format_for_task, fields_for_task, tmpl_for_task, rot_cfg).await;
+            writer_task(
+                target,
+                rx,
+                format_for_task,
+                fields_for_task,
+                tmpl_for_task,
+                rot_cfg,
+            )
+            .await;
         });
 
-        Ok(Self { tx, fields, format, custom_template })
+        Ok(Self {
+            tx,
+            fields,
+            format,
+            custom_template,
+        })
     }
 }
 
@@ -433,9 +446,17 @@ fn render(line: &LogLine, format: Format, fields: &[String], template: Option<&s
         Format::Combined => {
             format!(
                 "{} {} {} [{}] \"{} {}\" {} {}ms \"{}\" \"{}\"",
-                line.client_ip.as_str().is_empty().then_some("-").unwrap_or(&line.client_ip),
+                if line.client_ip.is_empty() {
+                    "-"
+                } else {
+                    &line.client_ip
+                },
                 line.host,
-                if line.consumer.is_empty() { "-" } else { &line.consumer },
+                if line.consumer.is_empty() {
+                    "-"
+                } else {
+                    &line.consumer
+                },
                 line.timestamp,
                 line.method,
                 line.path,
@@ -544,7 +565,16 @@ impl Plugin for FileLogPlugin {
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
 
-        for key in [HDR_METHOD, HDR_PATH, HDR_START, HDR_HOST, HDR_USER_AGENT, HDR_REFERER, HDR_CLIENT_IP, HDR_REQ_SIZE] {
+        for key in [
+            HDR_METHOD,
+            HDR_PATH,
+            HDR_START,
+            HDR_HOST,
+            HDR_USER_AGENT,
+            HDR_REFERER,
+            HDR_CLIENT_IP,
+            HDR_REQ_SIZE,
+        ] {
             resp.headers_mut().remove(key);
         }
 
@@ -606,10 +636,22 @@ mod tests {
             "max_backups": 5,
             "compress_rotated": true,
         });
-        let max_size_mb = cfg.get("max_size_mb").and_then(|v| v.as_u64()).unwrap_or(100);
-        let max_age_days = cfg.get("max_age_days").and_then(|v| v.as_u64()).unwrap_or(0);
-        let max_backups = cfg.get("max_backups").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
-        let compress_rotated = cfg.get("compress_rotated").and_then(|v| v.as_bool()).unwrap_or(false);
+        let max_size_mb = cfg
+            .get("max_size_mb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100);
+        let max_age_days = cfg
+            .get("max_age_days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let max_backups = cfg
+            .get("max_backups")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as u32;
+        let compress_rotated = cfg
+            .get("compress_rotated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         assert_eq!(max_size_mb, 50);
         assert_eq!(max_age_days, 7);
         assert_eq!(max_backups, 5);
@@ -619,10 +661,22 @@ mod tests {
     #[test]
     fn from_config_uses_defaults_when_absent() {
         let cfg = json!({ "path": "/tmp/test.log" });
-        let max_size_mb = cfg.get("max_size_mb").and_then(|v| v.as_u64()).unwrap_or(100);
-        let max_age_days = cfg.get("max_age_days").and_then(|v| v.as_u64()).unwrap_or(0);
-        let max_backups = cfg.get("max_backups").and_then(|v| v.as_u64()).unwrap_or(10) as u32;
-        let compress_rotated = cfg.get("compress_rotated").and_then(|v| v.as_bool()).unwrap_or(false);
+        let max_size_mb = cfg
+            .get("max_size_mb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100);
+        let max_age_days = cfg
+            .get("max_age_days")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let max_backups = cfg
+            .get("max_backups")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(10) as u32;
+        let compress_rotated = cfg
+            .get("compress_rotated")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         assert_eq!(max_size_mb, 100);
         assert_eq!(max_age_days, 0);
         assert_eq!(max_backups, 10);
@@ -692,7 +746,11 @@ mod tests {
         // A backup file should exist.
         let backups = rotator.list_backups().await;
         assert_eq!(backups.len(), 1);
-        let backup_name = backups[0].file_name().unwrap().to_string_lossy().to_string();
+        let backup_name = backups[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(backup_name.starts_with("app."));
         assert!(backup_name.ends_with(".log"));
         // Bytes counter should be reset.
@@ -706,7 +764,9 @@ mod tests {
         // Create 5 fake backup files.
         for i in 0..5 {
             let name = format!("app.20250101T00000{i}.000Z.log");
-            tokio::fs::write(dir.path().join(name), "data").await.unwrap();
+            tokio::fs::write(dir.path().join(name), "data")
+                .await
+                .unwrap();
         }
 
         let config = RotationConfig {
@@ -736,7 +796,9 @@ mod tests {
 
         // Create a recent backup.
         let recent_backup = dir.path().join("app.20250501T000000.000Z.log");
-        tokio::fs::write(&recent_backup, "recent data").await.unwrap();
+        tokio::fs::write(&recent_backup, "recent data")
+            .await
+            .unwrap();
 
         let config = RotationConfig {
             max_size_bytes: 1000,
@@ -748,7 +810,11 @@ mod tests {
         let backups = rotator.list_backups().await;
         // Only the recent backup should survive.
         assert_eq!(backups.len(), 1);
-        assert!(backups[0].file_name().unwrap().to_string_lossy().contains("20250501"));
+        assert!(backups[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains("20250501"));
     }
 
     #[tokio::test]
@@ -757,7 +823,9 @@ mod tests {
         let log_path = dir.path().join("app.log");
         for i in 0..3 {
             let name = format!("app.2024010{i}T000000.000Z.log");
-            tokio::fs::write(dir.path().join(name), "data").await.unwrap();
+            tokio::fs::write(dir.path().join(name), "data")
+                .await
+                .unwrap();
         }
 
         let config = RotationConfig {

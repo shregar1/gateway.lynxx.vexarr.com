@@ -38,8 +38,14 @@ impl SecurityHeadersPlugin {
             ("referrer_policy", "Referrer-Policy"),
             ("permissions_policy", "Permissions-Policy"),
             ("cross_origin_opener_policy", "Cross-Origin-Opener-Policy"),
-            ("cross_origin_embedder_policy", "Cross-Origin-Embedder-Policy"),
-            ("cross_origin_resource_policy", "Cross-Origin-Resource-Policy"),
+            (
+                "cross_origin_embedder_policy",
+                "Cross-Origin-Embedder-Policy",
+            ),
+            (
+                "cross_origin_resource_policy",
+                "Cross-Origin-Resource-Policy",
+            ),
             ("x_xss_protection", "X-XSS-Protection"),
         ];
 
@@ -47,7 +53,7 @@ impl SecurityHeadersPlugin {
 
         // If no explicit config, apply sensible defaults.
         let obj = config.as_object();
-        let is_empty = obj.map_or(true, |o| o.is_empty());
+        let is_empty = obj.is_none_or(|o| o.is_empty());
 
         if is_empty {
             headers.push(("X-Content-Type-Options".into(), "nosniff".into()));

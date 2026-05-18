@@ -378,7 +378,9 @@ impl TcpRouter {
                 return Some(&svc.address);
             }
         }
-        Some(&route.services.last().unwrap().address)
+        // Unreachable when total_weight > 0 (the loop must hit a bucket since
+        // point < total_weight == final acc), but keep the fallback panic-free.
+        route.services.last().map(|s| s.address.as_str())
     }
 }
 
@@ -477,17 +479,17 @@ mod tests {
         let handshake_len = hello_body.len();
 
         // Handshake header: type(1) + u24 length(3).
-        let mut handshake = Vec::new();
-        handshake.push(0x01); // ClientHello
-        handshake.push(((handshake_len >> 16) & 0xff) as u8);
-        handshake.push(((handshake_len >> 8) & 0xff) as u8);
-        handshake.push((handshake_len & 0xff) as u8);
+        let mut handshake = vec![
+            0x01, // ClientHello
+            ((handshake_len >> 16) & 0xff) as u8,
+            ((handshake_len >> 8) & 0xff) as u8,
+            (handshake_len & 0xff) as u8,
+        ];
         handshake.extend_from_slice(&hello_body);
 
         // TLS record header.
         let record_len = handshake.len();
-        let mut record = Vec::new();
-        record.push(0x16); // ContentType = Handshake
+        let mut record = vec![0x16]; // ContentType = Handshake
         record.extend_from_slice(&[0x03, 0x01]); // TLS 1.0 record version
         record.extend_from_slice(&(record_len as u16).to_be_bytes());
         record.extend_from_slice(&handshake);

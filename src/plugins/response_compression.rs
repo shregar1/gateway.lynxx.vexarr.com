@@ -94,7 +94,11 @@ impl ResponseCompressionPlugin {
                 })
                 .collect()
         } else {
-            vec![CompressionAlgo::Zstd, CompressionAlgo::Brotli, CompressionAlgo::Gzip]
+            vec![
+                CompressionAlgo::Zstd,
+                CompressionAlgo::Brotli,
+                CompressionAlgo::Gzip,
+            ]
         };
 
         // Accept both Caddy-style `minimum_length` and the original
@@ -106,14 +110,16 @@ impl ResponseCompressionPlugin {
             .map(|v| v as usize)
             .unwrap_or(DEFAULT_MIN_BODY_SIZE);
 
-        let content_types = if let Some(arr) = cfg.get("content_types").and_then(|v| v.as_array())
-        {
+        let content_types = if let Some(arr) = cfg.get("content_types").and_then(|v| v.as_array()) {
             arr.iter()
                 .filter_map(|v| v.as_str())
                 .map(String::from)
                 .collect()
         } else {
-            DEFAULT_CONTENT_TYPES.iter().map(|s| s.to_string()).collect()
+            DEFAULT_CONTENT_TYPES
+                .iter()
+                .map(|s| s.to_string())
+                .collect()
         };
 
         // Content-Type exclusion list — checked before the include list.
@@ -131,44 +137,36 @@ impl ResponseCompressionPlugin {
         //   `["200", "201-299", "304"]`
         // Defaults to 200-203, 205-299, 300-303, 305-399 (skips 204 No
         // Content / 304 Not Modified which carry no body).
-        let match_status =
-            if let Some(arr) = cfg.get("match_status").and_then(|v| v.as_array()) {
-                arr.iter()
-                    .filter_map(|v| v.as_str().or_else(|| None))
-                    .filter_map(|s| parse_status_range(s))
-                    .collect()
-            } else if let Some(arr) = cfg.get("match_status").and_then(|v| v.as_array()) {
-                // numeric array shorthand: `[200, 201]`
-                arr.iter()
-                    .filter_map(|v| v.as_u64())
-                    .map(|c| StatusRange::Single(c as u16))
-                    .collect()
-            } else {
-                DEFAULT_MATCH_STATUS.to_vec()
-            };
+        let match_status = if let Some(arr) = cfg.get("match_status").and_then(|v| v.as_array()) {
+            arr.iter()
+                .filter_map(|v| v.as_str().or(None))
+                .filter_map(parse_status_range)
+                .collect()
+        } else if let Some(arr) = cfg.get("match_status").and_then(|v| v.as_array()) {
+            // numeric array shorthand: `[200, 201]`
+            arr.iter()
+                .filter_map(|v| v.as_u64())
+                .map(|c| StatusRange::Single(c as u16))
+                .collect()
+        } else {
+            DEFAULT_MATCH_STATUS.to_vec()
+        };
 
         // Path-prefix matcher. When non-empty, only responses for
         // requests whose URI path starts with one of the prefixes are
         // eligible for compression.
-        let match_paths =
-            if let Some(arr) = cfg.get("match_paths").and_then(|v| v.as_array()) {
-                arr.iter()
-                    .filter_map(|v| v.as_str())
-                    .map(String::from)
-                    .collect()
-            } else {
-                Vec::new()
-            };
+        let match_paths = if let Some(arr) = cfg.get("match_paths").and_then(|v| v.as_array()) {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(String::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
 
-        let gzip_level = cfg
-            .get("gzip_level")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(6) as u32;
+        let gzip_level = cfg.get("gzip_level").and_then(|v| v.as_u64()).unwrap_or(6) as u32;
 
-        let zstd_level = cfg
-            .get("zstd_level")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(3) as i32;
+        let zstd_level = cfg.get("zstd_level").and_then(|v| v.as_i64()).unwrap_or(3) as i32;
 
         let brotli_level = cfg
             .get("brotli_level")
@@ -231,7 +229,9 @@ impl ResponseCompressionPlugin {
         if self.match_paths.is_empty() {
             return true;
         }
-        self.match_paths.iter().any(|prefix| path.starts_with(prefix))
+        self.match_paths
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
     }
 
     fn negotiate(&self, accept_encoding: &str) -> Option<CompressionAlgo> {
@@ -259,7 +259,9 @@ impl ResponseCompressionPlugin {
             for algo in &self.algorithms {
                 match algo {
                     CompressionAlgo::Zstd if *name == "zstd" => return Some(CompressionAlgo::Zstd),
-                    CompressionAlgo::Brotli if *name == "br" => return Some(CompressionAlgo::Brotli),
+                    CompressionAlgo::Brotli if *name == "br" => {
+                        return Some(CompressionAlgo::Brotli)
+                    }
                     CompressionAlgo::Gzip if *name == "gzip" => return Some(CompressionAlgo::Gzip),
                     _ => {}
                 }
@@ -351,13 +353,10 @@ impl Plugin for ResponseCompressionPlugin {
             CompressionAlgo::Brotli => {
                 let mut out = Vec::with_capacity(bytes.len() / 2);
                 {
-                    let mut writer = brotli::CompressorWriter::new(
-                        &mut out,
-                        4096,
-                        self.brotli_level,
-                        22,
-                    );
-                    writer.write_all(&bytes)
+                    let mut writer =
+                        brotli::CompressorWriter::new(&mut out, 4096, self.brotli_level, 22);
+                    writer
+                        .write_all(&bytes)
                         .map_err(|e| PluginError::Internal(format!("brotli compress: {e}")))?;
                 }
                 (out, "br")
@@ -499,15 +498,15 @@ mod tests {
     #[test]
     fn default_status_skips_204_and_304() {
         let p = default_plugin();
-        assert!(!p.is_compressible_status(StatusCode::NO_CONTENT));     // 204
-        assert!(!p.is_compressible_status(StatusCode::NOT_MODIFIED));   // 304
+        assert!(!p.is_compressible_status(StatusCode::NO_CONTENT)); // 204
+        assert!(!p.is_compressible_status(StatusCode::NOT_MODIFIED)); // 304
     }
 
     #[test]
     fn default_status_skips_1xx_4xx_5xx() {
         let p = default_plugin();
-        assert!(!p.is_compressible_status(StatusCode::CONTINUE));              // 100
-        assert!(!p.is_compressible_status(StatusCode::NOT_FOUND));             // 404
+        assert!(!p.is_compressible_status(StatusCode::CONTINUE)); // 100
+        assert!(!p.is_compressible_status(StatusCode::NOT_FOUND)); // 404
         assert!(!p.is_compressible_status(StatusCode::INTERNAL_SERVER_ERROR)); // 500
     }
 
@@ -527,7 +526,7 @@ mod tests {
             "match_status": ["200-299", "400-499"]
         }));
         assert!(p.is_compressible_status(StatusCode::OK));
-        assert!(p.is_compressible_status(StatusCode::NO_CONTENT));  // 204 included now
+        assert!(p.is_compressible_status(StatusCode::NO_CONTENT)); // 204 included now
         assert!(p.is_compressible_status(StatusCode::BAD_REQUEST)); // 400
         assert!(!p.is_compressible_status(StatusCode::INTERNAL_SERVER_ERROR)); // 500
     }
@@ -566,8 +565,8 @@ mod tests {
     #[test]
     fn negotiate_prefers_first_client_match() {
         let p = default_plugin(); // zstd, brotli, gzip
-        // Equal q-values: iteration picks the first client-listed algo
-        // that exists in the server's supported set.
+                                  // Equal q-values: iteration picks the first client-listed algo
+                                  // that exists in the server's supported set.
         let algo = p.negotiate("gzip, br, zstd").unwrap();
         assert_eq!(algo, CompressionAlgo::Gzip);
     }
@@ -575,7 +574,7 @@ mod tests {
     #[test]
     fn negotiate_server_order_via_qvalue() {
         let p = default_plugin(); // zstd, brotli, gzip
-        // When q-values differ, highest q wins — zstd gets picked.
+                                  // When q-values differ, highest q wins — zstd gets picked.
         let algo = p.negotiate("gzip;q=0.5, br;q=0.8, zstd;q=1.0").unwrap();
         assert_eq!(algo, CompressionAlgo::Zstd);
     }
@@ -607,11 +606,14 @@ mod tests {
     #[test]
     fn default_algorithms() {
         let p = default_plugin();
-        assert_eq!(p.algorithms, vec![
-            CompressionAlgo::Zstd,
-            CompressionAlgo::Brotli,
-            CompressionAlgo::Gzip,
-        ]);
+        assert_eq!(
+            p.algorithms,
+            vec![
+                CompressionAlgo::Zstd,
+                CompressionAlgo::Brotli,
+                CompressionAlgo::Gzip,
+            ]
+        );
     }
 
     #[test]
@@ -627,11 +629,14 @@ mod tests {
         let p = plugin_with(serde_json::json!({
             "algorithms": ["gz", "brotli", "zstandard"]
         }));
-        assert_eq!(p.algorithms, vec![
-            CompressionAlgo::Gzip,
-            CompressionAlgo::Brotli,
-            CompressionAlgo::Zstd,
-        ]);
+        assert_eq!(
+            p.algorithms,
+            vec![
+                CompressionAlgo::Gzip,
+                CompressionAlgo::Brotli,
+                CompressionAlgo::Zstd,
+            ]
+        );
     }
 
     // ── Compression levels ──────────────────────────────────────────

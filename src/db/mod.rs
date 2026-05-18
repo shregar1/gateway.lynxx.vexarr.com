@@ -7,12 +7,11 @@ use crate::cluster::ClusterBus;
 use crate::config::GatewayConfig;
 use crate::error::GatewayError;
 use crate::models::{
-    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate,
-    ClusterNode, Consumer, ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage,
-    GeoBucket, Incident, IncidentUpdate, IpRule, LoadTest, LogEntry, MarketplacePlugin,
-    MetricBucket, PluginInstance, Probe, ProbeResult, Project, RateLimitBucket,
-    RateLimitSimulation, Route, Service, Snapshot, SpanRecord, Target, TraceRecord,
-    TransformRule, Webhook, WebhookDelivery,
+    AlertEvent, AlertRule, ApiVersion, CacheEntry, CacheStats, Certificate, ClusterNode, Consumer,
+    ConsumerGroup, ConsumerGroupMember, CostRecord, ErrorPage, GeoBucket, Incident, IncidentUpdate,
+    IpRule, LoadTest, LogEntry, MarketplacePlugin, MetricBucket, PluginInstance, Probe,
+    ProbeResult, Project, RateLimitBucket, RateLimitSimulation, Route, Service, Snapshot,
+    SpanRecord, Target, TraceRecord, TransformRule, Webhook, WebhookDelivery,
 };
 use crate::recording::{RecordingFilter, RecordingIndexRow};
 use async_trait::async_trait;
@@ -97,16 +96,19 @@ pub trait Repository: Send + Sync {
 
     // ---------- cascade soft-delete ----------
 
-    async fn soft_delete_plugins_for_route(&self, route_id: &Uuid)
-        -> Result<u64, GatewayError>;
+    async fn soft_delete_plugins_for_route(&self, route_id: &Uuid) -> Result<u64, GatewayError>;
     async fn soft_delete_plugins_for_service(&self, service_id: &Uuid)
         -> Result<u64, GatewayError>;
-    async fn soft_delete_routes_for_service(&self, service_id: &Uuid)
-        -> Result<Vec<Uuid>, GatewayError>;
+    async fn soft_delete_routes_for_service(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<Uuid>, GatewayError>;
     async fn soft_delete_targets_for_service(&self, service_id: &Uuid)
         -> Result<u64, GatewayError>;
-    async fn soft_delete_services_for_project(&self, project_id: &Uuid)
-        -> Result<Vec<Uuid>, GatewayError>;
+    async fn soft_delete_services_for_project(
+        &self,
+        project_id: &Uuid,
+    ) -> Result<Vec<Uuid>, GatewayError>;
 
     async fn is_empty(&self) -> Result<bool, GatewayError>;
     async fn seed_from_config(&self, config: &GatewayConfig) -> Result<(), GatewayError>;
@@ -364,7 +366,11 @@ pub trait Repository: Send + Sync {
 
     // ── Tracing ──
 
-    async fn list_traces(&self, service_id: &Uuid, limit: u32) -> Result<Vec<TraceRecord>, GatewayError>;
+    async fn list_traces(
+        &self,
+        service_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<TraceRecord>, GatewayError>;
     async fn get_trace(&self, id: &Uuid) -> Result<Option<TraceRecord>, GatewayError>;
     async fn create_trace(&self, trace: &TraceRecord) -> Result<(), GatewayError>;
     async fn list_spans(&self, trace_id: &str) -> Result<Vec<SpanRecord>, GatewayError>;
@@ -372,10 +378,17 @@ pub trait Repository: Send + Sync {
 
     // ── Transforms ──
 
-    async fn list_transform_rules(&self, service_id: &Uuid) -> Result<Vec<TransformRule>, GatewayError>;
+    async fn list_transform_rules(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<TransformRule>, GatewayError>;
     async fn get_transform_rule(&self, id: &Uuid) -> Result<Option<TransformRule>, GatewayError>;
     async fn create_transform_rule(&self, rule: &TransformRule) -> Result<(), GatewayError>;
-    async fn update_transform_rule(&self, id: &Uuid, rule: &TransformRule) -> Result<(), GatewayError>;
+    async fn update_transform_rule(
+        &self,
+        id: &Uuid,
+        rule: &TransformRule,
+    ) -> Result<(), GatewayError>;
     async fn delete_transform_rule(&self, id: &Uuid) -> Result<bool, GatewayError>;
 
     // ── API Versions ──
@@ -383,7 +396,8 @@ pub trait Repository: Send + Sync {
     async fn list_api_versions(&self, service_id: &Uuid) -> Result<Vec<ApiVersion>, GatewayError>;
     async fn get_api_version(&self, id: &Uuid) -> Result<Option<ApiVersion>, GatewayError>;
     async fn create_api_version(&self, version: &ApiVersion) -> Result<(), GatewayError>;
-    async fn update_api_version(&self, id: &Uuid, version: &ApiVersion) -> Result<(), GatewayError>;
+    async fn update_api_version(&self, id: &Uuid, version: &ApiVersion)
+        -> Result<(), GatewayError>;
     async fn delete_api_version(&self, id: &Uuid) -> Result<bool, GatewayError>;
 
     // ── Incidents ──
@@ -393,7 +407,10 @@ pub trait Repository: Send + Sync {
     async fn create_incident(&self, incident: &Incident) -> Result<(), GatewayError>;
     async fn update_incident(&self, id: &Uuid, incident: &Incident) -> Result<(), GatewayError>;
     async fn delete_incident(&self, id: &Uuid) -> Result<bool, GatewayError>;
-    async fn list_incident_updates(&self, incident_id: &Uuid) -> Result<Vec<IncidentUpdate>, GatewayError>;
+    async fn list_incident_updates(
+        &self,
+        incident_id: &Uuid,
+    ) -> Result<Vec<IncidentUpdate>, GatewayError>;
     async fn create_incident_update(&self, update: &IncidentUpdate) -> Result<(), GatewayError>;
 
     // ── Webhooks ──
@@ -403,8 +420,13 @@ pub trait Repository: Send + Sync {
     async fn create_webhook(&self, webhook: &Webhook) -> Result<(), GatewayError>;
     async fn update_webhook(&self, id: &Uuid, webhook: &Webhook) -> Result<(), GatewayError>;
     async fn delete_webhook(&self, id: &Uuid) -> Result<bool, GatewayError>;
-    async fn list_webhook_deliveries(&self, webhook_id: &Uuid, limit: u32) -> Result<Vec<WebhookDelivery>, GatewayError>;
-    async fn create_webhook_delivery(&self, delivery: &WebhookDelivery) -> Result<(), GatewayError>;
+    async fn list_webhook_deliveries(
+        &self,
+        webhook_id: &Uuid,
+        limit: u32,
+    ) -> Result<Vec<WebhookDelivery>, GatewayError>;
+    async fn create_webhook_delivery(&self, delivery: &WebhookDelivery)
+        -> Result<(), GatewayError>;
 
     // ── Load Tests ──
 
@@ -417,14 +439,29 @@ pub trait Repository: Send + Sync {
     // ── Marketplace ──
 
     async fn list_marketplace_plugins(&self) -> Result<Vec<MarketplacePlugin>, GatewayError>;
-    async fn get_marketplace_plugin(&self, id: &Uuid) -> Result<Option<MarketplacePlugin>, GatewayError>;
-    async fn create_marketplace_plugin(&self, plugin: &MarketplacePlugin) -> Result<(), GatewayError>;
-    async fn update_marketplace_plugin(&self, id: &Uuid, plugin: &MarketplacePlugin) -> Result<(), GatewayError>;
+    async fn get_marketplace_plugin(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<MarketplacePlugin>, GatewayError>;
+    async fn create_marketplace_plugin(
+        &self,
+        plugin: &MarketplacePlugin,
+    ) -> Result<(), GatewayError>;
+    async fn update_marketplace_plugin(
+        &self,
+        id: &Uuid,
+        plugin: &MarketplacePlugin,
+    ) -> Result<(), GatewayError>;
     async fn delete_marketplace_plugin(&self, id: &Uuid) -> Result<bool, GatewayError>;
 
     // ── Cost Analytics ──
 
-    async fn list_cost_records(&self, service_id: &Uuid, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<CostRecord>, GatewayError>;
+    async fn list_cost_records(
+        &self,
+        service_id: &Uuid,
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+    ) -> Result<Vec<CostRecord>, GatewayError>;
     async fn upsert_cost_record(&self, record: &CostRecord) -> Result<(), GatewayError>;
 
     // ── Cluster ──
@@ -436,13 +473,25 @@ pub trait Repository: Send + Sync {
 
     // ── Rate Limit Simulator ──
 
-    async fn list_rate_limit_simulations(&self, service_id: &Uuid) -> Result<Vec<RateLimitSimulation>, GatewayError>;
-    async fn create_rate_limit_simulation(&self, sim: &RateLimitSimulation) -> Result<(), GatewayError>;
-    async fn get_rate_limit_simulation(&self, id: &Uuid) -> Result<Option<RateLimitSimulation>, GatewayError>;
+    async fn list_rate_limit_simulations(
+        &self,
+        service_id: &Uuid,
+    ) -> Result<Vec<RateLimitSimulation>, GatewayError>;
+    async fn create_rate_limit_simulation(
+        &self,
+        sim: &RateLimitSimulation,
+    ) -> Result<(), GatewayError>;
+    async fn get_rate_limit_simulation(
+        &self,
+        id: &Uuid,
+    ) -> Result<Option<RateLimitSimulation>, GatewayError>;
 
     // ── PKI / Certificates ──
 
-    async fn list_certificates(&self, service_id: Option<&Uuid>) -> Result<Vec<Certificate>, GatewayError>;
+    async fn list_certificates(
+        &self,
+        service_id: Option<&Uuid>,
+    ) -> Result<Vec<Certificate>, GatewayError>;
     async fn get_certificate(&self, id: &Uuid) -> Result<Option<Certificate>, GatewayError>;
     async fn create_certificate(&self, cert: &Certificate) -> Result<(), GatewayError>;
     async fn update_certificate(&self, id: &Uuid, cert: &Certificate) -> Result<(), GatewayError>;

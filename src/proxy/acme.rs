@@ -90,7 +90,10 @@ impl AcmeManager {
         let dns_provider = if !config.dns01.provider.is_empty() {
             match dns_challenge::from_config(&config.dns01) {
                 Ok(p) => {
-                    tracing::info!(provider = p.provider_name(), "DNS-01 challenge provider loaded");
+                    tracing::info!(
+                        provider = p.provider_name(),
+                        "DNS-01 challenge provider loaded"
+                    );
                     Some(p)
                 }
                 Err(e) => {
@@ -118,7 +121,9 @@ impl AcmeManager {
     /// Must be called after the listener is bound.
     pub async fn set_tls_reload_handle(&self, handle: axum_server::tls_rustls::RustlsConfig) {
         *self.tls_reload_handle.write().await = Some(handle);
-        tracing::info!("TLS hot-reload handle registered — cert updates will apply without restart");
+        tracing::info!(
+            "TLS hot-reload handle registered — cert updates will apply without restart"
+        );
     }
 
     /// Map the configured `key_type` string to the corresponding rcgen
@@ -311,10 +316,9 @@ impl AcmeManager {
         };
 
         let lookup_map = Arc::clone(&self.tls_alpn_challenges);
-        let resolver =
-            AcmeChallengeResolver::with_cert_map(cert_map, default_cert, move |sni| {
-                lookup_map.get(sni).map(|v| Arc::clone(v.value()))
-            });
+        let resolver = AcmeChallengeResolver::with_cert_map(cert_map, default_cert, move |sni| {
+            lookup_map.get(sni).map(|v| Arc::clone(v.value()))
+        });
 
         tracing::info!(
             san_entries = resolver.cert_map.len(),
@@ -805,7 +809,9 @@ impl AcmeManager {
             ca_urls.push(fb.as_str());
         }
 
-        let primary = self.primary_domain().unwrap();
+        let primary = self.primary_domain().ok_or_else(|| {
+            GatewayError::Internal("ACME: no domains configured (config.acme.domains is empty)".into())
+        })?;
         let primary_dir = self.storage_dir().join(primary);
         let mut last_ca_error: Option<GatewayError> = None;
 
@@ -837,10 +843,7 @@ impl AcmeManager {
             };
 
             // ── 1. Try one multi-domain order ─────────────────────
-            match self
-                .issue_order(&account, &reachable, &primary_dir)
-                .await
-            {
+            match self.issue_order(&account, &reachable, &primary_dir).await {
                 Ok(()) => {
                     tracing::info!(
                         ca = %ca_label,
@@ -898,15 +901,12 @@ impl AcmeManager {
                     succeeded[0].clone()
                 };
                 let fb = self.storage_dir().join("_fallback").join(&promote);
-                std::fs::create_dir_all(&primary_dir).map_err(|e| {
-                    GatewayError::Internal(format!("create primary dir: {e}"))
-                })?;
-                std::fs::copy(fb.join("cert.pem"), primary_dir.join("cert.pem")).map_err(|e| {
-                    GatewayError::Internal(format!("promote fallback cert: {e}"))
-                })?;
-                std::fs::copy(fb.join("key.pem"), primary_dir.join("key.pem")).map_err(|e| {
-                    GatewayError::Internal(format!("promote fallback key: {e}"))
-                })?;
+                std::fs::create_dir_all(&primary_dir)
+                    .map_err(|e| GatewayError::Internal(format!("create primary dir: {e}")))?;
+                std::fs::copy(fb.join("cert.pem"), primary_dir.join("cert.pem"))
+                    .map_err(|e| GatewayError::Internal(format!("promote fallback cert: {e}")))?;
+                std::fs::copy(fb.join("key.pem"), primary_dir.join("key.pem"))
+                    .map_err(|e| GatewayError::Internal(format!("promote fallback key: {e}")))?;
                 tracing::info!(
                     ca = %ca_label,
                     domain = %promote,
@@ -943,9 +943,8 @@ impl AcmeManager {
         }
 
         // Exhausted all CAs.
-        Err(last_ca_error.unwrap_or_else(|| {
-            GatewayError::Internal("ACME: no CA directories configured".into())
-        }))
+        Err(last_ca_error
+            .unwrap_or_else(|| GatewayError::Internal("ACME: no CA directories configured".into())))
     }
 
     /// Issue an ACME certificate covering `domains` and write the PEM
@@ -978,9 +977,7 @@ impl AcmeManager {
         let authorizations = order
             .authorizations()
             .await
-            .map_err(|e| {
-                GatewayError::Internal(format!("fetch authorizations ({label}): {e}"))
-            })?;
+            .map_err(|e| GatewayError::Internal(format!("fetch authorizations ({label}): {e}")))?;
 
         let challenge_type = self.config.challenge_type.as_str();
 
@@ -1002,10 +999,7 @@ impl AcmeManager {
 
             match challenge.r#type {
                 instant_acme::ChallengeType::Http01 => {
-                    self.set_challenge(
-                        challenge.token.clone(),
-                        key_auth.as_str().to_string(),
-                    );
+                    self.set_challenge(challenge.token.clone(), key_auth.as_str().to_string());
                 }
                 instant_acme::ChallengeType::TlsAlpn01 => {
                     self.set_tls_alpn_challenge(
@@ -1021,9 +1015,7 @@ impl AcmeManager {
                     })?;
                     let fqdn = dns_challenge::build_acme_dns_name(auth_domain);
                     let dns_value = key_auth.dns_value();
-                    let _record_id = provider
-                        .set_txt_record(&fqdn, &dns_value)
-                        .await?;
+                    let _record_id = provider.set_txt_record(&fqdn, &dns_value).await?;
 
                     // Wait the configured propagation delay before polling,
                     // then poll until visible or timeout.
@@ -1036,9 +1028,8 @@ impl AcmeManager {
                         "DNS-01: waiting for TXT propagation"
                     );
                     tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
-                    dns_challenge::wait_for_propagation_with_timeout(
-                        &fqdn, &dns_value, timeout,
-                    ).await?;
+                    dns_challenge::wait_for_propagation_with_timeout(&fqdn, &dns_value, timeout)
+                        .await?;
                 }
                 _ => {
                     return Err(GatewayError::Internal(format!(
@@ -1052,9 +1043,7 @@ impl AcmeManager {
                 .set_challenge_ready(&challenge.url)
                 .await
                 .map_err(|e| {
-                    GatewayError::Internal(format!(
-                        "set challenge ready for {auth_domain}: {e}"
-                    ))
+                    GatewayError::Internal(format!("set challenge ready for {auth_domain}: {e}"))
                 })?;
         }
 
@@ -1065,9 +1054,7 @@ impl AcmeManager {
             let state = order
                 .refresh()
                 .await
-                .map_err(|e| {
-                    GatewayError::Internal(format!("refresh order ({label}): {e}"))
-                })?;
+                .map_err(|e| GatewayError::Internal(format!("refresh order ({label}): {e}")))?;
             tracing::info!(
                 attempt,
                 label = %label,
@@ -1075,8 +1062,7 @@ impl AcmeManager {
                 "polling ACME order"
             );
             match state.status {
-                instant_acme::OrderStatus::Ready
-                | instant_acme::OrderStatus::Valid => break,
+                instant_acme::OrderStatus::Ready | instant_acme::OrderStatus::Valid => break,
                 instant_acme::OrderStatus::Invalid => {
                     self.cleanup_challenges(&authorizations);
                     return Err(GatewayError::Internal(format!(
@@ -1085,8 +1071,7 @@ impl AcmeManager {
                     )));
                 }
                 _ => {
-                    delay =
-                        std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
+                    delay = std::cmp::min(delay * 2, std::time::Duration::from_secs(30));
                 }
             }
         }
@@ -1097,10 +1082,8 @@ impl AcmeManager {
         let private_key;
         match order.state().status {
             instant_acme::OrderStatus::Ready => {
-                let mut csr_params =
-                    rcgen::CertificateParams::new(domains.to_vec()).map_err(|e| {
-                        GatewayError::Internal(format!("CSR params ({label}): {e}"))
-                    })?;
+                let mut csr_params = rcgen::CertificateParams::new(domains.to_vec())
+                    .map_err(|e| GatewayError::Internal(format!("CSR params ({label}): {e}")))?;
                 csr_params.distinguished_name = rcgen::DistinguishedName::new();
 
                 let existing_key_path = output_dir.join("key.pem");
@@ -1119,12 +1102,9 @@ impl AcmeManager {
                             "no existing key found; generating new ACME CSR key"
                         );
                         private_key =
-                            rcgen::KeyPair::generate_for(self.key_algorithm())
-                                .map_err(|e| {
-                                    GatewayError::Internal(format!(
-                                        "generate key ({label}): {e}"
-                                    ))
-                                })?;
+                            rcgen::KeyPair::generate_for(self.key_algorithm()).map_err(|e| {
+                                GatewayError::Internal(format!("generate key ({label}): {e}"))
+                            })?;
                     }
                 } else {
                     let algo = self.key_algorithm();
@@ -1133,23 +1113,17 @@ impl AcmeManager {
                         key_type = %self.config.key_type,
                         "generating ACME CSR key"
                     );
-                    private_key =
-                        rcgen::KeyPair::generate_for(algo)
-                            .map_err(|e| {
-                                GatewayError::Internal(format!(
-                                    "generate key ({label}): {e}"
-                                ))
-                            })?;
+                    private_key = rcgen::KeyPair::generate_for(algo).map_err(|e| {
+                        GatewayError::Internal(format!("generate key ({label}): {e}"))
+                    })?;
                 }
 
-                let csr = csr_params.serialize_request(&private_key).map_err(|e| {
-                    GatewayError::Internal(format!("serialize CSR ({label}): {e}"))
-                })?;
+                let csr = csr_params
+                    .serialize_request(&private_key)
+                    .map_err(|e| GatewayError::Internal(format!("serialize CSR ({label}): {e}")))?;
 
                 order.finalize(csr.der()).await.map_err(|e| {
-                    GatewayError::Internal(format!(
-                        "finalize order ({label}): {e}"
-                    ))
+                    GatewayError::Internal(format!("finalize order ({label}): {e}"))
                 })?;
             }
             instant_acme::OrderStatus::Valid => {
@@ -1162,13 +1136,8 @@ impl AcmeManager {
                     label = %label,
                     "order already valid; downloading existing cert"
                 );
-                private_key =
-                    rcgen::KeyPair::generate_for(self.key_algorithm())
-                        .map_err(|e| {
-                            GatewayError::Internal(format!(
-                                "generate key ({label}): {e}"
-                            ))
-                        })?;
+                private_key = rcgen::KeyPair::generate_for(self.key_algorithm())
+                    .map_err(|e| GatewayError::Internal(format!("generate key ({label}): {e}")))?;
             }
             other => {
                 return Err(GatewayError::Internal(format!(
@@ -1197,9 +1166,7 @@ impl AcmeManager {
                 }
             }
             pem.ok_or_else(|| {
-                GatewayError::Internal(format!(
-                    "timed out waiting for cert ({label})"
-                ))
+                GatewayError::Internal(format!("timed out waiting for cert ({label})"))
             })?
         };
 
@@ -1227,10 +1194,7 @@ impl AcmeManager {
 
         // Persist to output directory.
         std::fs::create_dir_all(output_dir).map_err(|e| {
-            GatewayError::Internal(format!(
-                "create cert dir {}: {e}",
-                output_dir.display()
-            ))
+            GatewayError::Internal(format!("create cert dir {}: {e}", output_dir.display()))
         })?;
 
         let cert_path = output_dir.join("cert.pem");
@@ -1247,8 +1211,7 @@ impl AcmeManager {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
+            let _ = std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600));
         }
 
         tracing::info!(
@@ -1471,9 +1434,8 @@ impl AcmeManager {
             )));
         }
 
-        let pem_bytes = std::fs::read(&cert_path).map_err(|e| {
-            GatewayError::Internal(format!("read cert for revocation: {e}"))
-        })?;
+        let pem_bytes = std::fs::read(&cert_path)
+            .map_err(|e| GatewayError::Internal(format!("read cert for revocation: {e}")))?;
 
         let mut cursor = std::io::Cursor::new(&pem_bytes);
         let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
@@ -1842,7 +1804,10 @@ mod tests {
         };
         let mgr = AcmeManager::new(config);
         let result = mgr.init().await.expect("empty domains should not error");
-        assert!(!result, "init with no domains should return false (no cert loaded)");
+        assert!(
+            !result,
+            "init with no domains should return false (no cert loaded)"
+        );
     }
 
     #[tokio::test]

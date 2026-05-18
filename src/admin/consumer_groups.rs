@@ -21,8 +21,12 @@ pub struct CreateConsumerGroupBody {
     pub burst_limit: i32,
 }
 
-fn default_rate_limit() -> i32 { 100 }
-fn default_window() -> i32 { 60 }
+fn default_rate_limit() -> i32 {
+    100
+}
+fn default_window() -> i32 {
+    60
+}
 
 #[derive(Deserialize)]
 pub struct PatchConsumerGroupBody {
@@ -93,11 +97,21 @@ pub async fn patch_consumer_group(
         .await?
         .ok_or(GatewayError::NotFound("consumer group not found".into()))?;
 
-    if let Some(v) = body.name { group.name = v; }
-    if let Some(v) = body.description { group.description = v; }
-    if let Some(v) = body.rate_limit { group.rate_limit = v; }
-    if let Some(v) = body.rate_window_seconds { group.rate_window_seconds = v; }
-    if let Some(v) = body.burst_limit { group.burst_limit = v; }
+    if let Some(v) = body.name {
+        group.name = v;
+    }
+    if let Some(v) = body.description {
+        group.description = v;
+    }
+    if let Some(v) = body.rate_limit {
+        group.rate_limit = v;
+    }
+    if let Some(v) = body.rate_window_seconds {
+        group.rate_window_seconds = v;
+    }
+    if let Some(v) = body.burst_limit {
+        group.burst_limit = v;
+    }
 
     state.repo.update_consumer_group(&id, &group).await?;
     Ok(Json(group))

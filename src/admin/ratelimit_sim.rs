@@ -95,10 +95,7 @@ pub async fn list_simulations(
     State(state): State<AdminState>,
     Path(service_id): Path<Uuid>,
 ) -> Result<Json<Vec<RateLimitSimulation>>, GatewayError> {
-    let sims = state
-        .repo
-        .list_rate_limit_simulations(&service_id)
-        .await?;
+    let sims = state.repo.list_rate_limit_simulations(&service_id).await?;
     Ok(Json(sims))
 }
 

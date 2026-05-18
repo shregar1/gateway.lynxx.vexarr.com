@@ -13,10 +13,7 @@ impl CacheService {
         Self { repo }
     }
 
-    pub async fn list_entries(
-        &self,
-        service_id: &Uuid,
-    ) -> Result<Vec<CacheEntry>, GatewayError> {
+    pub async fn list_entries(&self, service_id: &Uuid) -> Result<Vec<CacheEntry>, GatewayError> {
         self.repo.list_cache_entries(service_id).await
     }
 

@@ -16,7 +16,9 @@ pub struct CreateErrorPageBody {
     pub body: String,
 }
 
-fn default_content_type() -> String { "text/html".into() }
+fn default_content_type() -> String {
+    "text/html".into()
+}
 
 #[derive(Deserialize)]
 pub struct PatchErrorPageBody {
@@ -65,10 +67,18 @@ pub async fn patch_error_page(
         .await?
         .ok_or(GatewayError::NotFound("error page not found".into()))?;
 
-    if let Some(v) = body.status_code { page.status_code = v; }
-    if let Some(v) = body.content_type { page.content_type = v; }
-    if let Some(v) = body.body { page.body = v; }
-    if let Some(v) = body.enabled { page.enabled = v; }
+    if let Some(v) = body.status_code {
+        page.status_code = v;
+    }
+    if let Some(v) = body.content_type {
+        page.content_type = v;
+    }
+    if let Some(v) = body.body {
+        page.body = v;
+    }
+    if let Some(v) = body.enabled {
+        page.enabled = v;
+    }
 
     state.repo.update_error_page(&id, &page).await?;
     Ok(Json(page))

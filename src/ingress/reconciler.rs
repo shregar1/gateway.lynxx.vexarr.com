@@ -36,26 +36,16 @@ pub async fn reconcile_service(
 
     if obj.metadata.deletion_timestamp.is_some() {
         if let Some((_, id)) = ctx.state.svc_map.remove(&k) {
-            ctx.client
-                .delete_service(id)
-                .await
-                .map_err(anyhow::Error::from)?;
+            ctx.client.delete_service(id).await?;
             tracing::info!(?k, %id, "deleted service");
         }
         return Ok(Action::await_change());
     }
 
-    let id = ctx
-        .client
-        .upsert_service(&name, &obj.spec)
-        .await
-        .map_err(anyhow::Error::from)?;
+    let id = ctx.client.upsert_service(&name, &obj.spec).await?;
     ctx.state.svc_map.insert(k.clone(), id);
     if !obj.spec.targets.is_empty() {
-        ctx.client
-            .upsert_targets(id, &obj.spec.targets)
-            .await
-            .map_err(anyhow::Error::from)?;
+        ctx.client.upsert_targets(id, &obj.spec.targets).await?;
     }
     tracing::info!(?k, %id, "reconciled service");
     Ok(Action::requeue(Duration::from_secs(60)))
@@ -82,10 +72,7 @@ pub async fn reconcile_route(
 
     if obj.metadata.deletion_timestamp.is_some() {
         if let Some((_, id)) = ctx.state.route_map.remove(&k) {
-            ctx.client
-                .delete_route(id)
-                .await
-                .map_err(anyhow::Error::from)?;
+            ctx.client.delete_route(id).await?;
             tracing::info!(?k, %id, "deleted route");
         }
         return Ok(Action::await_change());
@@ -104,11 +91,7 @@ pub async fn reconcile_route(
     };
 
     let existing = ctx.state.route_map.get(&k).map(|v| *v.value());
-    let id = ctx
-        .client
-        .upsert_route(existing, svc_id, &obj.spec)
-        .await
-        .map_err(anyhow::Error::from)?;
+    let id = ctx.client.upsert_route(existing, svc_id, &obj.spec).await?;
     ctx.state.route_map.insert(k.clone(), id);
     tracing::info!(?k, %id, "reconciled route");
     Ok(Action::requeue(Duration::from_secs(60)))
@@ -131,10 +114,7 @@ pub async fn reconcile_plugin(
 
     if obj.metadata.deletion_timestamp.is_some() {
         if let Some((_, id)) = ctx.state.plugin_map.remove(&k) {
-            ctx.client
-                .delete_plugin(id)
-                .await
-                .map_err(anyhow::Error::from)?;
+            ctx.client.delete_plugin(id).await?;
             tracing::info!(?k, %id, "deleted plugin");
         }
         return Ok(Action::await_change());
@@ -187,8 +167,7 @@ pub async fn reconcile_plugin(
     let id = ctx
         .client
         .upsert_plugin(existing, &obj.spec, svc_id, route_id)
-        .await
-        .map_err(anyhow::Error::from)?;
+        .await?;
     ctx.state.plugin_map.insert(k.clone(), id);
     tracing::info!(?k, %id, "reconciled plugin");
     Ok(Action::requeue(Duration::from_secs(60)))

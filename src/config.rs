@@ -101,6 +101,66 @@ impl KeyxSettings {
             && !self.service_token.trim().is_empty()
             && !self.license_urn.trim().is_empty()
     }
+
+    /// Names of the keyx-related env vars whose values are empty/missing.
+    /// Used by the boot-time preflight to give operators a precise list
+    /// of what to set rather than a generic "not configured" error.
+    pub fn missing_fields(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.base_url.trim().is_empty() {
+            missing.push("KEYX_BASE_URL");
+        }
+        if self.service_token.trim().is_empty() {
+            missing.push("KEYX_SERVICE_TOKEN");
+        }
+        if self.license_urn.trim().is_empty() {
+            missing.push("KEYX_LICENSE_URN");
+        }
+        missing
+    }
+}
+
+/// Pre-flight check for the keyx integration. Mirrors userx's
+/// `check_mode_consistency`: fail fast at boot rather than surfacing a
+/// misconfiguration on the first admin request hours later.
+///
+/// Two failure modes:
+///
+///   * **partial config** — at least one keyx field is set but not all
+///     three. This is almost always a typo or a half-applied env file.
+///     We can't tell which side is correct, so we error.
+///   * **integrated mode without keyx** — `VEXARR_MODE=integrated` is set
+///     but no keyx URL is configured. Integrated mode implies a real
+///     keyx is reachable; if it isn't, admin auth and licence verify
+///     will both 500 on first use. Fail at boot instead.
+///
+/// Pure proxy deployments (no admin API exposed, no licence verification
+/// required) can leave `[keyx]` unset entirely — this returns Ok(()) in
+/// that case.
+pub fn check_keyx_consistency(keyx: &KeyxSettings, mode_value: Option<&str>) -> anyhow::Result<()> {
+    let is_integrated = matches!(mode_value, Some(v) if v.eq_ignore_ascii_case("integrated"));
+    let missing = keyx.missing_fields();
+    let any_set = missing.len() < 3;
+
+    if is_integrated && !missing.is_empty() {
+        anyhow::bail!(
+            "VEXARR_MODE=integrated but keyx is not fully configured. Missing: {}. \
+             Set these (or the legacy KEYX_BASE_URL / KEYX_SERVICE_TOKEN / KEYX_LICENSE_URN), \
+             or unset VEXARR_MODE to run lynxx in pure-proxy mode without keyx.",
+            missing.join(", ")
+        );
+    }
+
+    if any_set && !missing.is_empty() {
+        anyhow::bail!(
+            "keyx integration is partially configured — missing: {}. Either set all three keyx \
+             fields (admin auth + licence verification both require them) or clear the partial \
+             values to disable the integration entirely.",
+            missing.join(", ")
+        );
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -689,7 +749,7 @@ fn default_dns_propagation_timeout() -> u64 {
 
 /// Admin API TLS settings. When enabled, the admin port serves HTTPS
 /// and optionally requires client certs (mTLS) for authentication.
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct AdminTlsConfig {
     /// Enable TLS on the admin listener.
     #[serde(default)]
@@ -708,18 +768,6 @@ pub struct AdminTlsConfig {
     /// Require client certs (true) or make them optional (false).
     #[serde(default)]
     pub client_cert_required: bool,
-}
-
-impl Default for AdminTlsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            cert_path: String::new(),
-            key_path: String::new(),
-            client_ca_path: String::new(),
-            client_cert_required: false,
-        }
-    }
 }
 
 impl Default for AcmeConfig {
@@ -1376,7 +1424,11 @@ fn parse_config(contents: &str, format: ConfigFormat) -> anyhow::Result<GatewayC
 /// `import = "path"` or `import = ["path1", "path2"]` in TOML, or
 /// `import: path` in YAML, are resolved relative to the parent
 /// directory of the main config file and merged via deep overlay.
-fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFormat) -> anyhow::Result<String> {
+fn resolve_imports(
+    contents: &str,
+    base_dir: &std::path::Path,
+    format: ConfigFormat,
+) -> anyhow::Result<String> {
     match format {
         ConfigFormat::Toml => {
             let mut table: toml::Value = toml::from_str(contents)?;
@@ -1407,11 +1459,16 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
                             m
                         });
                         // Snippets are tables — merge their content directly.
-                        merge_toml(&mut table, &toml::Value::Table(snippet_val.as_table().cloned().unwrap_or_else(|| {
-                            let mut m = toml::map::Map::new();
-                            m.insert(p.clone(), snippet_val.clone());
-                            m
-                        })));
+                        merge_toml(
+                            &mut table,
+                            &toml::Value::Table(snippet_val.as_table().cloned().unwrap_or_else(
+                                || {
+                                    let mut m = toml::map::Map::new();
+                                    m.insert(p.clone(), snippet_val.clone());
+                                    m
+                                },
+                            )),
+                        );
                         let _ = snippet_as_table; // suppress warning
                     } else {
                         let resolved = resolve_import_path(p, base_dir);
@@ -1430,13 +1487,16 @@ fn resolve_imports(contents: &str, base_dir: &std::path::Path, format: ConfigFor
             // Extract named snippets before processing imports.
             let snippets: serde_yaml::Mapping = val
                 .as_mapping_mut()
-                .and_then(|m| m.remove(&serde_yaml::Value::String("snippets".into())))
+                .and_then(|m| m.remove(serde_yaml::Value::String("snippets".into())))
                 .and_then(|v| match v {
                     serde_yaml::Value::Mapping(m) => Some(m),
                     _ => None,
                 })
                 .unwrap_or_default();
-            if let Some(imports) = val.as_mapping_mut().and_then(|m| m.remove(&serde_yaml::Value::String("import".into()))) {
+            if let Some(imports) = val
+                .as_mapping_mut()
+                .and_then(|m| m.remove(serde_yaml::Value::String("import".into())))
+            {
                 let paths: Vec<String> = match imports {
                     serde_yaml::Value::String(s) => vec![s],
                     serde_yaml::Value::Sequence(seq) => seq
@@ -1520,7 +1580,9 @@ fn merge_toml(base: &mut toml::Value, overlay: &toml::Value) {
     match (base, overlay) {
         (toml::Value::Table(b), toml::Value::Table(o)) => {
             for (k, v) in o {
-                let entry = b.entry(k.clone()).or_insert_with(|| toml::Value::Boolean(false));
+                let entry = b
+                    .entry(k.clone())
+                    .or_insert_with(|| toml::Value::Boolean(false));
                 merge_toml(entry, v);
             }
         }
@@ -1571,9 +1633,8 @@ fn merge_json(base: &mut serde_json::Value, overlay: &serde_json::Value) {
 /// corresponding environment variable values. Unknown vars are left as-is.
 fn expand_env_vars(input: &str) -> String {
     static ENV_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    let re = ENV_RE.get_or_init(|| {
-        regex::Regex::new(r"\{env\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap()
-    });
+    let re =
+        ENV_RE.get_or_init(|| regex::Regex::new(r"\{env\.([A-Za-z_][A-Za-z0-9_]*)\}").unwrap());
     re.replace_all(input, |caps: &regex::Captures| {
         let var_name = &caps[1];
         std::env::var(var_name).unwrap_or_else(|_| caps[0].to_string())
@@ -1595,16 +1656,12 @@ pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
                 let processed = resolve_imports(&contents, base_dir, fmt)?;
                 parse_config(&processed, fmt)
             } else {
-                tracing::info!(
-                    "no recognised extension for {path}, probing TOML → YAML → JSON"
-                );
+                tracing::info!("no recognised extension for {path}, probing TOML → YAML → JSON");
                 parse_config(&contents, ConfigFormat::Toml)
                     .or_else(|_| parse_config(&contents, ConfigFormat::Yaml))
                     .or_else(|_| parse_config(&contents, ConfigFormat::Json))
                     .map_err(|e| {
-                        anyhow::anyhow!(
-                            "failed to parse {path} as TOML, YAML, or JSON: {e}"
-                        )
+                        anyhow::anyhow!("failed to parse {path} as TOML, YAML, or JSON: {e}")
                     })
             }
         }
@@ -1617,11 +1674,8 @@ pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
 
 /// Watch the config file for changes and trigger a reload callback.
 /// Polls every `interval` and calls `on_change` when the file mtime changes.
-pub fn spawn_config_watcher<F>(
-    path: String,
-    interval: std::time::Duration,
-    on_change: F,
-) where
+pub fn spawn_config_watcher<F>(path: String, interval: std::time::Duration, on_change: F)
+where
     F: Fn() + Send + 'static,
 {
     tokio::spawn(async move {
@@ -1630,7 +1684,7 @@ pub fn spawn_config_watcher<F>(
             tokio::time::sleep(interval).await;
             if let Ok(meta) = tokio::fs::metadata(&path).await {
                 if let Ok(mtime) = meta.modified() {
-                    if last_mtime.map_or(true, |prev| mtime != prev) {
+                    if last_mtime != Some(mtime) {
                         if last_mtime.is_some() {
                             tracing::info!(
                                 path = %path,
@@ -2484,7 +2538,10 @@ trusted_proxies_strict = true
             }
         }"#;
         let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
-        assert_eq!(cfg.gateway.client_ip_headers, vec!["X-Real-IP", "CF-Connecting-IP"]);
+        assert_eq!(
+            cfg.gateway.client_ip_headers,
+            vec!["X-Real-IP", "CF-Connecting-IP"]
+        );
     }
 
     // --- Feature 99: named filesystems ---
@@ -2499,8 +2556,9 @@ trusted_proxies_strict = true
 
     #[test]
     fn pass_host_header_defaults_false() {
-        let cfg: GatewayConfig = toml::from_str("[gateway]\n").unwrap();
-        assert!(!cfg.services.is_empty() || true); // just verify it parses
+        // Just verifies the empty-services case parses cleanly. The
+        // service-level default is checked in `pass_host_header_round_trip`.
+        let _cfg: GatewayConfig = toml::from_str("[gateway]\n").unwrap();
     }
 
     #[test]
@@ -2515,7 +2573,13 @@ trusted_proxies_strict = true
         }"#;
         let cfg: GatewayConfig = serde_json::from_str(json).expect("valid JSON");
         assert_eq!(cfg.gateway.filesystems.len(), 2);
-        assert_eq!(cfg.gateway.filesystems.get("static").unwrap(), "/var/www/static");
-        assert_eq!(cfg.gateway.filesystems.get("uploads").unwrap(), "/var/data/uploads");
+        assert_eq!(
+            cfg.gateway.filesystems.get("static").unwrap(),
+            "/var/www/static"
+        );
+        assert_eq!(
+            cfg.gateway.filesystems.get("uploads").unwrap(),
+            "/var/data/uploads"
+        );
     }
 }

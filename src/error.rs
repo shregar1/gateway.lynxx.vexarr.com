@@ -1,7 +1,7 @@
-use axum::http::{HeaderValue, StatusCode};
+use axum::body::Body;
+use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
-use axum::body::Body;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, thiserror::Error)]
@@ -148,6 +148,14 @@ impl IntoResponse for GatewayError {
                     response.headers_mut().append(name, value);
                 }
             }
+            // Brand lynxx-generated responses with our own `Server` header.
+            // Future-proofs against any default `Server: hyper/<ver>` a
+            // hyper update might introduce. Plugins that already set
+            // Server win (entry/append → replace would be wrong here).
+            response
+                .headers_mut()
+                .entry(header::SERVER)
+                .or_insert_with(|| HeaderValue::from_static("lynxx"));
             return response;
         }
 
@@ -181,13 +189,19 @@ impl IntoResponse for GatewayError {
             GatewayError::PreconditionFailed(_) => {
                 (StatusCode::PRECONDITION_FAILED, self.to_string())
             }
-            GatewayError::ConfigError(_)
-            | GatewayError::Internal(_)
-            | GatewayError::Migrate(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            GatewayError::ConfigError(_) | GatewayError::Internal(_) | GatewayError::Migrate(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
             GatewayError::Sqlx(ref e) => {
                 let msg = e.to_string();
-                if msg.contains("UNIQUE constraint failed") || msg.contains("unique_violation") || msg.contains("23505") {
-                    (StatusCode::CONFLICT, format!("conflict: resource already exists"))
+                if msg.contains("UNIQUE constraint failed")
+                    || msg.contains("unique_violation")
+                    || msg.contains("23505")
+                {
+                    (
+                        StatusCode::CONFLICT,
+                        "conflict: resource already exists".to_string(),
+                    )
                 } else {
                     (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
                 }
@@ -201,6 +215,11 @@ impl IntoResponse for GatewayError {
                 .headers_mut()
                 .insert("X-Lynxx-Circuit", HeaderValue::from_static("open"));
         }
+        // Brand lynxx-generated error responses (see ShortCircuit branch
+        // above for rationale).
+        response
+            .headers_mut()
+            .insert(header::SERVER, HeaderValue::from_static("lynxx"));
         response
     }
 }
@@ -216,4 +235,3 @@ impl From<anyhow::Error> for GatewayError {
         GatewayError::Internal(err.to_string())
     }
 }
-
