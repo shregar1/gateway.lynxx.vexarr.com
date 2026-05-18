@@ -12,7 +12,6 @@ mod abstractions;
 mod admin;
 mod audit;
 mod auth;
-mod backup;
 mod cluster;
 mod config;
 mod configurations;
@@ -203,9 +202,8 @@ async fn async_main() -> anyhow::Result<()> {
 
     // --- Telemetry init -------------------------------------------------
     // Reads from config.telemetry (populated from TOML + env overrides).
-    // Primary endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
-    // Fluxx sidecar:    [telemetry].fluxx_endpoint / FLUXX_OTEL_ENDPOINT
-    // When neither is set the OTel layer is omitted entirely.
+    // Endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
+    // When unset the OTel layer is omitted entirely.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug"));
     let fmt_layer = tracing_subscriber::fmt::layer();
@@ -215,18 +213,13 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         Some(config.telemetry.endpoint.clone())
     };
-    let fluxx_endpoint = if config.telemetry.fluxx_endpoint.is_empty() {
-        None
-    } else {
-        Some(config.telemetry.fluxx_endpoint.clone())
-    };
     let telemetry_api_key = if config.telemetry.api_key.is_empty() {
         None
     } else {
         Some(config.telemetry.api_key.clone())
     };
 
-    if primary_endpoint.is_some() || fluxx_endpoint.is_some() {
+    if let Some(ref endpoint) = primary_endpoint {
         // Inject the telemetry API key via the standard OTEL headers env var
         // so the OTLP HTTP exporter picks it up automatically.
         if let Some(ref key) = telemetry_api_key {
@@ -240,35 +233,17 @@ async fn async_main() -> anyhow::Result<()> {
 
         let svc_name = config.telemetry.service_name.clone();
 
-        let mut provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .with_endpoint(format!("{endpoint}/v1/traces"))
+            .build()
+            .expect("otlp exporter");
+        let provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_resource(opentelemetry_sdk::Resource::new(vec![
                 opentelemetry::KeyValue::new("service.name", svc_name),
-            ]));
-
-        // --- primary exporter ---
-        if let Some(ref endpoint) = primary_endpoint {
-            let exporter = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_endpoint(format!("{endpoint}/v1/traces"))
-                .build()
-                .expect("primary otlp exporter");
-            provider_builder =
-                provider_builder.with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
-            tracing::info!("primary otel exporter → {endpoint}");
-        }
-
-        // --- fluxx exporter (additional, loopback-only) ---
-        if let Some(ref endpoint) = fluxx_endpoint {
-            if let Ok(fluxx_exporter) = opentelemetry_otlp::SpanExporter::builder()
-                .with_http()
-                .with_endpoint(format!("{endpoint}/v1/traces"))
-                .build()
-            {
-                provider_builder = provider_builder
-                    .with_batch_exporter(fluxx_exporter, opentelemetry_sdk::runtime::Tokio);
-                tracing::info!("fluxx telemetry enabled → {endpoint}");
-            }
-        }
+            ]))
+            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
+        tracing::info!("otel exporter → {endpoint}");
 
         let provider = provider_builder.build();
         opentelemetry::global::set_tracer_provider(provider.clone());
@@ -660,15 +635,7 @@ async fn async_main() -> anyhow::Result<()> {
         // fallback runs. Scripts and the /v1/install/binary streamer are
         // self-contained — they don't share state with the proxy pipeline.
         let install_state = Arc::new(install::InstallState::new());
-        let proxy_router = install::router(install_state).merge(proxy_router);
-
-        // Mount the cronX-driven backup endpoint. HMAC-gated by
-        // LYNXX_BACKUP_WEBHOOK_SECRET; gracefully returns 503 when unset.
-        // Lives on the public data plane so cronX can reach it from outside
-        // without needing access to the admin port.
-        let backup_state =
-            Arc::new(backup::BackupState::from_env().expect("backup state from env"));
-        backup::router(backup_state).merge(proxy_router)
+        install::router(install_state).merge(proxy_router)
     };
 
     metrics::spawn_metrics_collector(route_table.clone(), repo.clone(), health.clone(), 5_000);

@@ -4,7 +4,7 @@ Single VM deployment to your GCE instance.
 
 > All ports / URLs / credentials in this guide can be overridden via env vars.
 > See [`.env.example`](.env.example) for the full list (`LYNXX_PROXY_PORT`,
-> `LYNXX_ADMIN_PORT`, `LYNXX_API_KEY`, `DATABASE_URL`, `FLUXX_OTEL_ENDPOINT`,
+> `LYNXX_ADMIN_PORT`, `LYNXX_API_KEY`, `DATABASE_URL`, `LYNXX_TELEMETRY_URL`,
 > `LYNXX_GCS_BUCKET`, `LYNXX_VM_NAME`, `LYNXX_VM_ZONE`, …).
 
 ## First-time provisioning

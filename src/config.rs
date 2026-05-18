@@ -177,11 +177,6 @@ pub struct TelemetrySettings {
     /// Env override: `OTEL_SERVICE_NAME`.
     #[serde(default = "default_telemetry_service_name")]
     pub service_name: String,
-    /// Optional secondary endpoint (e.g. Fluxx sidecar). When set, spans
-    /// are exported to both endpoints.
-    /// Env override: `FLUXX_OTEL_ENDPOINT`.
-    #[serde(default)]
-    pub fluxx_endpoint: String,
 }
 
 fn default_telemetry_service_name() -> String {
@@ -1712,7 +1707,6 @@ where
 ///   * `LYNXX_TELEMETRY_URL`     overrides `telemetry.endpoint` (fallback: `OTEL_EXPORTER_OTLP_ENDPOINT`)
 ///   * `LYNXX_TELEMETRY_API_KEY` overrides `telemetry.api_key`
 ///   * `OTEL_SERVICE_NAME`       overrides `telemetry.service_name`
-///   * `FLUXX_OTEL_ENDPOINT`     overrides `telemetry.fluxx_endpoint`
 ///   * `LYNXX_MINIMAL_TELEMETRY` overrides `gateway.minimal_telemetry`
 ///     (legacy alias: `LYNXX_BENCH_MODE`)
 pub fn apply_env_overrides(config: &mut GatewayConfig) {
@@ -1747,11 +1741,6 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(name) = std::env::var("OTEL_SERVICE_NAME") {
         if !name.is_empty() {
             config.telemetry.service_name = name;
-        }
-    }
-    if let Ok(url) = std::env::var("FLUXX_OTEL_ENDPOINT") {
-        if !url.is_empty() {
-            config.telemetry.fluxx_endpoint = url;
         }
     }
     // Telemetry-skip flag. Reads the new name first; falls back to the

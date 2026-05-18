@@ -134,14 +134,6 @@ x509-parser = "0.16"
 tower-service = "0.3"
 # Distributed rate limiting (redis-rate-limit plugin).
 redis = { version = "0.27", features = ["tokio-comp", "connection-manager"] }
-# NOTE: aws-config + aws-sdk-lambda add ~5MB to the release binary because
-# they ship their own SigV4 implementation and the smithy runtime. Hand-rolling
-# SigV4 was not worth the maintenance cost for v1; if binary size becomes a
-# concern, gate the `aws-lambda` plugin behind a cargo feature. Versions are
-# pinned to a coherent set that builds on rustc 1.90; later AWS releases
-# require rustc 1.91+.
-aws-config = { version = "=1.5.0", features = ["behavior-version-latest"] }
-aws-sdk-lambda = "=1.40.0"
 
 # LLM gateway plugin: tokenizer for OpenAI-family models. Other providers
 # (Anthropic, local) fall back to a `len/4` heuristic — see plugins/llm_gateway.

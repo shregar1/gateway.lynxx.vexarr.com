@@ -54,7 +54,7 @@ public support channel during beta.
 
 ## Operations
 
-**Telemetry:** when `FLUXX_OTEL_ENDPOINT` is set, traces and request spans are exported to the local Fluxx agent via OTLP/HTTP.
+**Telemetry:** OTLP traces and request spans are exported when `LYNXX_TELEMETRY_URL` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) is set.
 
 ---
 
