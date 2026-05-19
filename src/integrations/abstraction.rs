@@ -43,11 +43,27 @@ pub enum VerifierError {
     NotConfigured,
 }
 
-/// Verifies a signed licence bundle (`payload` + `signature`) against
-/// whatever the implementation considers an active signing key.
+/// Result of a successful api-key license validation. Backend-agnostic
+/// shape — the impl translates from whatever its native representation
+/// is. Carries the fields the gateway needs to seed `PlanTier`,
+/// node-count gating, and expiry surfacing.
+#[derive(Debug, Clone)]
+pub struct LicenseInfo {
+    pub customer_urn: String,
+    pub tier: String,
+    pub expires_at: Option<i64>,
+    pub max_nodes: Option<u32>,
+    pub active_nodes: u32,
+    pub monthly_call_limit: Option<u64>,
+    pub allow_overage: bool,
+}
+
+/// Validates a customer-issued api key (e.g. `lnx_live_xxx`) against
+/// the licence backend and returns the associated licence metadata.
+/// `VerifierError::Rejected` → key revoked or unknown.
 #[async_trait]
 pub trait LicenseVerifier: Send + Sync {
-    async fn verify_license(&self, payload: &[u8], signature: &str) -> Result<bool, VerifierError>;
+    async fn validate_license(&self, api_key: &str) -> Result<LicenseInfo, VerifierError>;
 }
 
 /// Validates an opaque admin token (e.g. a keyx-issued bearer) and

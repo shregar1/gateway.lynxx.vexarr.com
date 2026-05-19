@@ -465,7 +465,8 @@ pub fn admin_router(
 
     // ---- live config API ----
     let config_store = config_api::ConfigStore::new(gateway_config);
-    let config_sub = config_api::config_router(config_store);
+    let config_sub = config_api::config_router(config_store)
+        .layer(middleware::from_fn(api_envelope));
 
     // ---- dashboard serving ----
     let dashboard = Router::new().fallback(dashboard_handler);
@@ -477,8 +478,18 @@ pub fn admin_router(
         .layer(middleware::from_fn_with_state(state.clone(), extract_token))
         .layer(middleware::from_fn(api_envelope));
 
+    // Public sign-in endpoint. The node dashboard hits this with the
+    // customer's api key as Bearer; the gateway forwards it to the
+    // licence backend (keyx) and returns the licence info. Bypasses
+    // `extract_token` so unrecognised keys can be validated — they're
+    // the WHOLE POINT of the endpoint.
+    let auth_public = Router::new()
+        .route("/auth/sign-in", post(routes::auth_sign_in))
+        .layer(middleware::from_fn(api_envelope));
+
     dashboard
         .merge(api)
+        .merge(auth_public)
         .with_state(state)
         .nest("/admin/v1/config", config_sub)
         .layer(middleware::from_fn(spa_navigation_guard))
@@ -487,7 +498,35 @@ pub fn admin_router(
 
 /// Browser navigation requests (`Accept: text/html`) get the SPA shell
 /// instead of hitting API routes like `/services` that would return JSON.
-async fn spa_navigation_guard(req: Request, next: Next) -> Response {
+///
+/// Also normalises trailing slashes on `/admin/*` paths in-place so that
+/// `/admin/v1/config/` routes the same as `/admin/v1/config` — axum 0.7's
+/// `nest()` doesn't match the inner `/` route under both forms.
+async fn spa_navigation_guard(mut req: Request, next: Next) -> Response {
+    // Trailing-slash normalisation for nested admin routes — see
+    // comment above. We rebuild the Uri via its `Parts` because
+    // `Uri::from_str` rejects origin-form paths in some http crate
+    // versions; assembling Parts goes through the path-and-query
+    // parser directly.
+    {
+        let path = req.uri().path().to_string();
+        if path.starts_with("/admin/") && path.len() > "/admin/".len() && path.ends_with('/') {
+            let trimmed = path.trim_end_matches('/');
+            let new_pq_str = match req.uri().query() {
+                Some(q) => format!("{trimmed}?{q}"),
+                None => trimmed.to_string(),
+            };
+            if let Ok(new_pq) = new_pq_str.parse::<axum::http::uri::PathAndQuery>() {
+                let mut parts = req.uri().clone().into_parts();
+                parts.path_and_query = Some(new_pq);
+                if let Ok(new_uri) = Uri::from_parts(parts) {
+                    tracing::debug!(from = %path, to = %new_uri, "normalised trailing slash on admin path");
+                    *req.uri_mut() = new_uri;
+                }
+            }
+        }
+    }
+
     if req.method() == Method::GET {
         let prefers_html = req
             .headers()
@@ -509,6 +548,25 @@ async fn spa_navigation_guard(req: Request, next: Next) -> Response {
 
 async fn dashboard_handler(uri: Uri) -> impl IntoResponse {
     let path = uri.path().trim_start_matches('/');
+
+    // /admin/* paths are API surface. If we got here, the route truly
+    // doesn't exist — return a proper envelope-shaped 404 instead of
+    // silently serving the SPA shell (which would mask the routing
+    // miss with a 200 + HTML).
+    if path.starts_with("admin/") || path == "admin" {
+        let body = serde_json::json!({
+            "transactionUrn":  format!("urn:lynxx:err:{}", Uuid::new_v4()),
+            "status":          "FAILED",
+            "responseMessage": "Not Found",
+            "responseKey":     "NOT_FOUND",
+            "errors":          [{ "code": "NOT_FOUND", "message": format!("route /{path} not found") }],
+            "timestamp":       Utc::now().to_rfc3339(),
+            "metadata":        {},
+            "data":            serde_json::Value::Null,
+            "reference_urn":   "",
+        });
+        return (StatusCode::NOT_FOUND, axum::Json(body)).into_response();
+    }
 
     if path.is_empty() || path == "index.html" {
         return index_handler().await.into_response();

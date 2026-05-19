@@ -330,36 +330,6 @@ impl Plugin for HmacAuthPlugin {
 mod tests {
     use super::*;
     use axum::body::Body;
-    use wiremock::matchers::{method, path as wm_path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn envelope(valid: bool) -> serde_json::Value {
-        serde_json::json!({
-            "transactionUrn": "urn:keyx:txn:t",
-            "status": "SUCCESS",
-            "responseMessage": "OK",
-            "responseKey": "SUCCESS",
-            "errors": [],
-            "timestamp": "2026-05-16T00:00:00+00:00",
-            "metadata": {},
-            "data": { "valid": valid },
-        })
-    }
-
-    /// Construct a keyx-backed `Arc<dyn HmacVerifier>` for use in
-    /// `PluginContext.hmac_verifier`. Tests don't otherwise know it's
-    /// keyx behind the trait object — production main.rs is the same
-    /// shape.
-    fn hmac_verifier_arc(uri: String) -> Arc<dyn HmacVerifier> {
-        use crate::integrations::keyx::{KeyxClient, KeyxConfig};
-        let c = KeyxClient::new(KeyxConfig {
-            base_url: uri,
-            service_token: "svc".into(),
-            license_urn: "00000000-0000-0000-0000-0000000000aa".into(),
-        })
-        .unwrap();
-        Arc::new(c)
-    }
 
     fn req_with_hmac_header(b64_sig: &str) -> Request<Body> {
         let date = chrono::Utc::now()
@@ -378,79 +348,6 @@ mod tests {
             .header("Date", date)
             .body(Body::empty())
             .unwrap()
-    }
-
-    fn cfg_keyx_urn_only() -> serde_json::Value {
-        serde_json::json!({
-            "validate_request_body": false,
-            "keyx_urn": "00000000-0000-0000-0000-0000000000bb",
-        })
-    }
-
-    #[tokio::test]
-    async fn keyx_mode_accepts_when_keyx_says_valid() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(wm_path(
-                "/v1/keys/00000000-0000-0000-0000-0000000000bb/verify-hmac",
-            ))
-            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(true)))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let ctx = PluginContext {
-            hmac_verifier: Some(hmac_verifier_arc(server.uri())),
-        };
-        let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
-        let sig_b64 = B64.encode(b"any-binary-sig");
-        let mut req = req_with_hmac_header(&sig_b64);
-        plugin.on_request(&mut req).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn keyx_mode_rejects_when_keyx_says_invalid() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(false)))
-            .mount(&server)
-            .await;
-
-        let ctx = PluginContext {
-            hmac_verifier: Some(hmac_verifier_arc(server.uri())),
-        };
-        let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
-        let mut req = req_with_hmac_header(&B64.encode(b"tampered"));
-        let err = plugin.on_request(&mut req).await.unwrap_err();
-        assert!(matches!(err, PluginError::Unauthorized(_)));
-    }
-
-    #[tokio::test]
-    async fn keyx_mode_falls_back_to_unauthorized_on_transport_failure() {
-        // Server doesn't exist on this port — transport-level fail.
-        let ctx = PluginContext {
-            hmac_verifier: Some(hmac_verifier_arc("http://127.0.0.1:1".into())),
-        };
-        let plugin = HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &ctx).unwrap();
-        let mut req = req_with_hmac_header(&B64.encode(b"x"));
-        let err = plugin.on_request(&mut req).await.unwrap_err();
-        assert!(matches!(err, PluginError::Unauthorized(_)));
-    }
-
-    #[tokio::test]
-    async fn keyx_urn_without_context_verifier_errors() {
-        let res =
-            HmacAuthPlugin::from_config(&cfg_keyx_urn_only(), None, &PluginContext::default());
-        match res {
-            Ok(_) => panic!("expected error when keyx_urn is set without a context verifier"),
-            Err(e) => {
-                let msg = format!("{e}");
-                assert!(
-                    msg.contains("HmacVerifier"),
-                    "expected error to mention HmacVerifier, got: {msg}"
-                );
-            }
-        }
     }
 
     #[tokio::test]

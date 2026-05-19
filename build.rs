@@ -12,4 +12,8 @@ fn main() {
     println!("cargo:rustc-env=LYNXX_BUILD_HASH={hash}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs/heads");
+    // AUTH_URL is read at compile-time via `option_env!` in
+    // integrations::keyx — re-run this build script whenever it
+    // changes so the baked-in const reflects the latest value.
+    println!("cargo:rerun-if-env-changed=AUTH_URL");
 }
