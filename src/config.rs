@@ -11,16 +11,11 @@ pub struct GatewayConfig {
     pub routes: Vec<RouteConfig>,
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
-    /// Subscription licence — required at startup. Set the `token` here
-    /// or via the `LYNXX_LICENSE` env var. Without a valid token the
+    /// Subscription licence — required at startup. Set `api_key` here
+    /// or via the `LYNXX_API_KEY` env var. Without a valid key the
     /// gateway refuses to start. See `src/license/mod.rs`.
     #[serde(default)]
     pub license: LicenseSettings,
-    /// keyx integration. When populated alongside a signed `[license]`
-    /// bundle, licence verification routes through keyx instead of the
-    /// legacy billing endpoint.
-    #[serde(default)]
-    pub keyx: KeyxSettings,
     /// OpenTelemetry export. Env vars `LYNXX_TELEMETRY_URL` and
     /// `LYNXX_TELEMETRY_API_KEY` override the TOML values.
     #[serde(default)]
@@ -44,123 +39,12 @@ pub struct GatewayConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct LicenseSettings {
-    /// DEPRECATED, unused. Was the API key for the retired
-    /// `/v1/license/verify` billing endpoint. Field kept (with
-    /// `#[serde(default)]`) so existing config.toml files don't fail
-    /// to parse; ignored at runtime. Licence verification is now
-    /// keyx-only — see `[keyx]` + `payload` / `signature` below.
+    /// Customer's vexarr api key (`lnx_live_...` / `lnx_test_...`).
+    /// Sent as a Bearer token to auth.vexarr.com to look up the
+    /// associated licence (tier / expiry / quotas) on boot. Treated as
+    /// a secret — prefer `LYNXX_API_KEY` env var over TOML.
     #[serde(default)]
     pub api_key: String,
-    /// Base64-encoded JSON licence payload (used with keyx). The JSON
-    /// schema matches the legacy `VerifyResponse` (customer_urn, tier,
-    /// expires_at, max_nodes, monthly_call_limit, allow_overage).
-    #[serde(default)]
-    pub payload: String,
-    /// Ed25519 signature over `payload`, produced by keyx
-    /// `POST /v1/keys/{urn}/sign-license`. Base64-encoded.
-    #[serde(default)]
-    pub signature: String,
-}
-
-/// Settings for the keyx integration (api.keyx.vexarr.com).
-///
-/// Every field is overridable from the environment:
-///   * `KEYX_BASE_URL`       → `base_url`
-///   * `KEYX_SERVICE_TOKEN`  → `service_token`
-///   * `KEYX_LICENSE_URN`    → `license_urn`
-///
-/// Tenant isn't a separate field: keyx resolves the owning tenant
-/// from the licence URN itself on URN-routed endpoints.
-#[derive(Debug, Deserialize, Serialize, Clone, Default)]
-pub struct KeyxSettings {
-    /// Root URL of the keyx API, e.g. `https://api.keyx.vexarr.com`.
-    #[serde(default)]
-    pub base_url: String,
-    /// Bearer token issued to this lynxx node for calling keyx.
-    /// Treated as a secret — keep it in env, not TOML.
-    #[serde(default)]
-    pub service_token: String,
-    /// URN of the keyx signing key that issued this gateway's licence.
-    #[serde(default)]
-    pub license_urn: String,
-    /// Seconds to cache the result of a keyx `/v1/keys/validate` call
-    /// for an admin-API token. `0` (default) hits keyx on every admin
-    /// request — instant revocation, more network. Setting to e.g.
-    /// `60` smooths bursts (`/status` polling, dashboards) and caps the
-    /// staleness of a revoked token at the TTL. When keyx grows
-    /// real-time revocation events (M4), this can be raised
-    /// aggressively without trading off staleness.
-    #[serde(default)]
-    pub admin_cache_ttl_secs: u64,
-}
-
-impl KeyxSettings {
-    /// True once every field the keyx client needs is populated.
-    pub fn is_configured(&self) -> bool {
-        !self.base_url.trim().is_empty()
-            && !self.service_token.trim().is_empty()
-            && !self.license_urn.trim().is_empty()
-    }
-
-    /// Names of the keyx-related env vars whose values are empty/missing.
-    /// Used by the boot-time preflight to give operators a precise list
-    /// of what to set rather than a generic "not configured" error.
-    pub fn missing_fields(&self) -> Vec<&'static str> {
-        let mut missing = Vec::new();
-        if self.base_url.trim().is_empty() {
-            missing.push("KEYX_BASE_URL");
-        }
-        if self.service_token.trim().is_empty() {
-            missing.push("KEYX_SERVICE_TOKEN");
-        }
-        if self.license_urn.trim().is_empty() {
-            missing.push("KEYX_LICENSE_URN");
-        }
-        missing
-    }
-}
-
-/// Pre-flight check for the keyx integration. Mirrors userx's
-/// `check_mode_consistency`: fail fast at boot rather than surfacing a
-/// misconfiguration on the first admin request hours later.
-///
-/// Two failure modes:
-///
-///   * **partial config** — at least one keyx field is set but not all
-///     three. This is almost always a typo or a half-applied env file.
-///     We can't tell which side is correct, so we error.
-///   * **integrated mode without keyx** — `VEXARR_MODE=integrated` is set
-///     but no keyx URL is configured. Integrated mode implies a real
-///     keyx is reachable; if it isn't, admin auth and licence verify
-///     will both 500 on first use. Fail at boot instead.
-///
-/// Pure proxy deployments (no admin API exposed, no licence verification
-/// required) can leave `[keyx]` unset entirely — this returns Ok(()) in
-/// that case.
-pub fn check_keyx_consistency(keyx: &KeyxSettings, mode_value: Option<&str>) -> anyhow::Result<()> {
-    let is_integrated = matches!(mode_value, Some(v) if v.eq_ignore_ascii_case("integrated"));
-    let missing = keyx.missing_fields();
-    let any_set = missing.len() < 3;
-
-    if is_integrated && !missing.is_empty() {
-        anyhow::bail!(
-            "VEXARR_MODE=integrated but keyx is not fully configured. Missing: {}. \
-             Set these (or the legacy KEYX_BASE_URL / KEYX_SERVICE_TOKEN / KEYX_LICENSE_URN), \
-             or unset VEXARR_MODE to run lynxx in pure-proxy mode without keyx.",
-            missing.join(", ")
-        );
-    }
-
-    if any_set && !missing.is_empty() {
-        anyhow::bail!(
-            "keyx integration is partially configured — missing: {}. Either set all three keyx \
-             fields (admin auth + licence verification both require them) or clear the partial \
-             values to disable the integration entirely.",
-            missing.join(", ")
-        );
-    }
-
-    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
@@ -1140,7 +1024,6 @@ impl Default for GatewayConfig {
             routes: Vec::new(),
             plugins: Vec::new(),
             license: LicenseSettings::default(),
-            keyx: KeyxSettings::default(),
             telemetry: TelemetrySettings::default(),
             named_matchers: Vec::new(),
             snippets: HashMap::new(),
@@ -1709,6 +1592,7 @@ where
 ///   * `OTEL_SERVICE_NAME`       overrides `telemetry.service_name`
 ///   * `LYNXX_MINIMAL_TELEMETRY` overrides `gateway.minimal_telemetry`
 ///     (legacy alias: `LYNXX_BENCH_MODE`)
+///   * `LYNXX_API_KEY`           overrides `license.api_key` (vexarr api key)
 pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
@@ -1766,28 +1650,9 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
         }
         config.gateway.minimal_telemetry = on;
     }
-    if let Ok(url) = std::env::var("KEYX_BASE_URL") {
-        if !url.is_empty() {
-            config.keyx.base_url = url;
-        }
-    }
-    if let Ok(tok) = std::env::var("KEYX_SERVICE_TOKEN") {
-        if !tok.is_empty() {
-            config.keyx.service_token = tok;
-        }
-    }
-    if let Ok(urn) = std::env::var("KEYX_LICENSE_URN") {
-        if !urn.is_empty() {
-            config.keyx.license_urn = urn;
-        }
-    }
-    if let Ok(raw) = std::env::var("KEYX_ADMIN_CACHE_TTL_SECS") {
-        match raw.parse::<u64>() {
-            Ok(n) => config.keyx.admin_cache_ttl_secs = n,
-            Err(e) => tracing::warn!(
-                value = %raw, error = %e,
-                "ignoring invalid KEYX_ADMIN_CACHE_TTL_SECS"
-            ),
+    if let Ok(k) = std::env::var("LYNXX_API_KEY") {
+        if !k.trim().is_empty() {
+            config.license.api_key = k;
         }
     }
 }

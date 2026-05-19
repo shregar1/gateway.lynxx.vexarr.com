@@ -410,44 +410,6 @@ pub fn require_role(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::integrations::keyx::{KeyxClient, KeyxConfig};
-    use wiremock::matchers::{method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
-
-    fn keyx_client(uri: String) -> KeyxClient {
-        KeyxClient::new(KeyxConfig {
-            base_url: uri,
-            service_token: "svc".into(),
-            license_urn: "00000000-0000-0000-0000-000000000099".into(),
-        })
-        .unwrap()
-    }
-
-    fn envelope(data: serde_json::Value) -> serde_json::Value {
-        json!({
-            "transactionUrn": "urn:keyx:txn:test",
-            "status": "SUCCESS",
-            "responseMessage": "OK",
-            "responseKey": "SUCCESS",
-            "errors": [],
-            "timestamp": "2026-05-16T00:00:00+00:00",
-            "metadata": {},
-            "data": data,
-        })
-    }
-
-    fn principal(role: &str) -> serde_json::Value {
-        json!({
-            "tenant_id":   1,
-            "tenant_urn":  "00000000-0000-0000-0000-000000000001",
-            "api_key_id":  10,
-            "api_key_urn": "00000000-0000-0000-0000-0000000000aa",
-            "role":        role,
-            "key_type":    role,
-            "environment": "live",
-            "scopes":      [],
-        })
-    }
 
     #[test]
     fn role_mapping_is_conservative() {
@@ -459,49 +421,6 @@ mod tests {
         assert_eq!(map_principal_role("publishable"), None);
         assert_eq!(map_principal_role("restricted"), None);
         assert_eq!(map_principal_role(""), None);
-    }
-
-    #[tokio::test]
-    async fn keyx_fallback_returns_admin_for_admin_role() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .and(path("/v1/keys/validate"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(envelope(principal("admin"))))
-            .mount(&server)
-            .await;
-        let client = keyx_client(server.uri());
-        let out = resolve_via_validator(&client, "ak_live_xxx").await.unwrap();
-        let tok = out.unwrap();
-        assert_eq!(tok.role, Role::Admin);
-        assert!(tok.name.starts_with("verifier:admin:"));
-    }
-
-    #[tokio::test]
-    async fn keyx_fallback_rejects_unknown_role() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(envelope(principal("publishable"))),
-            )
-            .mount(&server)
-            .await;
-        let client = keyx_client(server.uri());
-        let resp = resolve_via_validator(&client, "ak_live_xxx")
-            .await
-            .unwrap_err();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn keyx_fallback_propagates_keyx_401_as_unauthorized() {
-        let server = MockServer::start().await;
-        Mock::given(method("POST"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("nope"))
-            .mount(&server)
-            .await;
-        let client = keyx_client(server.uri());
-        let resp = resolve_via_validator(&client, "bad").await.unwrap_err();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     fn admin_token_stub(role: Role) -> AdminToken {

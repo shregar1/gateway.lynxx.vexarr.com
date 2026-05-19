@@ -192,14 +192,6 @@ async fn async_main() -> anyhow::Result<()> {
     apply_env_overrides(&mut config);
     apply_cli_overrides(&mut config, &args);
 
-    // Pre-flight: catch keyx misconfiguration at boot instead of on the
-    // first admin / licence-verify request. Same pattern as userx's
-    // check_mode_consistency — see config::check_keyx_consistency.
-    crate::config::check_keyx_consistency(
-        &config.keyx,
-        std::env::var("VEXARR_MODE").ok().as_deref(),
-    )?;
-
     // --- Telemetry init -------------------------------------------------
     // Reads from config.telemetry (populated from TOML + env overrides).
     // Endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
@@ -269,65 +261,43 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     // ---------- licence gate ----------
-    // Verify the subscription API key before doing any other startup
-    // work. Calls the licence server; on success the result is cached
+    // Validate the customer api key against auth.vexarr.com before
+    // doing any other startup work. On success the result is cached
     // locally so later restarts work offline for up to 7 days. The
-    // server-reported tier overrides config.gateway.plan_tier.
-    // Build the shared keyx client first (if configured) so the same
-    // Arc powers licence verification, admin-auth fallback, plugin
-    // HMAC verification, and any other consumer that wants it. The
-    // domain code holds trait objects (`Arc<dyn …Verifier>`) — only
-    // `main.rs` names `KeyxClient` directly.
-    let shared_keyx_client: Option<Arc<crate::integrations::keyx::KeyxClient>> =
-        if config.keyx.is_configured() {
-            let cfg = crate::integrations::keyx::KeyxConfig {
-                base_url: config.keyx.base_url.clone(),
-                service_token: config.keyx.service_token.clone(),
-                license_urn: config.keyx.license_urn.clone(),
-            };
-            crate::integrations::keyx::KeyxClient::new(cfg)
-                .ok()
-                .map(Arc::new)
-        } else {
-            None
-        };
+    // keyx-reported tier overrides config.gateway.plan_tier.
+    let api_key = config.license.api_key.trim().to_string();
+    if api_key.is_empty() {
+        eprintln!("LYNXX_API_KEY (or [license].api_key) is required.");
+        eprintln!("Get a key at https://lynxx.vexarr.com/account/api-keys");
+        return Err(anyhow::anyhow!("LYNXX_API_KEY not set"));
+    }
 
-    let license_verifier: Option<Arc<dyn crate::integrations::LicenseVerifier>> =
-        shared_keyx_client.as_ref().map(|c| {
-            let v: Arc<dyn crate::integrations::LicenseVerifier> = c.clone();
-            v
-        });
-    let token_validator: Option<Arc<dyn crate::integrations::TokenValidator>> =
-        shared_keyx_client.as_ref().map(|c| {
-            let v: Arc<dyn crate::integrations::TokenValidator> = c.clone();
-            v
-        });
-    let hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>> =
-        shared_keyx_client.as_ref().map(|c| {
-            let v: Arc<dyn crate::integrations::HmacVerifier> = c.clone();
-            v
-        });
+    let keyx_client = Arc::new(crate::integrations::keyx::KeyxClient::new()?);
+    let license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
+    // Admin tokens (other than the master api key) come from the local
+    // `admin_tokens` table; HMAC plugin secrets come from local config.
+    // No remote validators in the api-key-only model.
+    let token_validator: Option<Arc<dyn crate::integrations::TokenValidator>> = None;
+    let hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>> = None;
 
-    let license =
-        match crate::license::License::load(&config.license, license_verifier.as_deref()).await {
-            Ok(lic) => {
-                tracing::info!(
-                    customer_id = %lic.customer_id,
-                    tier = %lic.tier.as_str(),
-                    from_cache = lic.from_cache,
-                    "licence verified"
-                );
-                config.gateway.plan_tier = lic.tier.as_str().to_string();
-                lic
-            }
-            Err(err) => {
-                eprintln!("licence verification failed: {err}");
-                eprintln!("This Lynxx binary requires an active subscription.");
-                eprintln!("Set LYNXX_API_KEY=<key> or [license].api_key in config.toml.");
-                eprintln!("Get a key at https://lynxx.vexarr.com/account/api-keys");
-                return Err(anyhow::anyhow!("licence required: {err}"));
-            }
-        };
+    let license = match crate::license::License::load(&api_key, license_verifier.as_ref()).await {
+        Ok(lic) => {
+            tracing::info!(
+                customer_id = %lic.customer_id,
+                tier = %lic.tier.as_str(),
+                from_cache = lic.from_cache,
+                "licence verified"
+            );
+            config.gateway.plan_tier = lic.tier.as_str().to_string();
+            lic
+        }
+        Err(err) => {
+            eprintln!("licence verification failed: {err}");
+            eprintln!("This Lynxx binary requires an active subscription.");
+            eprintln!("Get a key at https://lynxx.vexarr.com/account/api-keys");
+            return Err(anyhow::anyhow!("licence required: {err}"));
+        }
+    };
 
     tracing::info!(
         proxy_port = config.gateway.proxy_port,
@@ -448,46 +418,22 @@ async fn async_main() -> anyhow::Result<()> {
 
     // Live licence state + periodic re-verifier.
     //
-    // When [keyx] is configured AND a signed bundle is provided, build
-    // a keyx-backed LicenseState — the background refresher hits keyx
+    // The background refresher re-validates the api key against keyx
     // every REVERIFY_INTERVAL_SECS and flips a kill-switch on a
-    // confirmed `valid: false`. Otherwise the unverified default state
-    // (no refresher, no kill-switch) is used — appropriate for
-    // self-host / dev / internal deployments.
+    // confirmed rejection (revocation).
     //
-    // `license_api_key` is still resolved here: it's the master admin
-    // token bootstrap shortcut for the admin API (handy for operators
-    // who want a single bearer they can use everywhere). It is no
-    // longer used for licence verification.
-    let license_api_key = std::env::var("LYNXX_API_KEY")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_default();
+    // `license_api_key` is the same value used for licence validation,
+    // also serving as the master admin bearer — one key, one input.
+    let license_api_key = api_key.clone();
 
-    let license_state = if config.keyx.is_configured() && !config.license.payload.trim().is_empty()
-    {
-        use base64::engine::general_purpose::STANDARD as B64;
-        use base64::Engine;
-        let payload = B64
-            .decode(config.license.payload.trim())
-            .map_err(|e| anyhow::anyhow!("license.payload is not valid base64: {e}"))?;
-        let signature = config.license.signature.trim().to_string();
-        tracing::info!("licence re-verifier in verified mode");
-        let verifier = license_verifier
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("licence verifier required but absent"))?;
-        crate::license::LicenseState::new_verified(
-            verifier,
-            payload,
-            signature,
-            plan_tier,
-            license.active_nodes,
-            license.max_nodes,
-        )
-    } else {
-        tracing::info!("licence: unverified mode (no [keyx] config)");
-        crate::license::LicenseState::unverified(plan_tier)
-    };
+    tracing::info!("licence re-verifier in verified mode");
+    let license_state = crate::license::LicenseState::new(
+        license_verifier.clone(),
+        api_key.clone(),
+        plan_tier,
+        license.active_nodes,
+        license.max_nodes,
+    );
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
@@ -757,22 +703,11 @@ async fn async_main() -> anyhow::Result<()> {
         5_000,
     );
 
-    // Token validator handed to the admin-auth middleware. Same
-    // underlying client the plugin executor and licence refresher use
-    // — exposed here as `Arc<dyn TokenValidator>` so the admin layer
-    // doesn't know what's behind it.
+    // Token validator handed to the admin-auth middleware. None in the
+    // api-key-only model — admin tokens come from the local
+    // `admin_tokens` table; the master api key is matched directly.
     let admin_token_validator = token_validator.clone();
-
-    // Optional cache for verifier-validated admin tokens. `0` = no
-    // cache, every admin call hits the verifier (instant revocation).
-    // `> 0` caps revocation staleness at the TTL and absorbs bursts.
-    let admin_token_cache = if config.keyx.admin_cache_ttl_secs > 0 {
-        Some(Arc::new(crate::auth::middleware::AdminAuthCache::new(
-            std::time::Duration::from_secs(config.keyx.admin_cache_ttl_secs),
-        )))
-    } else {
-        None
-    };
+    let admin_token_cache: Option<Arc<crate::auth::middleware::AdminAuthCache>> = None;
 
     let admin_app = admin::admin_router(
         route_table,

@@ -3,7 +3,8 @@ use crate::auth::middleware::CurrentActor;
 use crate::auth::{generate_token, hash_token, AdminToken, Role};
 use crate::cluster::{ChangeEvent, ClusterBus};
 use crate::db::{AdminTokenPatch, LogFilter, NewAdminToken, Repository};
-use crate::error::GatewayError;
+use crate::error::{GatewayError, PluginError};
+use crate::integrations::abstraction::VerifierError;
 use crate::health::{HealthRegistry, ServiceHealth, StatusCache};
 use crate::models::{Consumer, LogEntry, PluginInstance, Project, Route, Service, Target};
 use crate::plugins::PluginExecutor;
@@ -1897,6 +1898,68 @@ pub async fn gateway_status(
 
 pub async fn healthz(State(state): State<AdminState>) -> Json<StatusResponse> {
     Json(state.status_cache.get().await)
+}
+
+// ---------- /auth/sign-in (public) ----------
+//
+// The node dashboard hits this with `Authorization: Bearer <api_key>`.
+// The gateway forwards the key to the licence backend (keyx) and
+// returns the licence payload on success — so the dashboard never
+// talks to keyx directly. Public route: bypasses `extract_token`.
+
+#[derive(Serialize)]
+pub struct SignInResponse {
+    pub customer_urn: String,
+    pub tier: String,
+    pub expires_at: Option<i64>,
+    pub max_nodes: Option<u32>,
+    pub active_nodes: u32,
+    pub allow_overage: bool,
+}
+
+pub async fn auth_sign_in(
+    State(state): State<AdminState>,
+    headers: HeaderMap,
+) -> Result<Json<SignInResponse>, GatewayError> {
+    let license_state = state.license_state.as_ref().ok_or_else(|| {
+        GatewayError::Internal("licence verifier not configured".into())
+    })?;
+
+    let raw = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            GatewayError::PluginError(PluginError::Unauthorized(
+                "Authorization: Bearer required".into(),
+            ))
+        })?;
+
+    let info = license_state.validate_key(raw).await.map_err(|e| match e {
+        VerifierError::Rejected(msg) => GatewayError::PluginError(PluginError::Unauthorized(msg)),
+        VerifierError::Http { status, body } => {
+            GatewayError::ServiceUnavailable(format!("keyx HTTP {status}: {body}"))
+        }
+        VerifierError::Transport(msg) => {
+            GatewayError::ServiceUnavailable(format!("keyx unreachable: {msg}"))
+        }
+        VerifierError::Malformed(msg) => GatewayError::Internal(format!("keyx malformed: {msg}")),
+        VerifierError::NotConfigured => {
+            GatewayError::Internal("verifier not configured".into())
+        }
+    })?;
+
+    Ok(Json(SignInResponse {
+        customer_urn: info.customer_urn,
+        tier: info.tier,
+        expires_at: info.expires_at,
+        max_nodes: info.max_nodes,
+        active_nodes: info.active_nodes,
+        allow_overage: info.allow_overage,
+    }))
 }
 
 // ---------- circuit breakers ----------

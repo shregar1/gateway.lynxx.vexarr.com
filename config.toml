@@ -13,6 +13,12 @@ health_circuit_open_duration_ms = 30000
 # Defaults to ~/.lynxx/recordings when unset.
 # recordings_directory = "/var/lib/lynxx/recordings"
 
+# Subscription api key. Prefer `LYNXX_API_KEY=lnx_live_…` env var over
+# pasting the key into TOML. Validated against auth.vexarr.com on
+# boot; the response sets tier / expiry / quotas.
+# [license]
+# api_key = "lnx_live_xxxxxxxxxxxxxxxxxxxxxxxx"
+
 [[services]]
 name = "example-service"
 url = "http://httpbin.org"
