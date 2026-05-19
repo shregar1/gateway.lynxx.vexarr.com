@@ -639,7 +639,7 @@ pub async fn list_upstreams(State(state): State<AdminState>) -> Json<UpstreamSta
     })
 }
 
-pub async fn list_routes(State(state): State<AdminState>) -> Json<Vec<Route>> {
+pub async fn list_routes(State(state): State<AdminState>) -> Json<Vec<std::sync::Arc<Route>>> {
     Json(state.route_table.list_routes())
 }
 
