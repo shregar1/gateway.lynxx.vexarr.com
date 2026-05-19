@@ -986,6 +986,14 @@ async fn async_main() -> anyhow::Result<()> {
     if acme_has_cert {
         let mgr = acme_manager.as_ref().unwrap();
         let server_config = mgr.server_config().await?;
+        if config.gateway.tls.kernel_tls {
+            tracing::warn!(
+                "kernel_tls=true is ignored on the ACME cert path in this release. \
+                 The ACME-managed server config is consumed by axum-server and the \
+                 post-handshake hook needed for kTLS isn't wired through it yet — \
+                 see src/proxy/ktls_listener.rs for the follow-up plan."
+            );
+        }
         tracing::info!(
             "proxy listening on {proxy_addr} (TLS via ACME, domains={:?})",
             config.gateway.acme.domains
@@ -1000,24 +1008,60 @@ async fn async_main() -> anyhow::Result<()> {
             .serve(proxy_app.into_make_service());
         run_select!(serve, Some(shutdown_handle));
     } else if config.gateway.tls.enabled {
-        let server_config = crate::proxy::tls::build_server_config(&config.gateway.tls)?;
-        tracing::info!(
-            "proxy listening on {proxy_addr} (TLS{})",
-            if config.gateway.tls.mtls_enabled() {
-                ", mTLS"
-            } else {
-                ""
+        // kTLS opt-in: bypass axum-server entirely and run the custom
+        // accept loop that upgrades each connection to kernel TLS after
+        // the rustls handshake completes. Linux only; on other hosts
+        // we log a warning and fall through to the standard path.
+        if config.gateway.tls.kernel_tls
+            && crate::proxy::ktls_listener::supported_on_host()
+        {
+            let server_config =
+                crate::proxy::ktls_listener::build_server_config_for_ktls(&config.gateway.tls)?;
+            tracing::info!(
+                "proxy listening on {proxy_addr} (TLS{}, kernel TLS offload enabled)",
+                if config.gateway.tls.mtls_enabled() {
+                    ", mTLS"
+                } else {
+                    ""
+                }
+            );
+            let server_config = Arc::new(server_config);
+            let handle = crate::proxy::ktls_listener::KtlsHandle::new();
+            let shutdown_handle = handle.clone();
+            let serve = crate::proxy::ktls_listener::serve(
+                proxy_listener,
+                server_config,
+                proxy_app,
+                handle,
+            );
+            run_select!(serve, Some(shutdown_handle));
+        } else {
+            if config.gateway.tls.kernel_tls {
+                tracing::warn!(
+                    "kernel_tls=true requested but the host is not Linux; \
+                     falling back to userspace TLS. Rebuild the binary on Linux \
+                     to benefit from kTLS offload."
+                );
             }
-        );
-        let rustls_cfg =
-            axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
-        let handle = axum_server::Handle::new();
-        let shutdown_handle = handle.clone();
-        let std_listener = proxy_listener.into_std()?;
-        let serve = axum_server::from_tcp_rustls(std_listener, rustls_cfg)
-            .handle(handle)
-            .serve(proxy_app.into_make_service());
-        run_select!(serve, Some(shutdown_handle));
+            let server_config = crate::proxy::tls::build_server_config(&config.gateway.tls)?;
+            tracing::info!(
+                "proxy listening on {proxy_addr} (TLS{})",
+                if config.gateway.tls.mtls_enabled() {
+                    ", mTLS"
+                } else {
+                    ""
+                }
+            );
+            let rustls_cfg =
+                axum_server::tls_rustls::RustlsConfig::from_config(Arc::new(server_config));
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            let std_listener = proxy_listener.into_std()?;
+            let serve = axum_server::from_tcp_rustls(std_listener, rustls_cfg)
+                .handle(handle)
+                .serve(proxy_app.into_make_service());
+            run_select!(serve, Some(shutdown_handle));
+        }
     } else if config.gateway.acme.enabled {
         tracing::warn!(
             "ACME enabled but no certificate available; waiting for background provisioning..."

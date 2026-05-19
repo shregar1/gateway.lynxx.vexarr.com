@@ -242,6 +242,26 @@ wat = "1"
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
+# Kernel TLS offload — Linux-only.
+#
+# `ktls` extracts the negotiated cipher state from a completed
+# `tokio-rustls` handshake and calls `setsockopt(TLS_TX/TLS_RX)` to
+# hand the bulk encrypt/decrypt path to the kernel. After conversion
+# the socket reads/writes plaintext from userspace's point of view —
+# every record memcpy + crypto round-trip disappears from the gateway
+# hot path, and `sendfile(2)` becomes legal on TLS connections.
+#
+# Pulled in only on Linux because the crate calls into `linux/tls.h`
+# socket options that don't exist on macOS/Windows. Opt-in at runtime
+# via `[gateway.tls].kernel_tls = true`; see `src/proxy/ktls_listener.rs`.
+#
+# `default-features = false` because the crate's defaults pull in
+# `aws-lc-rs`, which conflicts with our `ring` provider choice. We
+# enable `ring` + `tls12` explicitly to match the rest of the TLS
+# stack (rustls 0.23 + tokio-rustls 0.26, both on ring).
+[target.'cfg(target_os = "linux")'.dependencies]
+ktls = { version = "6", default-features = false, features = ["ring", "tls12"] }
+
 # Release-profile tuning for the proxy hot path.
 #
 # Defaults leave 10–20% perf on the table:

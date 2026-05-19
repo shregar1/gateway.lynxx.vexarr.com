@@ -834,6 +834,37 @@ pub struct TlsSettings {
     /// are rejected. Default: false.
     #[serde(default)]
     pub strict_sni_host: bool,
+
+    /// Enable kernel TLS offload (kTLS) on the proxy listener.
+    ///
+    /// When `true` *and* the host kernel supports the TLS_ULP socket
+    /// option (Linux 4.13+ for AES-GCM TLS 1.2; 5.1+ for TLS 1.3;
+    /// 5.11+ for ChaCha20-Poly1305), the bulk encrypt/decrypt path
+    /// is moved into the kernel after the rustls handshake completes.
+    /// Userspace continues to drive the handshake but never sees a
+    /// ciphertext byte afterwards — `sendfile(2)` and zero-copy splice
+    /// become possible on TLS connections, and the per-record memcpy
+    /// disappears from the proxy hot path.
+    ///
+    /// Caveats:
+    ///   * Linux only. On other platforms this flag is silently ignored
+    ///     and a warning is logged at startup.
+    ///   * The negotiated cipher suite must be one the kernel
+    ///     understands: AES-128-GCM, AES-256-GCM, or (kernel 5.11+)
+    ///     ChaCha20-Poly1305. If the handshake settles on a different
+    ///     suite, the kTLS upgrade fails and the connection is closed.
+    ///   * Engages a separate accept loop that bypasses `axum-server`
+    ///     (which doesn't expose post-handshake stream control). The
+    ///     resulting path serves HTTP/1.1 and HTTP/2 directly via
+    ///     `hyper-util`; HTTP/3 (QUIC) is unaffected.
+    ///   * Currently only wired on the static-cert TLS path. The ACME
+    ///     path falls back to the standard axum-server flow even when
+    ///     this flag is set — see the kTLS module docs for the
+    ///     follow-up plan.
+    ///
+    /// Default: `false` (opt-in).
+    #[serde(default)]
+    pub kernel_tls: bool,
 }
 
 impl Default for TlsSettings {
@@ -856,6 +887,7 @@ impl Default for TlsSettings {
             default_sni: String::new(),
             fallback_sni: String::new(),
             strict_sni_host: false,
+            kernel_tls: false,
         }
     }
 }
