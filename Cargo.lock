@@ -2756,6 +2756,7 @@ dependencies = [
 name = "lynxx-gateway"
 version = "0.9.0"
 dependencies = [
+ "ahash",
  "anyhow",
  "argon2",
  "async-trait",
