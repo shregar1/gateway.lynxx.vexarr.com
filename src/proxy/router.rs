@@ -5,26 +5,33 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
+/// Hasher used by the route table's internal maps. All keys here are
+/// either server-generated UUIDs or normalised host / path strings —
+/// none of them are attacker-influenced HashMap keys, so the default
+/// SipHash DoS resistance is wasted cycles. ahash is 2-5× faster on
+/// the typical 16-32-byte keys we use here.
+type FastHasher = ahash::RandomState;
+
 pub struct RouteTable {
-    services: DashMap<Uuid, Service>,
-    routes: DashMap<Uuid, Route>,
+    services: DashMap<Uuid, Service, FastHasher>,
+    routes: DashMap<Uuid, Route, FastHasher>,
     /// Exact-path index: `path` -> `route_id` for routes whose `paths` entries
     /// are literal (no trailing `*`). The hot path consults this first to turn
     /// route matching from O(N) into O(1) for the common "exact path" case.
     /// Prefix and wildcard routes still fall through to the linear scan.
-    exact_index: DashMap<String, Uuid>,
+    exact_index: DashMap<String, Uuid, FastHasher>,
     /// Host-to-service index: `"sub.domain.com"` -> `service_id` for services
     /// with non-empty `subdomain` + `domain`. Enables O(1) subdomain routing.
-    host_index: DashMap<String, Uuid>,
+    host_index: DashMap<String, Uuid, FastHasher>,
 }
 
 impl RouteTable {
     pub fn new() -> Self {
         Self {
-            services: DashMap::new(),
-            routes: DashMap::new(),
-            exact_index: DashMap::new(),
-            host_index: DashMap::new(),
+            services: DashMap::with_hasher(FastHasher::default()),
+            routes: DashMap::with_hasher(FastHasher::default()),
+            exact_index: DashMap::with_hasher(FastHasher::default()),
+            host_index: DashMap::with_hasher(FastHasher::default()),
         }
     }
 

@@ -96,6 +96,13 @@ tracing-opentelemetry = "0.28"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
+# ahash is 2-5× faster than the default SipHash that std + dashmap
+# pick to be DoS-resistant. For INTERNAL-only maps (route table,
+# admin-token cache, etc.) where the keys are server-generated UUIDs
+# or fingerprint hashes — i.e. not attacker-influenced — that
+# trade-off is wrong; we want the speed. Used only behind structs
+# that are not deserialised from caller input.
+ahash = "0.8"
 jsonwebtoken = "9"
 toml = "0.8"
 thiserror = "1"

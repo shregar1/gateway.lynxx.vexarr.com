@@ -34,7 +34,11 @@ use uuid::Uuid;
 /// real-time revocation events from the backend, a revoked token
 /// keeps working until the entry expires.
 pub struct AdminAuthCache {
-    entries: DashMap<String, CachedEntry>,
+    // ahash for the internal admin-token cache. Keys are SHA-256
+    // fingerprints of admin bearers — server-side derived, not
+    // attacker-controlled — so the default SipHash DoS resistance is
+    // wasted on this hot lookup path.
+    entries: DashMap<String, CachedEntry, ahash::RandomState>,
     ttl: Duration,
 }
 
@@ -46,7 +50,7 @@ struct CachedEntry {
 impl AdminAuthCache {
     pub fn new(ttl: Duration) -> Self {
         Self {
-            entries: DashMap::new(),
+            entries: DashMap::with_hasher(ahash::RandomState::default()),
             ttl,
         }
     }
