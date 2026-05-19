@@ -36,6 +36,20 @@ pub struct BoundListener {
 fn create_reusable_socket() -> io::Result<Socket> {
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
+    // SO_REUSEPORT (Linux 3.9+, BSD, macOS): lets multiple listening
+    // sockets on the same address+port coexist, and the kernel hashes
+    // each accepted connection to one of them. Used by the gateway in
+    // two ways:
+    //   1. Multiple lynxx processes sharing 0.0.0.0:28080 — kernel-
+    //      level fan-out replaces an in-process accept-mutex hot spot.
+    //   2. Zero-downtime rolling restart: the new process binds the
+    //      same port before the old one exits.
+    // Best-effort: failure to set the option is logged and ignored so
+    // we never refuse to bind because a kernel doesn't support it.
+    #[cfg(unix)]
+    if let Err(e) = socket.set_reuse_port(true) {
+        tracing::debug!(error = %e, "SO_REUSEPORT unavailable on this platform; continuing without it");
+    }
     socket.set_nonblocking(true)?;
     Ok(socket)
 }
