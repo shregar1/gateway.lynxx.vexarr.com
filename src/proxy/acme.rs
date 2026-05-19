@@ -57,7 +57,7 @@ use rustls::ServerConfig;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
 
 /// Manages certificate lifecycle: loading, generation, watching, and
 /// ACME HTTP-01 + TLS-ALPN-01 challenge handling.
@@ -81,6 +81,20 @@ pub struct AcmeManager {
     /// listener via `RustlsConfig::reload_from_config` — no restart
     /// required.
     tls_reload_handle: Arc<RwLock<Option<axum_server::tls_rustls::RustlsConfig>>>,
+    /// Reload channel for the kTLS listener. When set, every cert
+    /// renewal pushes the freshly-built `Arc<ServerConfig>` through
+    /// this `watch::Sender` so the in-kernel-TLS accept loop picks up
+    /// the new key material on its next connection. Separate from
+    /// `tls_reload_handle` because the kTLS path does not use
+    /// `axum_server::tls_rustls::RustlsConfig` (which is axum-server
+    /// specific). See `src/proxy/ktls_listener.rs`.
+    ktls_reload_tx: Arc<RwLock<Option<watch::Sender<Arc<ServerConfig>>>>>,
+    /// When `true`, every freshly-built `ServerConfig` gets
+    /// `enable_secret_extraction = true` set on it so the kTLS upgrade
+    /// path can read the negotiated cipher state after the handshake.
+    /// Off by default — secret extraction is a small but real
+    /// rustls security surface and we keep it opt-in.
+    enable_secret_extraction: bool,
 }
 
 impl AcmeManager {
@@ -113,7 +127,18 @@ impl AcmeManager {
             last_cert_mtime: Arc::new(RwLock::new(None)),
             dns_provider,
             tls_reload_handle: Arc::new(RwLock::new(None)),
+            ktls_reload_tx: Arc::new(RwLock::new(None)),
+            enable_secret_extraction: false,
         }
+    }
+
+    /// Opt the manager into kTLS-compatible `ServerConfig` construction.
+    /// Must be called before any cert load — flipping this after the
+    /// initial config is built leaves the in-memory `Arc<ServerConfig>`
+    /// without secret extraction enabled, and the next cert reload
+    /// will be the first to honour the flag. Idempotent.
+    pub fn enable_kernel_tls(&mut self) {
+        self.enable_secret_extraction = true;
     }
 
     /// Register the live `axum_server` TLS config handle so that cert
@@ -124,6 +149,37 @@ impl AcmeManager {
         tracing::info!(
             "TLS hot-reload handle registered — cert updates will apply without restart"
         );
+    }
+
+    /// Register a `watch::Sender` that receives every freshly-built
+    /// `Arc<ServerConfig>` on cert renewal. Intended for the kTLS
+    /// listener, which doesn't go through `axum_server::tls_rustls`.
+    ///
+    /// Returns a `watch::Receiver` primed with the current config (if
+    /// one is loaded) so the listener can start serving immediately.
+    /// If no cert is loaded yet, the channel is created without an
+    /// initial value — callers must `await` the first `changed()`.
+    pub async fn set_ktls_reload_handle(
+        &self,
+    ) -> Result<watch::Receiver<Arc<ServerConfig>>, GatewayError> {
+        let current = self
+            .current_config
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| {
+                GatewayError::Internal(
+                    "ACME manager: cannot register kTLS reload handle before initial cert load"
+                        .into(),
+                )
+            })?;
+        let (tx, rx) = watch::channel(current);
+        *self.ktls_reload_tx.write().await = Some(tx);
+        tracing::info!(
+            "kTLS hot-reload handle registered — cert renewals will refresh the in-kernel \
+             cipher state on the next connection"
+        );
+        Ok(rx)
     }
 
     /// Map the configured `key_type` string to the corresponding rcgen
@@ -334,6 +390,14 @@ impl AcmeManager {
             b"http/1.1".to_vec(),
             ACME_TLS_ALPN_NAME.to_vec(),
         ];
+        // Enable secret extraction so the kTLS upgrade can read the
+        // negotiated cipher state. The bit is sticky for the lifetime
+        // of this ServerConfig instance; downstream consumers that
+        // don't use kTLS are unaffected — rustls just allows the
+        // extraction API, it doesn't expose anything proactively.
+        if self.enable_secret_extraction {
+            server_config.enable_secret_extraction = true;
+        }
 
         if let Some(mtime) = primary_mtime {
             *self.last_cert_mtime.write().await = Some(mtime);
@@ -345,8 +409,16 @@ impl AcmeManager {
         // Push the new config into the live TLS listener so it takes
         // effect on the next handshake — no gateway restart required.
         if let Some(ref handle) = *self.tls_reload_handle.read().await {
-            handle.reload_from_config(new_config);
+            handle.reload_from_config(Arc::clone(&new_config));
             tracing::info!("TLS listener hot-reloaded with new certificate");
+        }
+        // Same notion for the kTLS path: `send_replace` swaps the
+        // value seen by every active `Receiver`. The accept loop
+        // re-reads on its next connection. If there are no receivers
+        // (no kTLS listener wired) we silently no-op.
+        if let Some(ref tx) = *self.ktls_reload_tx.read().await {
+            let _ = tx.send_replace(new_config);
+            tracing::info!("kTLS listener observed new certificate via watch channel");
         }
 
         Ok(true)

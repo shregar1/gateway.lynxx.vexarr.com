@@ -505,9 +505,16 @@ async fn async_main() -> anyhow::Result<()> {
     // challenge handler route and have a ServerConfig ready for bind.
     let acme_manager: Option<Arc<crate::proxy::acme::AcmeManager>> = if config.gateway.acme.enabled
     {
-        let mgr = Arc::new(crate::proxy::acme::AcmeManager::new(
-            config.gateway.acme.clone(),
-        ));
+        let mut mgr = crate::proxy::acme::AcmeManager::new(config.gateway.acme.clone());
+        // Bake kTLS-friendly secret extraction into the ServerConfig
+        // builds inside the manager BEFORE init() runs — flipping the
+        // flag after the initial cert load would leave the in-memory
+        // ServerConfig opted out of secret extraction, and the kTLS
+        // upgrade would fail until the first renewal.
+        if config.gateway.tls.kernel_tls && crate::proxy::ktls_listener::supported_on_host() {
+            mgr.enable_kernel_tls();
+        }
+        let mgr = Arc::new(mgr);
         match mgr.init().await {
             Ok(true) => {
                 tracing::info!("ACME cert manager initialised with certificate");
@@ -985,28 +992,55 @@ async fn async_main() -> anyhow::Result<()> {
 
     if acme_has_cert {
         let mgr = acme_manager.as_ref().unwrap();
-        let server_config = mgr.server_config().await?;
-        if config.gateway.tls.kernel_tls {
-            tracing::warn!(
-                "kernel_tls=true is ignored on the ACME cert path in this release. \
-                 The ACME-managed server config is consumed by axum-server and the \
-                 post-handshake hook needed for kTLS isn't wired through it yet — \
-                 see src/proxy/ktls_listener.rs for the follow-up plan."
+
+        // ACME + kTLS path: register a watch channel with the manager
+        // so cert renewals reach the kTLS listener, then run our
+        // custom accept loop instead of axum-server. The standard arm
+        // below fetches `server_config()` directly because axum-server
+        // takes an owned `Arc`; the kTLS arm doesn't need it because
+        // `set_ktls_reload_handle` primes a Receiver with the current
+        // config internally.
+        if config.gateway.tls.kernel_tls
+            && crate::proxy::ktls_listener::supported_on_host()
+        {
+            crate::proxy::ktls_listener::register_ktls_metrics();
+            let config_rx = mgr.set_ktls_reload_handle().await?;
+            tracing::info!(
+                "proxy listening on {proxy_addr} (TLS via ACME, kernel TLS offload enabled, \
+                 domains={:?})",
+                config.gateway.acme.domains
             );
+            let handle = crate::proxy::ktls_listener::KtlsHandle::new();
+            let shutdown_handle = handle.clone();
+            let serve = crate::proxy::ktls_listener::serve(
+                proxy_listener,
+                config_rx,
+                proxy_app,
+                handle,
+            );
+            run_select!(serve, Some(shutdown_handle));
+        } else {
+            if config.gateway.tls.kernel_tls {
+                tracing::warn!(
+                    "kernel_tls=true requested on the ACME path but the host is not Linux; \
+                     falling back to userspace TLS via axum-server."
+                );
+            }
+            let server_config = mgr.server_config().await?;
+            tracing::info!(
+                "proxy listening on {proxy_addr} (TLS via ACME, domains={:?})",
+                config.gateway.acme.domains
+            );
+            let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
+            mgr.set_tls_reload_handle(rustls_cfg.clone()).await;
+            let handle = axum_server::Handle::new();
+            let shutdown_handle = handle.clone();
+            let std_listener = proxy_listener.into_std()?;
+            let serve = axum_server::from_tcp_rustls(std_listener, rustls_cfg)
+                .handle(handle)
+                .serve(proxy_app.into_make_service());
+            run_select!(serve, Some(shutdown_handle));
         }
-        tracing::info!(
-            "proxy listening on {proxy_addr} (TLS via ACME, domains={:?})",
-            config.gateway.acme.domains
-        );
-        let rustls_cfg = axum_server::tls_rustls::RustlsConfig::from_config(server_config);
-        mgr.set_tls_reload_handle(rustls_cfg.clone()).await;
-        let handle = axum_server::Handle::new();
-        let shutdown_handle = handle.clone();
-        let std_listener = proxy_listener.into_std()?;
-        let serve = axum_server::from_tcp_rustls(std_listener, rustls_cfg)
-            .handle(handle)
-            .serve(proxy_app.into_make_service());
-        run_select!(serve, Some(shutdown_handle));
     } else if config.gateway.tls.enabled {
         // kTLS opt-in: bypass axum-server entirely and run the custom
         // accept loop that upgrades each connection to kernel TLS after
@@ -1015,6 +1049,7 @@ async fn async_main() -> anyhow::Result<()> {
         if config.gateway.tls.kernel_tls
             && crate::proxy::ktls_listener::supported_on_host()
         {
+            crate::proxy::ktls_listener::register_ktls_metrics();
             let server_config =
                 crate::proxy::ktls_listener::build_server_config_for_ktls(&config.gateway.tls)?;
             tracing::info!(
@@ -1025,16 +1060,25 @@ async fn async_main() -> anyhow::Result<()> {
                     ""
                 }
             );
-            let server_config = Arc::new(server_config);
+            // Static-cert path: build a watch channel with the single
+            // never-changing ServerConfig. Holding the Sender keeps the
+            // Receiver alive for the listener's lifetime.
+            let (config_tx, config_rx) =
+                tokio::sync::watch::channel(Arc::new(server_config));
             let handle = crate::proxy::ktls_listener::KtlsHandle::new();
             let shutdown_handle = handle.clone();
             let serve = crate::proxy::ktls_listener::serve(
                 proxy_listener,
-                server_config,
+                config_rx,
                 proxy_app,
                 handle,
             );
             run_select!(serve, Some(shutdown_handle));
+            // Keep `config_tx` alive across the serve future. The Drop
+            // would close the watch channel and cause the listener
+            // future to error; tying it to this scope via a no-op
+            // `drop` keeps the borrow checker satisfied.
+            drop(config_tx);
         } else {
             if config.gateway.tls.kernel_tls {
                 tracing::warn!(
