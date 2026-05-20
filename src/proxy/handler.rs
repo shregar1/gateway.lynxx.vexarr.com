@@ -319,7 +319,7 @@ pub async fn proxy_handler(
         let route = state
             .route_table
             .match_route_for_service(&svc.id, path, method)
-            .unwrap_or_else(|| crate::models::Route::passthrough(svc.id));
+            .unwrap_or_else(|| std::sync::Arc::new(crate::models::Route::passthrough(svc.id)));
         Some((route, svc))
     });
 

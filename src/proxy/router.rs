@@ -31,7 +31,15 @@ struct RouteCache {
 
 pub struct RouteTable {
     services: DashMap<Uuid, Service, FastHasher>,
-    routes: DashMap<Uuid, Route, FastHasher>,
+    /// Routes are stored behind `Arc` so the hot-path lookups
+    /// (`match_route`, `match_route_full`, `match_route_for_service`,
+    /// `get_route`, `list_routes`) can return cheap refcount bumps
+    /// instead of deep-cloning the whole `Route` struct (Vec<String>
+    /// for paths, HashMap<String, String> for headers, …). Mutations
+    /// go through full replacement — inserts allocate a new `Arc`,
+    /// drops decrement the refcount; in-place mutation is not part of
+    /// the API and was never supported.
+    routes: DashMap<Uuid, Arc<Route>, FastHasher>,
     /// Exact-path index: `path` -> `route_id` for routes whose `paths` entries
     /// are literal (no trailing `*`). The hot path consults this first to turn
     /// route matching from O(N) into O(1) for the common "exact path" case.
@@ -114,6 +122,13 @@ impl RouteTable {
         }
     }
 
+    /// Materialise an `Arc<Route>` clone if the entry exists. Helper
+    /// for the many lookup methods — keeps the borrow on the DashMap
+    /// entry short.
+    fn arc_route(&self, id: &Uuid) -> Option<Arc<Route>> {
+        self.routes.get(id).map(|r| Arc::clone(r.value()))
+    }
+
     fn rebuild_host_index(&self) {
         self.host_index.clear();
         for entry in self.services.iter() {
@@ -144,8 +159,7 @@ impl RouteTable {
         service_id: &Uuid,
         path: &str,
         method: &str,
-    ) -> Option<Route> {
-        let mut best: Option<Route> = None;
+    ) -> Option<Arc<Route>> {
         for entry in self.routes.iter() {
             let route = entry.value();
             if &route.service_id != service_id {
@@ -159,10 +173,9 @@ impl RouteTable {
             if !method_matches {
                 continue;
             }
-            best = Some(route.clone());
-            break;
+            return Some(Arc::clone(route));
         }
-        best
+        None
     }
 
     /// Per-request path-match for one route. Hot path — must not
@@ -204,8 +217,8 @@ impl RouteTable {
         for svc in &services {
             self.services.insert(svc.id, svc.clone());
         }
-        for route in &routes {
-            self.routes.insert(route.id, route.clone());
+        for route in routes.iter() {
+            self.routes.insert(route.id, Arc::new(route.clone()));
         }
         self.rebuild_exact_index();
         self.rebuild_host_index();
@@ -271,17 +284,17 @@ impl RouteTable {
         if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
             self.regex_cache.insert(id, Self::compile_cache_for(&route));
         }
-        self.routes.insert(id, route);
+        self.routes.insert(id, Arc::new(route));
         self.rebuild_exact_index();
         id
     }
 
-    pub fn get_route(&self, id: &Uuid) -> Option<Route> {
-        self.routes.get(id).map(|r| r.clone())
+    pub fn get_route(&self, id: &Uuid) -> Option<Arc<Route>> {
+        self.arc_route(id)
     }
 
-    pub fn list_routes(&self) -> Vec<Route> {
-        self.routes.iter().map(|r| r.clone()).collect()
+    pub fn list_routes(&self) -> Vec<Arc<Route>> {
+        self.routes.iter().map(|r| Arc::clone(r.value())).collect()
     }
 
     pub fn update_route(&self, id: &Uuid, route: Route) -> bool {
@@ -292,7 +305,7 @@ impl RouteTable {
             } else {
                 self.regex_cache.remove(id);
             }
-            self.routes.insert(*id, route);
+            self.routes.insert(*id, Arc::new(route));
             self.rebuild_exact_index();
             true
         } else {
@@ -314,7 +327,7 @@ impl RouteTable {
         path: &str,
         method: &str,
         host: Option<&str>,
-    ) -> Option<(Route, Service)> {
+    ) -> Option<(Arc<Route>, Service)> {
         self.match_route_full(path, method, host, None, None)
     }
 
@@ -326,7 +339,7 @@ impl RouteTable {
         host: Option<&str>,
         req_headers: Option<&axum::http::HeaderMap>,
         query_string: Option<&str>,
-    ) -> Option<(Route, Service)> {
+    ) -> Option<(Arc<Route>, Service)> {
         // Fast path: exact-path lookup. Avoids the O(N) scan for the common
         // case of a busy API with literal route paths.
         if let Some(id_ref) = self.exact_index.get(path) {
@@ -345,14 +358,14 @@ impl RouteTable {
                     route.query_params.is_empty() || match_query(&route.query_params, query_string);
                 if method_matches && host_matches && headers_match && query_match {
                     if let Some(service) = self.get_service(&route.service_id) {
-                        return Some((route.clone(), service));
+                        return Some((Arc::clone(route), service));
                     }
                 }
             }
         }
 
         // Prefer routes with explicit host constraints over wildcard ones.
-        let mut best: Option<(Route, Service)> = None;
+        let mut best: Option<(Arc<Route>, Service)> = None;
         let mut best_has_hosts = false;
 
         for entry in self.routes.iter() {
@@ -389,11 +402,11 @@ impl RouteTable {
 
             let has_hosts = !route.hosts.is_empty();
             if has_hosts && !best_has_hosts {
-                best = Some((route.clone(), self.get_service(&route.service_id)?));
+                best = Some((Arc::clone(route), self.get_service(&route.service_id)?));
                 best_has_hosts = true;
             } else if best.is_none() {
                 if let Some(service) = self.get_service(&route.service_id) {
-                    best = Some((route.clone(), service));
+                    best = Some((Arc::clone(route), service));
                     best_has_hosts = has_hosts;
                 }
             }
