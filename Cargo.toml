@@ -78,6 +78,9 @@ hyper-util = { version = "0.1", features = ["full"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-tokio", "native-tokio"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 num_cpus = "1"
+# Pin each tokio worker thread to a specific core for better L1/L2
+# cache locality. No-op on platforms without the affinity API.
+core_affinity = "0.8"
 # `rc` feature enables Deserialize/Serialize for Arc<T> and Rc<T>, which we
 # rely on to use `Arc<str>` for model fields that are heavily cloned on the
 # proxy hot path (Service.name, Target.url). Without `rc` we'd need a
