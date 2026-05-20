@@ -172,14 +172,68 @@ pub fn register_ktls_metrics() {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use crate::utilities::io_uring_accept::AcceptedConn;
     use axum::Router;
     use hyper_util::rt::{TokioExecutor, TokioIo};
     use hyper_util::server::conn::auto::Builder as ConnBuilder;
     use hyper_util::service::TowerToHyperService;
     use rustls::ServerConfig;
+    use std::net::SocketAddr;
     use std::time::Instant;
+    use tokio::sync::mpsc::UnboundedReceiver;
     use tokio::task::JoinSet;
     use tokio_rustls::TlsAcceptor;
+
+    /// Source of accepted TCP connections for the kTLS accept loop.
+    /// Two variants:
+    ///
+    /// * `Tokio` — call `TcpListener::accept().await` in the select
+    ///   arm. The standard, always-available path.
+    /// * `Channel` — receive accepted FDs from a `tokio::sync::mpsc`
+    ///   receiver fed by an `io_uring` thread (see
+    ///   `crate::utilities::io_uring_accept`). We hold the
+    ///   `TcpListener` here too, **not to accept from it**, but to
+    ///   keep the listener FD valid for the io_uring SQEs that
+    ///   reference it. Dropping the listener would close the FD and
+    ///   the kernel would deliver `-EBADF` CQEs ever after.
+    enum AcceptSource {
+        Tokio(TcpListener),
+        Channel {
+            _listener: TcpListener,
+            rx: UnboundedReceiver<AcceptedConn>,
+        },
+    }
+
+    impl AcceptSource {
+        async fn next_conn(
+            &mut self,
+        ) -> Result<(tokio::net::TcpStream, SocketAddr), std::io::Error> {
+            match self {
+                AcceptSource::Tokio(l) => l.accept().await,
+                AcceptSource::Channel { rx, .. } => match rx.recv().await {
+                    Some(conn) => {
+                        // Rebuild a tokio TcpStream from the FD the
+                        // io_uring thread just handed us. The FD is
+                        // owned by us from here on; from_std + the
+                        // std stream's drop semantics ensure it's
+                        // closed exactly once.
+                        let std_stream = unsafe {
+                            crate::utilities::io_uring_accept::fd_to_std_stream(conn.fd)
+                        };
+                        std_stream.set_nonblocking(true)?;
+                        let peer = std_stream
+                            .peer_addr()
+                            .unwrap_or_else(|_| ([0, 0, 0, 0], 0).into());
+                        let stream = tokio::net::TcpStream::from_std(std_stream)?;
+                        Ok((stream, peer))
+                    }
+                    None => Err(std::io::Error::other(
+                        "io_uring accept channel closed; the acceptor thread exited",
+                    )),
+                },
+            }
+        }
+    }
 
     /// Serve `app` over kTLS-offloaded TLS on `listener` until
     /// `handle` is signalled. Returns when the accept loop exits and
@@ -191,6 +245,38 @@ mod linux {
     /// loop reads the latest on each new connection.
     pub async fn serve(
         listener: TcpListener,
+        config_rx: watch::Receiver<Arc<ServerConfig>>,
+        app: Router,
+        handle: KtlsHandle,
+    ) -> Result<(), std::io::Error> {
+        serve_inner(AcceptSource::Tokio(listener), config_rx, app, handle).await
+    }
+
+    /// Same as [`serve`], but pulls accepted FDs from `io_uring_rx`
+    /// instead of `listener.accept()`. The `listener` is held so its
+    /// FD stays alive — the io_uring acceptor thread, owned by the
+    /// caller, references it via raw FD.
+    pub async fn serve_with_io_uring(
+        listener: TcpListener,
+        io_uring_rx: UnboundedReceiver<AcceptedConn>,
+        config_rx: watch::Receiver<Arc<ServerConfig>>,
+        app: Router,
+        handle: KtlsHandle,
+    ) -> Result<(), std::io::Error> {
+        serve_inner(
+            AcceptSource::Channel {
+                _listener: listener,
+                rx: io_uring_rx,
+            },
+            config_rx,
+            app,
+            handle,
+        )
+        .await
+    }
+
+    async fn serve_inner(
+        mut source: AcceptSource,
         mut config_rx: watch::Receiver<Arc<ServerConfig>>,
         app: Router,
         handle: KtlsHandle,
@@ -211,7 +297,11 @@ mod linux {
         let conn_builder = Arc::new(ConnBuilder::new(TokioExecutor::new()));
         let mut tasks: JoinSet<()> = JoinSet::new();
 
-        tracing::info!("kTLS listener accept loop started");
+        let source_label = match &source {
+            AcceptSource::Tokio(_) => "tokio",
+            AcceptSource::Channel { .. } => "io_uring",
+        };
+        tracing::info!(accept_source = source_label, "kTLS listener accept loop started");
 
         loop {
             tokio::select! {
@@ -223,11 +313,19 @@ mod linux {
                 // Reap completed tasks opportunistically so the JoinSet
                 // doesn't grow unboundedly during normal operation.
                 Some(_done) = tasks.join_next(), if !tasks.is_empty() => {}
-                accept = listener.accept() => {
+                accept = source.next_conn() => {
                     let (tcp, peer) = match accept {
                         Ok(v) => v,
                         Err(e) => {
                             tracing::warn!(error = %e, "kTLS listener: accept error, continuing");
+                            // If the io_uring channel closed permanently,
+                            // bail out instead of busy-looping. The Tokio
+                            // accept path keeps retrying as before.
+                            if matches!(&source, AcceptSource::Channel { .. })
+                                && e.kind() == std::io::ErrorKind::Other
+                            {
+                                return Err(e);
+                            }
                             continue;
                         }
                     };
@@ -379,7 +477,7 @@ mod linux {
 }
 
 #[cfg(target_os = "linux")]
-pub use linux::serve;
+pub use linux::{serve, serve_with_io_uring};
 
 // ---------------------------------------------------------------------
 // Non-Linux stub

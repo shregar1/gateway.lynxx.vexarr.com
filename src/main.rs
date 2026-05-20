@@ -143,6 +143,83 @@ fn apply_cli_overrides(config: &mut GatewayConfig, args: &Args) {
     }
 }
 
+/// Suffix appended to the proxy-listener startup log line when
+/// io_uring accept-thread plumbing is engaged. Empty when off so the
+/// existing log format is preserved.
+fn io_uring_log_suffix(cfg: &crate::config::IoUringConfig) -> &'static str {
+    if cfg.accept_thread_enabled {
+        ", io_uring accept thread requested"
+    } else {
+        ""
+    }
+}
+
+/// Linux: probe io_uring + spawn the dedicated accept thread when the
+/// operator opted in and the kernel supports it. Returns the live
+/// acceptor + receiver pair, or `None` when the feature is off or the
+/// probe failed (in which case we log a warning and the caller falls
+/// back to the standard `tokio::net::TcpListener::accept` path).
+///
+/// The acceptor must outlive the `serve_with_io_uring` future — its
+/// drop signals the SQ/CQ thread to exit. Keeping the returned value
+/// bound in the surrounding scope guarantees that ordering.
+#[cfg(target_os = "linux")]
+fn maybe_spawn_io_uring_acceptor(
+    listener: &tokio::net::TcpListener,
+    cfg: &crate::config::IoUringConfig,
+) -> Option<(
+    crate::utilities::io_uring_accept::IoUringAcceptor,
+    tokio::sync::mpsc::UnboundedReceiver<crate::utilities::io_uring_accept::AcceptedConn>,
+)> {
+    use crate::utilities::io_uring_accept::{self, Available};
+    use std::os::fd::AsRawFd;
+
+    if !cfg.accept_thread_enabled {
+        return None;
+    }
+    match io_uring_accept::probe() {
+        Available::Yes => {
+            let fd = listener.as_raw_fd();
+            match io_uring_accept::IoUringAcceptor::start(fd, cfg.ring_entries) {
+                Ok((acceptor, rx)) => {
+                    tracing::info!(
+                        ring_entries = cfg.ring_entries,
+                        "io_uring accept thread started (fd={fd})"
+                    );
+                    Some((acceptor, rx))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to start io_uring acceptor; falling back to tokio accept"
+                    );
+                    None
+                }
+            }
+        }
+        Available::Unavailable(reason) => {
+            tracing::warn!(
+                reason = %reason,
+                "io_uring not available on this host; falling back to tokio accept"
+            );
+            None
+        }
+    }
+}
+
+/// Non-Linux: just emit a one-shot warning when the operator asked
+/// for io_uring on a platform that can't deliver it, so the
+/// missing speedup isn't a silent surprise.
+#[cfg(not(target_os = "linux"))]
+fn log_io_uring_unavailable_if_requested(cfg: &crate::config::IoUringConfig) {
+    if cfg.accept_thread_enabled {
+        tracing::warn!(
+            "[gateway.io_uring].accept_thread_enabled = true but this build is not Linux; \
+             io_uring acceleration ignored. Rebuild on Linux to enable."
+        );
+    }
+}
+
 /// Explicit runtime construction. Beats `#[tokio::main]` for high-RPS proxy
 /// workloads because we can size the worker pool to physical cores and name
 /// the threads (helps `perf` / flamegraphs). Kept simple — no thread pinning,
@@ -1005,19 +1082,50 @@ async fn async_main() -> anyhow::Result<()> {
         {
             crate::proxy::ktls_listener::register_ktls_metrics();
             let config_rx = mgr.set_ktls_reload_handle().await?;
-            tracing::info!(
-                "proxy listening on {proxy_addr} (TLS via ACME, kernel TLS offload enabled, \
-                 domains={:?})",
-                config.gateway.acme.domains
-            );
             let handle = crate::proxy::ktls_listener::KtlsHandle::new();
             let shutdown_handle = handle.clone();
+
+            #[cfg(target_os = "linux")]
+            let _io_uring_acceptor = maybe_spawn_io_uring_acceptor(
+                &proxy_listener,
+                &config.gateway.io_uring,
+            );
+            #[cfg(not(target_os = "linux"))]
+            log_io_uring_unavailable_if_requested(&config.gateway.io_uring);
+
+            tracing::info!(
+                "proxy listening on {proxy_addr} (TLS via ACME, kernel TLS offload enabled{}, \
+                 domains={:?})",
+                io_uring_log_suffix(&config.gateway.io_uring),
+                config.gateway.acme.domains
+            );
+
+            #[cfg(target_os = "linux")]
+            let serve = match _io_uring_acceptor {
+                Some((_, rx)) => Box::pin(
+                    crate::proxy::ktls_listener::serve_with_io_uring(
+                        proxy_listener,
+                        rx,
+                        config_rx,
+                        proxy_app,
+                        handle,
+                    ),
+                ) as std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>,
+                None => Box::pin(crate::proxy::ktls_listener::serve(
+                    proxy_listener,
+                    config_rx,
+                    proxy_app,
+                    handle,
+                )),
+            };
+            #[cfg(not(target_os = "linux"))]
             let serve = crate::proxy::ktls_listener::serve(
                 proxy_listener,
                 config_rx,
                 proxy_app,
                 handle,
             );
+
             run_select!(serve, Some(shutdown_handle));
         } else {
             if config.gateway.tls.kernel_tls {
@@ -1052,14 +1160,6 @@ async fn async_main() -> anyhow::Result<()> {
             crate::proxy::ktls_listener::register_ktls_metrics();
             let server_config =
                 crate::proxy::ktls_listener::build_server_config_for_ktls(&config.gateway.tls)?;
-            tracing::info!(
-                "proxy listening on {proxy_addr} (TLS{}, kernel TLS offload enabled)",
-                if config.gateway.tls.mtls_enabled() {
-                    ", mTLS"
-                } else {
-                    ""
-                }
-            );
             // Static-cert path: build a watch channel with the single
             // never-changing ServerConfig. Holding the Sender keeps the
             // Receiver alive for the listener's lifetime.
@@ -1067,12 +1167,56 @@ async fn async_main() -> anyhow::Result<()> {
                 tokio::sync::watch::channel(Arc::new(server_config));
             let handle = crate::proxy::ktls_listener::KtlsHandle::new();
             let shutdown_handle = handle.clone();
+
+            // Optional io_uring accept thread (Linux-only). When the
+            // probe says yes and the operator opted in, we replace the
+            // tokio accept call with a channel fed by `IoUringAcceptor`.
+            // The acceptor + listener must outlive the serve future,
+            // so they're bound in this scope.
+            #[cfg(target_os = "linux")]
+            let _io_uring_acceptor = maybe_spawn_io_uring_acceptor(
+                &proxy_listener,
+                &config.gateway.io_uring,
+            );
+            #[cfg(not(target_os = "linux"))]
+            log_io_uring_unavailable_if_requested(&config.gateway.io_uring);
+
+            tracing::info!(
+                "proxy listening on {proxy_addr} (TLS{}, kernel TLS offload enabled{})",
+                if config.gateway.tls.mtls_enabled() {
+                    ", mTLS"
+                } else {
+                    ""
+                },
+                io_uring_log_suffix(&config.gateway.io_uring),
+            );
+
+            #[cfg(target_os = "linux")]
+            let serve = match _io_uring_acceptor {
+                Some((_, rx)) => Box::pin(
+                    crate::proxy::ktls_listener::serve_with_io_uring(
+                        proxy_listener,
+                        rx,
+                        config_rx,
+                        proxy_app,
+                        handle,
+                    ),
+                ) as std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>,
+                None => Box::pin(crate::proxy::ktls_listener::serve(
+                    proxy_listener,
+                    config_rx,
+                    proxy_app,
+                    handle,
+                )),
+            };
+            #[cfg(not(target_os = "linux"))]
             let serve = crate::proxy::ktls_listener::serve(
                 proxy_listener,
                 config_rx,
                 proxy_app,
                 handle,
             );
+
             run_select!(serve, Some(shutdown_handle));
             // Keep `config_tx` alive across the serve future. The Drop
             // would close the watch channel and cause the listener
