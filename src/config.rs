@@ -98,6 +98,13 @@ pub struct GatewaySettings {
     #[serde(default)]
     pub tls: TlsSettings,
 
+    /// io_uring acceleration for the proxy listener. Linux-only, opt-in.
+    /// See [`IoUringConfig`] and `docs/IO_URING.md`. Effective only when
+    /// `[gateway.tls].kernel_tls = true` (i.e. on the custom kTLS accept
+    /// loop) — the standard axum-server accept loop ignores this block.
+    #[serde(default)]
+    pub io_uring: IoUringConfig,
+
     /// ACME / automatic certificate provisioning. When enabled, the
     /// gateway manages its own TLS certificates — loading from disk,
     /// generating self-signed certs for dev, serving HTTP-01 +
@@ -740,6 +747,56 @@ pub struct ProvidersConfig {
     pub docker_swarm: crate::discovery::docker_swarm::DockerSwarmProviderConfig,
 }
 
+/// io_uring acceleration for the proxy listener.
+///
+/// Linux-only. On macOS / Windows this block is silently ignored;
+/// the warning is logged once at startup if `accept_thread_enabled`
+/// is set on a non-Linux host so operators aren't confused by the
+/// missing speedup.
+///
+/// Effective only on the **kTLS accept loop** (i.e. when
+/// `[gateway.tls].kernel_tls = true`). The standard `axum-server`
+/// path owns its own accept loop and there is no clean hook to
+/// inject an io_uring-backed FD source there — see `docs/IO_URING.md`
+/// for the rationale. Operators who want io_uring accept should
+/// enable both `kernel_tls` and `io_uring.accept_thread_enabled`
+/// together.
+///
+/// What this delivers: replaces one `accept4(2)` syscall per inbound
+/// connection with a batched `io_uring_enter` SQE submission. Bounded
+/// gain (~1-3% RPS) on connection-storm workloads, near-zero on
+/// steady-state persistent connections.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct IoUringConfig {
+    /// Spin up a dedicated `std::thread` that owns an io_uring SQ/CQ
+    /// pair and pushes `IORING_OP_ACCEPT` SQEs against the proxy
+    /// listener FD. Accepted FDs are handed to the tokio runtime via
+    /// an `mpsc` channel. Default: `false` (off).
+    #[serde(default)]
+    pub accept_thread_enabled: bool,
+
+    /// SQ/CQ ring size. 64 is plenty for an accept loop; the kernel
+    /// rounds up to a power of two. Floored to 8 if smaller; no
+    /// hard ceiling (kernel will reject absurd values with EINVAL
+    /// at `io_uring_setup` time, which we log and fall back to the
+    /// tokio path). Default: `64`.
+    #[serde(default = "default_io_uring_ring_entries")]
+    pub ring_entries: u32,
+}
+
+fn default_io_uring_ring_entries() -> u32 {
+    64
+}
+
+impl Default for IoUringConfig {
+    fn default() -> Self {
+        Self {
+            accept_thread_enabled: false,
+            ring_entries: default_io_uring_ring_entries(),
+        }
+    }
+}
+
 /// Inbound TLS termination knobs. When `enabled = false` (the default)
 /// the proxy port serves plain HTTP exactly as before. When set, the
 /// listener binds via `axum_server::bind_rustls` using the provided
@@ -1076,6 +1133,7 @@ fn default_gateway() -> GatewaySettings {
         health_circuit_success_threshold: default_hc_success_threshold(),
         health_circuit_open_duration_ms: default_hc_open_duration(),
         tls: TlsSettings::default(),
+        io_uring: IoUringConfig::default(),
         acme: AcmeConfig::default(),
         providers: ProvidersConfig::default(),
         pool_max_idle_per_host: default_pool_max_idle(),

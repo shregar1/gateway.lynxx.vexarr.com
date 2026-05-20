@@ -46,20 +46,34 @@ discussed below in **Roadmap**.
 
 ## When to enable
 
-Opt in via the (forthcoming) config knob:
+Opt in via the config block:
 
 ```toml
+[gateway.tls]
+enabled = true
+kernel_tls = true            # required — io_uring wires into the kTLS accept loop only
+
 [gateway.io_uring]
 accept_thread_enabled = true   # default false
-ring_entries = 64              # SQ/CQ size; floor 8, ceiling unbounded
+ring_entries = 64              # SQ/CQ size; floor 8, kernel rounds to power-of-two
 ```
 
-This release ships the module + probe + acceptor — the wiring into
-the proxy listener is gated behind a follow-up PR that plugs it into
-the custom accept loop introduced in the kTLS PR. The two features
-compose: the kTLS listener's accept loop reads from
-`mpsc::Receiver<AcceptedConn>` when `accept_thread_enabled = true`,
-otherwise from `tokio::net::TcpListener::accept().await` as today.
+The two features compose: the kTLS listener's accept loop pulls
+accepted FDs from `mpsc::UnboundedReceiver<AcceptedConn>` when
+`accept_thread_enabled = true` and the runtime probe succeeds;
+otherwise it falls back to `tokio::net::TcpListener::accept().await`
+as before. The kTLS upgrade pathway is unchanged either way — the
+FD source is the only thing that swaps.
+
+**Effective only on the kTLS accept loop.** The standard
+`axum-server` path owns its own internal accept loop and there's no
+clean hook to swap the FD source. Setting
+`io_uring.accept_thread_enabled = true` with `kernel_tls = false`
+is therefore a no-op; we don't currently log a warning for the
+mismatch but that's a small follow-up if operators want louder
+feedback. The runtime probe always logs its decision so the
+"is io_uring engaged?" question is answerable from a fresh startup
+log.
 
 Recommended scenarios:
 
@@ -210,20 +224,30 @@ optimisation for accept-heavy listeners today.
 
 ## Verification status
 
-* `cargo check --bin lynxx-gateway` clean on macOS (module is
-  `#[cfg(target_os = "linux")]`).
+* `cargo check --bin lynxx-gateway` clean on macOS (the io_uring
+  module is `#[cfg(target_os = "linux")]`; macOS sees no symbols).
 * `cargo clippy --bin lynxx-gateway -- -D warnings` clean.
-* 3 unit tests covering the public API surface (probe, `Available`
-  helpers, struct construction). Linux runtime verification is
-  deferred — requires a kernel with `io_uring_setup` available and a
-  listener under traffic load.
-* No wiring into the proxy listener in this PR. Integration lands in
-  a follow-up PR after the kTLS listener (PR #8) merges; the two
-  features share the custom accept loop.
+* 3 unit tests covering the io_uring public API surface (probe,
+  `Available` helpers, struct construction). Run only on Linux due
+  to the module cfg-gate.
+* **Integrated into the kTLS listener.** When
+  `[gateway.tls].kernel_tls = true` and
+  `[gateway.io_uring].accept_thread_enabled = true` on a Linux host
+  whose `probe()` returns `Available::Yes`, the kTLS listener's
+  accept loop pulls from `IoUringAcceptor`'s channel instead of
+  `TcpListener::accept().await`. On any other combination the
+  standard tokio accept path runs and a warning is logged when the
+  feature was requested but isn't usable.
+* Linux runtime verification is deferred — requires a kernel with
+  `io_uring_setup` available and a listener under traffic load. The
+  failure modes (probe says no, acceptor fails to start, channel
+  closes mid-flight) all fall back cleanly to either tokio accept
+  or a listener-level error; no silent regression path.
 
 ## Metric exposed
 
 `lynxx_io_uring_accepted_total` (counter, no labels) — bumped once
-per CQE batch on the accept thread. When the integration lands, this
-will be the canonical "is io_uring actually accepting anything?"
-signal for operators.
+per CQE batch on the accept thread. The canonical "is io_uring
+actually accepting anything?" signal for operators. Pair with
+`lynxx_ktls_upgrade_total` to see the full per-connection picture
+on a deployment that runs both features.
