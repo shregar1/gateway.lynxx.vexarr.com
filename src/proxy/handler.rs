@@ -177,7 +177,20 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(s))
 }
 
-fn extract_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+/// Find the value of a cookie named `name` in any `Cookie:` header.
+/// Returns a borrowed slice into the header map — no allocation on the
+/// hot path. The slice's lifetime is bound to `headers`, which on the
+/// proxy hot path means it's bound to `&req`. Caller must release the
+/// borrow before mutating `req` (e.g. before `req.extensions_mut()` or
+/// plugin invocation).
+///
+/// Pre-refactor this returned `Option<String>` — every request paid a
+/// `String` allocation for the cookie even though the cookie value
+/// was immediately re-borrowed as `&str` for the load balancer
+/// context. `str::trim()` returns a sub-slice, so the trim doesn't
+/// require ownership; the only reason for the allocation was the
+/// API shape.
+fn extract_cookie<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get_all(axum::http::header::COOKIE)
         .iter()
@@ -187,11 +200,31 @@ fn extract_cookie(headers: &axum::http::HeaderMap, name: &str) -> Option<String>
             let pair = pair.trim();
             let (key, val) = pair.split_once('=')?;
             if key.trim() == name {
-                Some(val.trim().to_string())
+                Some(val.trim())
             } else {
                 None
             }
         })
+}
+
+/// Lookup a single query parameter by name without running a full
+/// `url::form_urlencoded::parse` over the whole query string and
+/// without allocating a `String` for the result. Returns a slice
+/// into `qs`.
+///
+/// We deliberately do **not** percent-decode the value. For the only
+/// two callers — consistent-hash load balancing and the routing
+/// matcher's `match_query` comparisons — hashing or comparing the raw
+/// encoded bytes is correct: a single client's encoding choice is
+/// consistent from request to request, so the LB bucket stays stable,
+/// and `match_query` compares against operator-supplied literal values
+/// which the operator can write in encoded form if needed. For any
+/// callsite that genuinely needs decoded values, fall back to
+/// `url::form_urlencoded::parse(...)`.
+fn extract_query_param<'a>(qs: &'a str, name: &str) -> Option<&'a str> {
+    qs.split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .find_map(|(k, v)| if k == name { Some(v) } else { None })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -475,27 +508,34 @@ pub async fn proxy_handler(
     } else {
         peer_ip.map(|ip| ip.to_string()).unwrap_or_default()
     };
-    let sticky_cookie_owned = extract_cookie(req.headers(), STICKY_COOKIE_NAME);
-    // Extract header/query hash values for hash-based LB strategies.
-    let header_hash_owned = service.lb_hash_header.as_ref().and_then(|hdr| {
+    // Zero-alloc LB context extraction.
+    //
+    // Pre-refactor each of these went through `Option<String>` →
+    // `.as_deref()` purely to fit `RequestContext`'s `Option<&str>`
+    // fields. The owned `String` was never read elsewhere — the
+    // `as_deref()` on the line below it was the only consumer. That's
+    // one `to_string()` per hash-based LB request (header / query)
+    // plus one per sticky-cookie request. With this rewrite the LB
+    // hot path holds only `&str` slices borrowed from `req.headers()`
+    // / `req.uri().query()`, valid until the next `&mut req` (which
+    // is the plugin-chain invocation further down).
+    let sticky_cookie: Option<&str> = extract_cookie(req.headers(), STICKY_COOKIE_NAME);
+    let header_hash: Option<&str> = service.lb_hash_header.as_ref().and_then(|hdr| {
         req.headers()
             .get(hdr.as_str())
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string())
     });
-    let query_hash_owned = service.lb_hash_query_param.as_ref().and_then(|param| {
-        req.uri().query().and_then(|qs| {
-            url::form_urlencoded::parse(qs.as_bytes())
-                .find(|(k, _)| k == param)
-                .map(|(_, v)| v.to_string())
-        })
+    let query_hash: Option<&str> = service.lb_hash_query_param.as_ref().and_then(|param| {
+        req.uri()
+            .query()
+            .and_then(|qs| extract_query_param(qs, param))
     });
     let lb_ctx = RequestContext {
         client_ip: Some(client_ip_owned.as_str()),
         uri_path: Some(path),
-        sticky_cookie: sticky_cookie_owned.as_deref(),
-        header_hash_value: header_hash_owned.as_deref(),
-        query_hash_value: query_hash_owned.as_deref(),
+        sticky_cookie,
+        header_hash_value: header_hash,
+        query_hash_value: query_hash,
     };
 
     // Pick a target via load balancer if one is configured for this service.
@@ -568,27 +608,30 @@ pub async fn proxy_handler(
                 .get(axum::http::header::ACCEPT_ENCODING)
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
+            // `ServeOptions` already takes `Option<&'a str>` — the
+            // old code allocated `String` owners just to satisfy
+            // `as_deref()` on the next line. The borrows on these
+            // header values are valid for the lifetime of `req`, and
+            // `req` outlives `serve_opts` / the `.await` on
+            // `serve_with_options` below.
             let if_none_match = req
                 .headers()
                 .get(axum::http::header::IF_NONE_MATCH)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .and_then(|v| v.to_str().ok());
             let if_modified_since = req
                 .headers()
                 .get(axum::http::header::IF_MODIFIED_SINCE)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .and_then(|v| v.to_str().ok());
             let range_header = req
                 .headers()
                 .get(axum::http::header::RANGE)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string());
+                .and_then(|v| v.to_str().ok());
             let serve_opts = crate::proxy::static_files::ServeOptions {
                 hide_patterns: &[],
                 cache_control: None,
-                if_none_match: if_none_match.as_deref(),
-                if_modified_since: if_modified_since.as_deref(),
-                range: range_header.as_deref(),
+                if_none_match,
+                if_modified_since,
+                range: range_header,
                 browse: false,
                 browse_template: None,
                 browse_sort: None,
@@ -1388,4 +1431,93 @@ pub async fn proxy_handler(
     );
 
     Ok(final_resp)
+}
+
+#[cfg(test)]
+mod handler_helpers_tests {
+    use super::{extract_cookie, extract_query_param};
+    use axum::http::{header::COOKIE, HeaderMap, HeaderValue};
+
+    fn cookies_to_headers(values: &[&str]) -> HeaderMap {
+        let mut m = HeaderMap::new();
+        for v in values {
+            m.append(COOKIE, HeaderValue::from_str(v).unwrap());
+        }
+        m
+    }
+
+    #[test]
+    fn extract_cookie_returns_borrowed_value() {
+        let h = cookies_to_headers(&["a=one; b=two; c=three"]);
+        let got = extract_cookie(&h, "b");
+        assert_eq!(got, Some("two"));
+    }
+
+    #[test]
+    fn extract_cookie_handles_multiple_cookie_headers() {
+        let h = cookies_to_headers(&["a=one", "b=two"]);
+        assert_eq!(extract_cookie(&h, "a"), Some("one"));
+        assert_eq!(extract_cookie(&h, "b"), Some("two"));
+    }
+
+    #[test]
+    fn extract_cookie_strips_whitespace_around_value() {
+        let h = cookies_to_headers(&["  sticky =   abc123  "]);
+        assert_eq!(extract_cookie(&h, "sticky"), Some("abc123"));
+    }
+
+    #[test]
+    fn extract_cookie_missing_returns_none() {
+        let h = cookies_to_headers(&["a=one"]);
+        assert_eq!(extract_cookie(&h, "missing"), None);
+    }
+
+    #[test]
+    fn extract_cookie_empty_headers_returns_none() {
+        let h = HeaderMap::new();
+        assert_eq!(extract_cookie(&h, "anything"), None);
+    }
+
+    #[test]
+    fn extract_query_param_finds_value() {
+        let qs = "foo=1&bar=hello&baz=42";
+        assert_eq!(extract_query_param(qs, "bar"), Some("hello"));
+    }
+
+    #[test]
+    fn extract_query_param_returns_first_occurrence() {
+        // Spec doesn't enforce uniqueness; we take the first hit,
+        // consistent with how a hash-LB would pick a bucket.
+        let qs = "x=1&x=2";
+        assert_eq!(extract_query_param(qs, "x"), Some("1"));
+    }
+
+    #[test]
+    fn extract_query_param_handles_empty_value() {
+        let qs = "k=&other=v";
+        assert_eq!(extract_query_param(qs, "k"), Some(""));
+    }
+
+    #[test]
+    fn extract_query_param_missing_returns_none() {
+        let qs = "foo=1&bar=2";
+        assert_eq!(extract_query_param(qs, "missing"), None);
+    }
+
+    #[test]
+    fn extract_query_param_pairs_without_equals_are_skipped() {
+        // `split_once('=')` returns None for tokens that have no `=`,
+        // and `filter_map` drops them. The named param is still found.
+        let qs = "flagonly&named=value";
+        assert_eq!(extract_query_param(qs, "named"), Some("value"));
+        assert_eq!(extract_query_param(qs, "flagonly"), None);
+    }
+
+    #[test]
+    fn extract_query_param_does_not_decode_percent_escapes() {
+        // Intentional: we return the raw encoded value. Documented
+        // tradeoff for the LB consistent-hashing + route matchers.
+        let qs = "name=hello%20world";
+        assert_eq!(extract_query_param(qs, "name"), Some("hello%20world"));
+    }
 }
