@@ -126,13 +126,19 @@ impl AcmeServer {
     /// Generate and store a fresh nonce.
     fn new_nonce(&self) -> String {
         let nonce = Uuid::new_v4().to_string();
-        self.nonces.lock().expect("nonces mutex not poisoned: only held in sync HashSet ops").insert(nonce.clone());
+        self.nonces
+            .lock()
+            .expect("nonces mutex not poisoned: only held in sync HashSet ops")
+            .insert(nonce.clone());
         nonce
     }
 
     /// Consume a nonce, returning `true` if it was valid.
     fn consume_nonce(&self, nonce: &str) -> bool {
-        self.nonces.lock().expect("nonces mutex not poisoned: only held in sync HashSet ops").remove(nonce)
+        self.nonces
+            .lock()
+            .expect("nonces mutex not poisoned: only held in sync HashSet ops")
+            .remove(nonce)
     }
 
     /// Sign a CSR (DER bytes) using the intermediate CA and return the

@@ -4,8 +4,8 @@ use crate::auth::{generate_token, hash_token, AdminToken, Role};
 use crate::cluster::{ChangeEvent, ClusterBus};
 use crate::db::{AdminTokenPatch, LogFilter, NewAdminToken, Repository};
 use crate::error::{GatewayError, PluginError};
-use crate::integrations::abstraction::VerifierError;
 use crate::health::{HealthRegistry, ServiceHealth, StatusCache};
+use crate::integrations::abstraction::VerifierError;
 use crate::models::{Consumer, LogEntry, PluginInstance, Project, Route, Service, Target};
 use crate::plugins::PluginExecutor;
 use crate::proxy::http_client::ProxyClientPool;
@@ -1921,15 +1921,19 @@ pub async fn auth_sign_in(
     State(state): State<AdminState>,
     headers: HeaderMap,
 ) -> Result<Json<SignInResponse>, GatewayError> {
-    let license_state = state.license_state.as_ref().ok_or_else(|| {
-        GatewayError::Internal("licence verifier not configured".into())
-    })?;
+    let license_state = state
+        .license_state
+        .as_ref()
+        .ok_or_else(|| GatewayError::Internal("licence verifier not configured".into()))?;
 
     let raw = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .map(str::trim)
-        .and_then(|s| s.strip_prefix("Bearer ").or_else(|| s.strip_prefix("bearer ")))
+        .and_then(|s| {
+            s.strip_prefix("Bearer ")
+                .or_else(|| s.strip_prefix("bearer "))
+        })
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .ok_or_else(|| {
@@ -1947,9 +1951,7 @@ pub async fn auth_sign_in(
             GatewayError::ServiceUnavailable(format!("keyx unreachable: {msg}"))
         }
         VerifierError::Malformed(msg) => GatewayError::Internal(format!("keyx malformed: {msg}")),
-        VerifierError::NotConfigured => {
-            GatewayError::Internal("verifier not configured".into())
-        }
+        VerifierError::NotConfigured => GatewayError::Internal("verifier not configured".into()),
     })?;
 
     Ok(Json(SignInResponse {

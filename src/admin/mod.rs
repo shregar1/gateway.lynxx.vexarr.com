@@ -465,8 +465,8 @@ pub fn admin_router(
 
     // ---- live config API ----
     let config_store = config_api::ConfigStore::new(gateway_config);
-    let config_sub = config_api::config_router(config_store)
-        .layer(middleware::from_fn(api_envelope));
+    let config_sub =
+        config_api::config_router(config_store).layer(middleware::from_fn(api_envelope));
 
     // ---- dashboard serving ----
     let dashboard = Router::new().fallback(dashboard_handler);

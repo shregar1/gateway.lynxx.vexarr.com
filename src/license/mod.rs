@@ -84,10 +84,7 @@ impl License {
     /// the offline cache (up to `OFFLINE_GRACE_DAYS`) on transport / HTTP
     /// failures; surfaces `Rejected` immediately when keyx confirms the
     /// key is no longer active.
-    pub async fn load(
-        api_key: &str,
-        verifier: &dyn LicenseVerifier,
-    ) -> Result<Self, LicenseError> {
+    pub async fn load(api_key: &str, verifier: &dyn LicenseVerifier) -> Result<Self, LicenseError> {
         let key = api_key.trim();
         if key.is_empty() {
             return Err(LicenseError::Missing);
@@ -229,11 +226,7 @@ impl LicenseState {
     /// never has to talk to keyx directly — every key check goes
     /// through the gateway.
     pub async fn validate_key(&self, api_key: &str) -> Result<LicenseInfo, VerifierError> {
-        self.inner
-            .refresh
-            .verifier
-            .validate_license(api_key)
-            .await
+        self.inner.refresh.verifier.validate_license(api_key).await
     }
 
     fn flip_inactive(&self, reason: &str) {

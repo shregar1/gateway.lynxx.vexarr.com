@@ -1077,19 +1077,15 @@ async fn async_main() -> anyhow::Result<()> {
         // takes an owned `Arc`; the kTLS arm doesn't need it because
         // `set_ktls_reload_handle` primes a Receiver with the current
         // config internally.
-        if config.gateway.tls.kernel_tls
-            && crate::proxy::ktls_listener::supported_on_host()
-        {
+        if config.gateway.tls.kernel_tls && crate::proxy::ktls_listener::supported_on_host() {
             crate::proxy::ktls_listener::register_ktls_metrics();
             let config_rx = mgr.set_ktls_reload_handle().await?;
             let handle = crate::proxy::ktls_listener::KtlsHandle::new();
             let shutdown_handle = handle.clone();
 
             #[cfg(target_os = "linux")]
-            let _io_uring_acceptor = maybe_spawn_io_uring_acceptor(
-                &proxy_listener,
-                &config.gateway.io_uring,
-            );
+            let _io_uring_acceptor =
+                maybe_spawn_io_uring_acceptor(&proxy_listener, &config.gateway.io_uring);
             #[cfg(not(target_os = "linux"))]
             log_io_uring_unavailable_if_requested(&config.gateway.io_uring);
 
@@ -1102,15 +1098,16 @@ async fn async_main() -> anyhow::Result<()> {
 
             #[cfg(target_os = "linux")]
             let serve = match _io_uring_acceptor {
-                Some((_, rx)) => Box::pin(
-                    crate::proxy::ktls_listener::serve_with_io_uring(
-                        proxy_listener,
-                        rx,
-                        config_rx,
-                        proxy_app,
-                        handle,
-                    ),
-                ) as std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>,
+                Some((_, rx)) => Box::pin(crate::proxy::ktls_listener::serve_with_io_uring(
+                    proxy_listener,
+                    rx,
+                    config_rx,
+                    proxy_app,
+                    handle,
+                ))
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
+                    >,
                 None => Box::pin(crate::proxy::ktls_listener::serve(
                     proxy_listener,
                     config_rx,
@@ -1119,12 +1116,8 @@ async fn async_main() -> anyhow::Result<()> {
                 )),
             };
             #[cfg(not(target_os = "linux"))]
-            let serve = crate::proxy::ktls_listener::serve(
-                proxy_listener,
-                config_rx,
-                proxy_app,
-                handle,
-            );
+            let serve =
+                crate::proxy::ktls_listener::serve(proxy_listener, config_rx, proxy_app, handle);
 
             run_select!(serve, Some(shutdown_handle));
         } else {
@@ -1154,17 +1147,14 @@ async fn async_main() -> anyhow::Result<()> {
         // accept loop that upgrades each connection to kernel TLS after
         // the rustls handshake completes. Linux only; on other hosts
         // we log a warning and fall through to the standard path.
-        if config.gateway.tls.kernel_tls
-            && crate::proxy::ktls_listener::supported_on_host()
-        {
+        if config.gateway.tls.kernel_tls && crate::proxy::ktls_listener::supported_on_host() {
             crate::proxy::ktls_listener::register_ktls_metrics();
             let server_config =
                 crate::proxy::ktls_listener::build_server_config_for_ktls(&config.gateway.tls)?;
             // Static-cert path: build a watch channel with the single
             // never-changing ServerConfig. Holding the Sender keeps the
             // Receiver alive for the listener's lifetime.
-            let (config_tx, config_rx) =
-                tokio::sync::watch::channel(Arc::new(server_config));
+            let (config_tx, config_rx) = tokio::sync::watch::channel(Arc::new(server_config));
             let handle = crate::proxy::ktls_listener::KtlsHandle::new();
             let shutdown_handle = handle.clone();
 
@@ -1174,10 +1164,8 @@ async fn async_main() -> anyhow::Result<()> {
             // The acceptor + listener must outlive the serve future,
             // so they're bound in this scope.
             #[cfg(target_os = "linux")]
-            let _io_uring_acceptor = maybe_spawn_io_uring_acceptor(
-                &proxy_listener,
-                &config.gateway.io_uring,
-            );
+            let _io_uring_acceptor =
+                maybe_spawn_io_uring_acceptor(&proxy_listener, &config.gateway.io_uring);
             #[cfg(not(target_os = "linux"))]
             log_io_uring_unavailable_if_requested(&config.gateway.io_uring);
 
@@ -1193,15 +1181,16 @@ async fn async_main() -> anyhow::Result<()> {
 
             #[cfg(target_os = "linux")]
             let serve = match _io_uring_acceptor {
-                Some((_, rx)) => Box::pin(
-                    crate::proxy::ktls_listener::serve_with_io_uring(
-                        proxy_listener,
-                        rx,
-                        config_rx,
-                        proxy_app,
-                        handle,
-                    ),
-                ) as std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>,
+                Some((_, rx)) => Box::pin(crate::proxy::ktls_listener::serve_with_io_uring(
+                    proxy_listener,
+                    rx,
+                    config_rx,
+                    proxy_app,
+                    handle,
+                ))
+                    as std::pin::Pin<
+                        Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
+                    >,
                 None => Box::pin(crate::proxy::ktls_listener::serve(
                     proxy_listener,
                     config_rx,
@@ -1210,12 +1199,8 @@ async fn async_main() -> anyhow::Result<()> {
                 )),
             };
             #[cfg(not(target_os = "linux"))]
-            let serve = crate::proxy::ktls_listener::serve(
-                proxy_listener,
-                config_rx,
-                proxy_app,
-                handle,
-            );
+            let serve =
+                crate::proxy::ktls_listener::serve(proxy_listener, config_rx, proxy_app, handle);
 
             run_select!(serve, Some(shutdown_handle));
             // Keep `config_tx` alive across the serve future. The Drop
