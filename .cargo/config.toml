@@ -1,2 +1,12 @@
+# Build flags applied to every cargo invocation.
+#
+#   --cfg tokio_unstable   unlocks tokio's runtime-introspection APIs
+#                          (worker-thread metrics, task IDs)
+#   -C target-cpu=native   enables the build host's full instruction set
+#                          (AVX2 / AVX-512 / NEON) — speeds up hashbrown,
+#                          serde_json, regex, memchr. Trade-off: binary
+#                          is tied to the build CPU's family. Override
+#                          via `CARGO_BUILD_RUSTFLAGS` (or comment out)
+#                          when producing portable artefacts.
 [build]
-rustflags = ["--cfg", "tokio_unstable"]
+rustflags = ["--cfg", "tokio_unstable", "-C", "target-cpu=native"]

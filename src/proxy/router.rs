@@ -12,6 +12,23 @@ use uuid::Uuid;
 /// the typical 16-32-byte keys we use here.
 type FastHasher = ahash::RandomState;
 
+/// Precompiled regex bundle for a single route. Built once when the
+/// route is inserted / updated; consulted on every matching request.
+///
+/// Pre-cache, the proxy hot path called `regex::Regex::new(pattern)`
+/// inside `match_route_*` and `resolve_upstream_path` — 50-500 μs per
+/// request per regex. With this cache the per-request cost drops to a
+/// pointer chase + `is_match` call.
+#[derive(Default)]
+struct RouteCache {
+    /// Compiled `Route.path_regexes`. Invalid patterns are skipped at
+    /// compile time with a warning; the route falls through to the
+    /// literal-path branch.
+    paths: Vec<regex::Regex>,
+    /// Compiled `Route.path_rewrite_pattern`.
+    rewrite: Option<regex::Regex>,
+}
+
 pub struct RouteTable {
     services: DashMap<Uuid, Service, FastHasher>,
     routes: DashMap<Uuid, Route, FastHasher>,
@@ -23,6 +40,11 @@ pub struct RouteTable {
     /// Host-to-service index: `"sub.domain.com"` -> `service_id` for services
     /// with non-empty `subdomain` + `domain`. Enables O(1) subdomain routing.
     host_index: DashMap<String, Uuid, FastHasher>,
+    /// Precompiled regex bundles keyed by route id. Kept in sync with
+    /// `routes` via the add / update / remove / load_from_repo paths.
+    /// Same hasher choice as the other internal maps — UUID keys are
+    /// server-generated, not attacker-influenced.
+    regex_cache: DashMap<Uuid, Arc<RouteCache>, FastHasher>,
 }
 
 impl RouteTable {
@@ -32,6 +54,50 @@ impl RouteTable {
             routes: DashMap::with_hasher(FastHasher::default()),
             exact_index: DashMap::with_hasher(FastHasher::default()),
             host_index: DashMap::with_hasher(FastHasher::default()),
+            regex_cache: DashMap::with_hasher(FastHasher::default()),
+        }
+    }
+
+    /// Compile a route's regex fields once, ready to be cached. Bad
+    /// patterns are logged + skipped so a single typo can't 502 every
+    /// request — the route simply falls through to literal matching.
+    fn compile_cache_for(route: &Route) -> Arc<RouteCache> {
+        let paths = route
+            .path_regexes
+            .iter()
+            .filter_map(|p| match regex::Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!(route_id = %route.id, pattern = %p, error = %e,
+                        "skipping invalid route regex pattern");
+                    None
+                }
+            })
+            .collect();
+        let rewrite = route
+            .path_rewrite_pattern
+            .as_ref()
+            .and_then(|p| match regex::Regex::new(p) {
+                Ok(re) => Some(re),
+                Err(e) => {
+                    tracing::warn!(route_id = %route.id, pattern = %p, error = %e,
+                        "skipping invalid route rewrite pattern");
+                    None
+                }
+            });
+        Arc::new(RouteCache { paths, rewrite })
+    }
+
+    /// Reseed the regex cache from the current `routes` map. Called by
+    /// `load_from_repo` after a bulk reload.
+    fn rebuild_regex_cache(&self) {
+        self.regex_cache.clear();
+        for entry in self.routes.iter() {
+            let route = entry.value();
+            if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
+                self.regex_cache
+                    .insert(route.id, Self::compile_cache_for(route));
+            }
         }
     }
 
@@ -84,25 +150,7 @@ impl RouteTable {
             if &route.service_id != service_id {
                 continue;
             }
-            let path_matches = if !route.path_regexes.is_empty() {
-                route.path_regexes.iter().any(|pattern| {
-                    regex::Regex::new(pattern)
-                        .map(|re| re.is_match(path))
-                        .unwrap_or(false)
-                })
-            } else {
-                route.paths.iter().any(|p| {
-                    if p.ends_with('*') {
-                        let prefix = &p[..p.len() - 1];
-                        path.starts_with(prefix)
-                    } else if p == "/" {
-                        true
-                    } else {
-                        path == p || path.starts_with(&format!("{p}/"))
-                    }
-                })
-            };
-            if !path_matches {
+            if !self.path_matches(route, path) {
                 continue;
             }
             let method_matches =
@@ -114,6 +162,19 @@ impl RouteTable {
             break;
         }
         best
+    }
+
+    /// Per-request path-match for one route. Hot path — must not
+    /// allocate. Consults the precompiled regex cache for `path_regexes`
+    /// routes; falls back to the literal / prefix matcher otherwise.
+    fn path_matches(&self, route: &Route, path: &str) -> bool {
+        if !route.path_regexes.is_empty() {
+            if let Some(cache) = self.regex_cache.get(&route.id) {
+                return cache.paths.iter().any(|re| re.is_match(path));
+            }
+            return false; // pattern present but cache empty = all invalid
+        }
+        literal_or_prefix_match(&route.paths, path)
     }
 
     pub fn is_host_taken(&self, fqdn: &str, exclude_service: Option<&Uuid>) -> bool {
@@ -147,6 +208,7 @@ impl RouteTable {
         }
         self.rebuild_exact_index();
         self.rebuild_host_index();
+        self.rebuild_regex_cache();
 
         Ok((services.len(), routes.len()))
     }
@@ -205,6 +267,9 @@ impl RouteTable {
 
     pub fn add_route(&self, route: Route) -> Uuid {
         let id = route.id;
+        if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
+            self.regex_cache.insert(id, Self::compile_cache_for(&route));
+        }
         self.routes.insert(id, route);
         self.rebuild_exact_index();
         id
@@ -220,6 +285,11 @@ impl RouteTable {
 
     pub fn update_route(&self, id: &Uuid, route: Route) -> bool {
         if self.routes.contains_key(id) {
+            if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
+                self.regex_cache.insert(*id, Self::compile_cache_for(&route));
+            } else {
+                self.regex_cache.remove(id);
+            }
             self.routes.insert(*id, route);
             self.rebuild_exact_index();
             true
@@ -231,6 +301,7 @@ impl RouteTable {
     pub fn remove_route(&self, id: &Uuid) -> bool {
         let removed = self.routes.remove(id).is_some();
         if removed {
+            self.regex_cache.remove(id);
             self.rebuild_exact_index();
         }
         removed
@@ -285,27 +356,8 @@ impl RouteTable {
         for entry in self.routes.iter() {
             let route = entry.value();
 
-            // Path matching: check regex patterns first, then literal paths.
-            let path_matches = if !route.path_regexes.is_empty() {
-                route.path_regexes.iter().any(|pattern| {
-                    regex::Regex::new(pattern)
-                        .map(|re| re.is_match(path))
-                        .unwrap_or(false)
-                })
-            } else {
-                route.paths.iter().any(|p| {
-                    if p.ends_with('*') {
-                        let prefix = &p[..p.len() - 1];
-                        path.starts_with(prefix)
-                    } else if p == "/" {
-                        true
-                    } else {
-                        path == p || path.starts_with(&format!("{p}/"))
-                    }
-                })
-            };
-
-            if !path_matches {
+            // Path matching: regex patterns (cached) first, then literal paths.
+            if !self.path_matches(route, path) {
                 continue;
             }
 
@@ -349,13 +401,13 @@ impl RouteTable {
     }
 
     pub fn resolve_upstream_path(&self, route: &Route, original_path: &str) -> String {
-        // Priority 1: regex rewrite
-        if let (Some(pattern), Some(replacement)) =
-            (&route.path_rewrite_pattern, &route.path_rewrite_replacement)
-        {
-            if let Ok(re) = regex::Regex::new(pattern) {
-                let rewritten = re.replace(original_path, replacement.as_str());
-                return rewritten.into_owned();
+        // Priority 1: regex rewrite (precompiled in regex_cache)
+        if let Some(replacement) = route.path_rewrite_replacement.as_ref() {
+            if let Some(cache) = self.regex_cache.get(&route.id) {
+                if let Some(re) = cache.rewrite.as_ref() {
+                    let rewritten = re.replace(original_path, replacement.as_str());
+                    return rewritten.into_owned();
+                }
             }
         }
         // Priority 2: strip_path prefix removal
@@ -372,6 +424,36 @@ impl RouteTable {
         }
         original_path.to_string()
     }
+}
+
+/// Literal / prefix path matcher. Hot path — must not allocate.
+///
+/// Trailing `*` = prefix wildcard (`/foo/*` matches `/foo`, `/foo/bar`).
+/// `/` matches anything. Other patterns match exactly, or as a path
+/// segment prefix (`/foo` matches `/foo` and `/foo/bar`, NOT `/foobar`).
+///
+/// Pre-cache, the `/foo/bar`-vs-`/foo` branch did `path.starts_with(&format!("{p}/"))`
+/// — a heap allocation per candidate route per request. The byte-level
+/// check below is equivalent and allocation-free.
+fn literal_or_prefix_match(paths: &[String], path: &str) -> bool {
+    let path_bytes = path.as_bytes();
+    paths.iter().any(|p| {
+        if p.ends_with('*') {
+            // Prefix wildcard: drop the trailing '*' and compare.
+            path.starts_with(&p[..p.len() - 1])
+        } else if p == "/" {
+            true
+        } else if path == p.as_str() {
+            true
+        } else {
+            // Path-segment prefix: `p` followed by exactly '/' in `path`.
+            // No allocation.
+            let p_bytes = p.as_bytes();
+            path_bytes.len() > p_bytes.len()
+                && &path_bytes[..p_bytes.len()] == p_bytes
+                && path_bytes[p_bytes.len()] == b'/'
+        }
+    })
 }
 
 impl Default for RouteTable {
