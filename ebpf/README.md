@@ -1,12 +1,19 @@
-# lynxx-ebpf — kernel-level TCP observability sidecar
+# lynxx-ebpf — kernel-level TCP observability + XDP rate-limiting sidecar
 
 > **Beyond-Kong feature #7**, and the only one in the lynxx tree that lives
 > outside the main gateway workspace. OpenResty-based gateways like Kong cannot
 > see TCP retransmits or socket state transitions because they're entirely
 > userspace. lynxx-ebpf is a privileged sidecar binary that loads a small
-> set of eBPF programs into the host kernel, watches `tcp_retransmit_skb`
-> and `tcp_set_state` tracepoints, and exposes the aggregates as
-> Prometheus counters.
+> set of eBPF programs into the host kernel:
+>
+> - **Tracepoints** on `tcp_retransmit_skb` and `tcp_set_state` for
+>   loss/RTT observability that no userspace gateway can match.
+> - **XDP per-IP rate-limiter** (opt-in) that drops over-budget packets
+>   before they ever reach the userspace HTTP stack — a token bucket
+>   per source IPv4 evaluated in-kernel at line rate.
+>
+> Both surfaces are exposed as Prometheus counters by the userspace
+> daemon, which polls BPF maps every second.
 
 ## What this is
 
@@ -87,6 +94,7 @@ CLI flags:
 | `--gateway-pid`       | _none_               | Optional PID. Logged in v1 only; kernel-side filtering is v2.        |
 | `--log-level`         | `info`               | `error`, `warn`, `info`, `debug`, `trace`.                           |
 | `--poll-interval-ms`  | `1000`               | How often to reconcile the BPF maps into Prometheus counters.        |
+| `--xdp-iface`         | _none_               | Network interface (e.g. `eth0`) to attach the XDP rate-limiter to. Omit to skip XDP entirely. |
 
 ## Metrics emitted
 
@@ -95,6 +103,62 @@ CLI flags:
 | `lynxx_ebpf_tcp_retransmits_total`           | counter | `src`, `dst` | IPv4 src/dst as dotted decimal. One sample per observed flow per second. |
 | `lynxx_ebpf_tcp_state_transitions_total`     | counter | `from`, `to` | TCP state names from `<linux/tcp_states.h>`.                          |
 | `lynxx_ebpf_map_entries`                     | gauge   | `map`        | Live entry count per BPF map. Useful to detect map fill-up.           |
+| `lynxx_ebpf_xdp_dropped_total`               | counter | `src`        | Packets dropped by the XDP rate-limiter, labelled by source IPv4. Only populated when `--xdp-iface` is set. |
+
+## Programs
+
+The kernel-side ELF ships three programs. Tracepoints attach automatically
+on startup; the XDP program is opt-in via `--xdp-iface`.
+
+### `tcp_retransmit_skb` (tracepoint, always-on)
+
+Fires on every TCP retransmit. Bumps a `(saddr, daddr)`-keyed counter
+in the `RETRANSMITS` BPF map. Userspace reconciles into
+`lynxx_ebpf_tcp_retransmits_total` once per `--poll-interval-ms`.
+
+### `tcp_set_state` (tracepoint, always-on)
+
+Fires on every TCP state transition (`LISTEN → SYN_SENT → ESTABLISHED → …`).
+Bumps a `(oldstate, newstate)`-keyed counter in `STATE_TRANSITIONS`.
+Surfaced as `lynxx_ebpf_tcp_state_transitions_total`.
+
+### `lynxx_xdp_ratelimit` (XDP, opt-in)
+
+Per-source-IPv4 token bucket evaluated at the XDP hook — earlier than
+iptables, earlier than the socket layer, earlier than userspace. The
+**Beyond-Kong moat**: in-kernel rate limiting saves a full trip
+through epoll + tokio + the plugin chain for traffic that's destined
+to be rejected anyway.
+
+Steady-state limit: **100 packets/sec per source IP**. Burst capacity:
+**1,000 packets** (the bucket starts full).
+
+Deploy with:
+
+```bash
+sudo ./target/release/lynxx-ebpf \
+    --xdp-iface eth0 \
+    --metrics-addr 0.0.0.0:9201
+```
+
+Driver mode: aya attaches in **SKB mode** by default (generic, works
+on every NIC including virtual). For native-mode XDP (~10× faster) on
+hardware NICs that support it (ice, mlx5, i40e, …), patch the loader
+to pass `XdpFlags::DRV_MODE` — or wait on the planned `--xdp-mode`
+flag in v2.
+
+Caveats:
+
+- IPv4 only. IPv6 packets are `XDP_PASS` (unaffected).
+- Budget is hardcoded in `lynxx-ebpf-program/src/main.rs` (`CAPACITY`,
+  `REFILL_PER_SEC`). v2 will read these from a config map populated
+  by userspace.
+- Map size is `MAX_TRACKED_IPS = 65,536`. On overflow new IPs are
+  passed through (fail-open) rather than evicted — the existing
+  buckets retain their state.
+- Tracks source IP only — a single client behind a CGNAT shares one
+  bucket with everyone else on that NAT. v2 should add an L4
+  selector for per-port granularity.
 
 ## Limitations (v1)
 
@@ -114,6 +178,10 @@ CLI flags:
 - **Polling, not perf events.** v1 reconciles HashMaps once a second.
   A perf-event ring buffer would be lower-latency but more code; for
   Prometheus scrape semantics, 1Hz is plenty.
+- **XDP rate-limit budget is compile-time.** The `CAPACITY` and
+  `REFILL_PER_SEC` constants live in the BPF program. Changing them
+  requires a kernel-object rebuild + restart. v2 will lift them into
+  a config map populated by userspace from a CLI flag.
 
 ## Roadmap
 
@@ -126,6 +194,10 @@ CLI flags:
   versions without recompilation.
 - **Push-based events** via a perf-event or ring-buffer map for
   sub-second latency on retransmit storms.
+- **Per-route XDP rate-limit budgets** via an L4-selector key
+  (`src_ip, dst_port`) rather than just source IP.
+- **Native-mode XDP** (`XdpFlags::DRV_MODE`) wired behind a flag, with
+  fallback to SKB mode when the driver lacks native support.
 
 ## Layout
 

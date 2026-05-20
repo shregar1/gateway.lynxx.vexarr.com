@@ -32,9 +32,11 @@
 #![allow(clippy::missing_safety_doc)]
 
 use aya_ebpf::{
-    macros::{map, tracepoint},
+    bindings::xdp_action,
+    helpers::bpf_ktime_get_ns,
+    macros::{map, tracepoint, xdp},
     maps::HashMap,
-    programs::TracePointContext,
+    programs::{TracePointContext, XdpContext},
 };
 use aya_log_ebpf::info;
 
@@ -133,6 +135,118 @@ fn try_tcp_set_state(ctx: &TracePointContext) -> Result<u32, i64> {
     }
 
     Ok(0)
+}
+
+// ---------------------------------------------------------------------
+// xdp_ratelimit — per-IP token-bucket drop at XDP layer
+// ---------------------------------------------------------------------
+//
+// Drops IPv4 packets above a per-source-IP rate budget BEFORE they
+// reach the gateway's userspace HTTP stack. This is the Beyond-Kong
+// moat: in-kernel rate limiting saves a full trip through epoll +
+// tokio + handler + plugin chain for traffic that's destined to be
+// rejected anyway.
+//
+// Steady-state limit: `REFILL_PER_SEC` packets per IP per second.
+// Burst (token bucket capacity): `CAPACITY` packets.
+//
+// V1 caveats:
+//   * IPv4 only. v6 is `XDP_PASS` (unaffected).
+//   * Hardcoded budget. Userspace can patch the constants via a separate
+//     map in v2 (or recompile the program).
+//   * Tracks the smallest of source IPs only — a single client behind a
+//     CGNAT shares one bucket. Operators who want per-port granularity
+//     should add an L4 selector in v2.
+//   * The map has a finite size (`MAX_TRACKED_IPS`). On overflow new
+//     IPs are passed through (fail-open).
+
+const MAX_TRACKED_IPS: u32 = 65_536;
+const CAPACITY: u32 = 1_000;
+const REFILL_PER_SEC: u32 = 100;
+const NS_PER_SEC: u64 = 1_000_000_000;
+
+/// Token-bucket state per source IPv4 address. `tokens` decrements
+/// on every accepted packet; the refill clock advances on every
+/// touch.
+#[repr(C)]
+#[derive(Copy, Clone)]
+struct TokenBucket {
+    tokens: u32,
+    last_refill_ns: u64,
+}
+
+/// Per-source-IP bucket map. Key: IPv4 source in network byte order.
+#[map]
+static mut XDP_BUCKETS: HashMap<u32, TokenBucket> =
+    HashMap::<u32, TokenBucket>::with_max_entries(MAX_TRACKED_IPS, 0);
+
+/// Per-source-IP dropped-packet counter. Same key space as XDP_BUCKETS.
+/// Userspace polls this map, emits Prometheus counters, and can join
+/// against the bucket map to surface "top offenders".
+#[map]
+static mut XDP_DROPPED: HashMap<u32, u64> =
+    HashMap::<u32, u64>::with_max_entries(MAX_TRACKED_IPS, 0);
+
+const ETH_HDR_LEN: usize = 14;
+const ETH_P_IPV4: u16 = 0x0008; // 0x0800 in host byte order, NBO here.
+
+#[xdp]
+pub fn lynxx_xdp_ratelimit(ctx: XdpContext) -> u32 {
+    try_xdp_ratelimit(&ctx).unwrap_or(xdp_action::XDP_PASS)
+}
+
+fn try_xdp_ratelimit(ctx: &XdpContext) -> Result<u32, ()> {
+    let data = ctx.data();
+    let data_end = ctx.data_end();
+
+    // Bounds check: enough for ethernet + minimum IPv4 header (20 B).
+    if data + ETH_HDR_LEN + 20 > data_end {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Ethertype is at offset 12. Only handle IPv4.
+    let eth_proto: u16 = unsafe { *((data + 12) as *const u16) };
+    if eth_proto != ETH_P_IPV4 {
+        return Ok(xdp_action::XDP_PASS);
+    }
+
+    // Source IPv4 is at offset 12 inside the IP header.
+    let src: u32 = unsafe { *((data + ETH_HDR_LEN + 12) as *const u32) };
+
+    let now = unsafe { bpf_ktime_get_ns() };
+
+    let mut bucket = unsafe { XDP_BUCKETS.get(&src) }
+        .copied()
+        .unwrap_or(TokenBucket {
+            tokens: CAPACITY,
+            last_refill_ns: now,
+        });
+
+    // Refill: tokens earned since last touch, capped at CAPACITY.
+    let elapsed_ns = now.saturating_sub(bucket.last_refill_ns);
+    if elapsed_ns >= NS_PER_SEC {
+        let seconds = (elapsed_ns / NS_PER_SEC) as u32;
+        let earned = seconds.saturating_mul(REFILL_PER_SEC);
+        bucket.tokens = bucket.tokens.saturating_add(earned).min(CAPACITY);
+        bucket.last_refill_ns = now;
+    }
+
+    if bucket.tokens == 0 {
+        // Over budget — drop and bump the per-IP drop counter. The
+        // bucket itself doesn't need to be stored back; its tokens
+        // stay at 0 implicitly until the next refill window.
+        unsafe {
+            let prior = XDP_DROPPED.get(&src).copied().unwrap_or(0);
+            let _ = XDP_DROPPED.insert(&src, &prior.wrapping_add(1), 0);
+        }
+        return Ok(xdp_action::XDP_DROP);
+    }
+
+    bucket.tokens -= 1;
+    unsafe {
+        let _ = XDP_BUCKETS.insert(&src, &bucket, 0);
+    }
+    Ok(xdp_action::XDP_PASS)
 }
 
 // ---------------------------------------------------------------------

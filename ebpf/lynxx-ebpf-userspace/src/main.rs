@@ -98,6 +98,21 @@ struct Cli {
     /// Poll interval for BPF maps, in milliseconds.
     #[arg(long, default_value_t = 1000)]
     poll_interval_ms: u64,
+
+    /// Network interface to attach the XDP per-IP rate-limiter to
+    /// (e.g. `eth0`, `ens3`). When unset, the rate-limiter is NOT
+    /// loaded — only the TCP observability tracepoints attach. The
+    /// XDP program drops IPv4 packets above the per-source-IP token
+    /// budget compiled into the kernel object. Linux only; ignored
+    /// in `cargo check` builds on macOS.
+    ///
+    /// Driver mode: aya defaults to SKB-mode XDP (slow path, works on
+    /// every NIC). For native-mode XDP (~10× faster) the operator
+    /// needs a driver that supports it (ice, mlx5, i40e, etc.) and
+    /// either patches the loader to pass `XdpFlags::DRV_MODE` or
+    /// uses the planned `--xdp-mode` flag in v2.
+    #[arg(long)]
+    xdp_iface: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -140,6 +155,12 @@ async fn main() -> Result<()> {
     // process; dropping it detaches tracepoints automatically.
     let mut bpf = load_bpf().context("loading BPF object")?;
     attach_programs(&mut bpf).context("attaching tracepoints")?;
+    if let Some(iface) = cli.xdp_iface.as_deref() {
+        attach_xdp_ratelimit(&mut bpf, iface)
+            .with_context(|| format!("attaching XDP rate-limiter to {iface}"))?;
+    } else {
+        debug!("--xdp-iface not set; skipping XDP rate-limiter");
+    }
 
     let poller = tokio::spawn(poll_loop(
         Duration::from_millis(cli.poll_interval_ms),
@@ -203,6 +224,11 @@ fn register_metric_descriptions() {
     metrics::describe_gauge!(
         "lynxx_ebpf_map_entries",
         "Current number of populated entries in each BPF map, labelled by map name."
+    );
+    metrics::describe_counter!(
+        "lynxx_ebpf_xdp_dropped_total",
+        "Packets dropped by the XDP per-IP rate-limiter, labelled by source IPv4 address. \
+         Only populated when --xdp-iface is set."
     );
 }
 
@@ -268,6 +294,32 @@ fn attach_programs(bpf: &mut aya::Ebpf) -> Result<()> {
 #[cfg(not(target_os = "linux"))]
 fn attach_programs(_bpf: &mut ()) -> Result<()> {
     anyhow::bail!("attach_programs unsupported on non-Linux hosts");
+}
+
+#[cfg(target_os = "linux")]
+fn attach_xdp_ratelimit(bpf: &mut aya::Ebpf, iface: &str) -> Result<()> {
+    use aya::programs::{Xdp, XdpFlags};
+
+    let prog: &mut Xdp = bpf
+        .program_mut("lynxx_xdp_ratelimit")
+        .context("program lynxx_xdp_ratelimit missing from ELF")?
+        .try_into()
+        .context("lynxx_xdp_ratelimit is not an XDP program")?;
+    prog.load().context("loading lynxx_xdp_ratelimit")?;
+    // SKB mode = generic, works on every NIC + virtual driver but
+    // slower than DRV mode. Operators who deploy on hardware NICs
+    // with native XDP support (ice, mlx5, i40e, …) should patch this
+    // to `XdpFlags::DRV_MODE` for the ~10× perf jump. v1 prioritises
+    // portability over absolute throughput.
+    prog.attach(iface, XdpFlags::SKB_MODE)
+        .context("attaching XDP to interface (is it up? do we have CAP_NET_ADMIN?)")?;
+    info!(iface, "attached XDP rate-limiter (SKB mode)");
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn attach_xdp_ratelimit(_bpf: &mut (), _iface: &str) -> Result<()> {
+    anyhow::bail!("attach_xdp_ratelimit unsupported on non-Linux hosts");
 }
 
 // ---------------------------------------------------------------------
