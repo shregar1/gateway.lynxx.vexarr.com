@@ -252,15 +252,17 @@ fn main() -> anyhow::Result<()> {
                 Some(c) if !c.is_empty() => c,
                 _ => return,
             };
-            let idx = next_worker_id
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let idx = next_worker_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let core = cores[idx % cores.len()];
             if !core_affinity::set_for_current(core) {
                 // Soft failure — container with restricted cpuset, or
                 // a platform whose set_for_current is a stub. Log once
                 // and carry on; tokio will still schedule across the
                 // available cores, just without our pin hints.
-                tracing::debug!(worker_index = idx, "core_affinity::set_for_current returned false");
+                tracing::debug!(
+                    worker_index = idx,
+                    "core_affinity::set_for_current returned false"
+                );
             }
         })
         .build()?;
