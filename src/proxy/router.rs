@@ -74,17 +74,18 @@ impl RouteTable {
                 }
             })
             .collect();
-        let rewrite = route
-            .path_rewrite_pattern
-            .as_ref()
-            .and_then(|p| match regex::Regex::new(p) {
-                Ok(re) => Some(re),
-                Err(e) => {
-                    tracing::warn!(route_id = %route.id, pattern = %p, error = %e,
+        let rewrite =
+            route
+                .path_rewrite_pattern
+                .as_ref()
+                .and_then(|p| match regex::Regex::new(p) {
+                    Ok(re) => Some(re),
+                    Err(e) => {
+                        tracing::warn!(route_id = %route.id, pattern = %p, error = %e,
                         "skipping invalid route rewrite pattern");
-                    None
-                }
-            });
+                        None
+                    }
+                });
         Arc::new(RouteCache { paths, rewrite })
     }
 
@@ -286,7 +287,8 @@ impl RouteTable {
     pub fn update_route(&self, id: &Uuid, route: Route) -> bool {
         if self.routes.contains_key(id) {
             if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
-                self.regex_cache.insert(*id, Self::compile_cache_for(&route));
+                self.regex_cache
+                    .insert(*id, Self::compile_cache_for(&route));
             } else {
                 self.regex_cache.remove(id);
             }

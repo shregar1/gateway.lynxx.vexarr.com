@@ -162,17 +162,11 @@ impl AcmeManager {
     pub async fn set_ktls_reload_handle(
         &self,
     ) -> Result<watch::Receiver<Arc<ServerConfig>>, GatewayError> {
-        let current = self
-            .current_config
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| {
-                GatewayError::Internal(
-                    "ACME manager: cannot register kTLS reload handle before initial cert load"
-                        .into(),
-                )
-            })?;
+        let current = self.current_config.read().await.clone().ok_or_else(|| {
+            GatewayError::Internal(
+                "ACME manager: cannot register kTLS reload handle before initial cert load".into(),
+            )
+        })?;
         let (tx, rx) = watch::channel(current);
         *self.ktls_reload_tx.write().await = Some(tx);
         tracing::info!(
@@ -882,7 +876,9 @@ impl AcmeManager {
         }
 
         let primary = self.primary_domain().ok_or_else(|| {
-            GatewayError::Internal("ACME: no domains configured (config.acme.domains is empty)".into())
+            GatewayError::Internal(
+                "ACME: no domains configured (config.acme.domains is empty)".into(),
+            )
         })?;
         let primary_dir = self.storage_dir().join(primary);
         let mut last_ca_error: Option<GatewayError> = None;

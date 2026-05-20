@@ -117,10 +117,7 @@ async fn validate_license_against(
     base_url: &str,
     api_key: &str,
 ) -> Result<LicenseInfo, KeyxError> {
-    let url = format!(
-        "{}/v1/keys/verify",
-        base_url.trim_end_matches('/'),
-    );
+    let url = format!("{}/v1/keys/verify", base_url.trim_end_matches('/'),);
 
     let resp = client
         .post(&url)
@@ -157,17 +154,19 @@ async fn validate_license_against(
         });
     }
 
-    let envelope: ApiEnvelope<LicensePayload> = serde_json::from_str(&text)
-        .map_err(|e| KeyxError::Malformed(format!("{e}: {text}")))?;
+    let envelope: ApiEnvelope<LicensePayload> =
+        serde_json::from_str(&text).map_err(|e| KeyxError::Malformed(format!("{e}: {text}")))?;
 
     match envelope.status {
         EnvelopeStatus::Success => {
             if !envelope.data.valid {
-                return Err(KeyxError::Rejected(if envelope.response_message.is_empty() {
-                    "key is not active".into()
-                } else {
-                    envelope.response_message
-                }));
+                return Err(KeyxError::Rejected(
+                    if envelope.response_message.is_empty() {
+                        "key is not active".into()
+                    } else {
+                        envelope.response_message
+                    },
+                ));
             }
             Ok(LicenseInfo {
                 customer_urn: envelope.data.customer_urn,

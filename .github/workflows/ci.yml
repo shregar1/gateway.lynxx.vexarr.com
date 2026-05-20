@@ -14,6 +14,12 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # `src/integrations/keyx.rs` calls `env!("AUTH_URL", "...")` which fails
+  # the compile if the variable isn't set. CI doesn't need a real auth
+  # backend — it just needs *some* value so the build succeeds — so we
+  # bake in a localhost stub URL. Production builds set this to the real
+  # auth host on the build command. See `docs/COMPANY_ENV.md`.
+  AUTH_URL: http://127.0.0.1:9100
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -72,3 +78,20 @@ jobs:
         with:
           command: check
           arguments: --workspace --all-features
+
+  # macOS cross-platform check. Several modules are
+  # `#[cfg(target_os = "linux")]` (io_uring acceptor, kTLS listener,
+  # eBPF userspace stubs) — the Ubuntu jobs above only exercise the
+  # Linux side. Running `cargo check` on macOS catches the inverse
+  # regression: a code change that breaks the non-Linux build because
+  # someone forgot to `cfg`-gate an import or struct field. We don't
+  # run tests or clippy here (those run on Ubuntu); just a build to
+  # keep the macOS path honest.
+  check-macos:
+    name: cargo check (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-targets

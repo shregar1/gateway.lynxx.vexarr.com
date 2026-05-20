@@ -217,9 +217,8 @@ mod linux {
                         // owned by us from here on; from_std + the
                         // std stream's drop semantics ensure it's
                         // closed exactly once.
-                        let std_stream = unsafe {
-                            crate::utilities::io_uring_accept::fd_to_std_stream(conn.fd)
-                        };
+                        let std_stream =
+                            unsafe { crate::utilities::io_uring_accept::fd_to_std_stream(conn.fd) };
                         std_stream.set_nonblocking(true)?;
                         let peer = std_stream
                             .peer_addr()
@@ -301,7 +300,10 @@ mod linux {
             AcceptSource::Tokio(_) => "tokio",
             AcceptSource::Channel { .. } => "io_uring",
         };
-        tracing::info!(accept_source = source_label, "kTLS listener accept loop started");
+        tracing::info!(
+            accept_source = source_label,
+            "kTLS listener accept loop started"
+        );
 
         loop {
             tokio::select! {
@@ -410,8 +412,7 @@ mod linux {
         //    alive on the userspace path.
         let suite_id = {
             let (_, conn) = tls_stream.get_ref();
-            conn.negotiated_cipher_suite()
-                .map(|s| u16::from(s.suite()))
+            conn.negotiated_cipher_suite().map(|s| u16::from(s.suite()))
         };
         let can_ktls = match suite_id {
             Some(id) => KTLS_COMPATIBLE_SUITES.contains(&id),
