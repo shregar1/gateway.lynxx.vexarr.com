@@ -403,8 +403,16 @@ mod linux {
         tcp: tokio::net::TcpStream,
         app: Router,
     ) -> anyhow::Result<()> {
-        // 1. Handshake in userspace via rustls.
-        let tls_stream = acceptor.accept(tcp).await?;
+        // 1. Handshake in userspace via rustls. Wrap in `CorkStream`
+        //    *before* the handshake — `ktls::config_ktls_server` (used
+        //    below on success) requires `TlsStream<CorkStream<_>>`,
+        //    not `TlsStream<TcpStream>`. The corkstream "pauses" the
+        //    raw socket reads while we install the kTLS ULP so the
+        //    kernel doesn't race against us. `CorkStream` implements
+        //    `AsyncRead + AsyncWrite + Unpin` so it's transparent to
+        //    rustls and to the userspace `drive_hyper` fallback.
+        let corked = ktls::CorkStream::new(tcp);
+        let tls_stream = acceptor.accept(corked).await?;
 
         // 2. Cipher / version precheck. We read the negotiated suite
         //    before consuming the stream into `config_ktls_server`,
