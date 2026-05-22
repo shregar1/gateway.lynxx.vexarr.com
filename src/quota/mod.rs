@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{Datelike, Utc};
 use serde::Serialize;
 use tokio::time::interval;
 use tracing::{info, warn};
@@ -119,7 +119,17 @@ pub struct QuotaTracker {
     plan: PlanTier,
     /// 0 = unlimited. Updated dynamically from the license verify response.
     limit: AtomicU64,
-    period: std::sync::Mutex<String>,
+    /// Current period encoded as `year * 12 + (month - 1)`. Checked on
+    /// every `check_and_count` to detect rollover — a single relaxed
+    /// atomic load on the hot path. Previously this comparison went
+    /// through a `Mutex<String>::lock()` per request which serialised
+    /// 100k req/s through one lock.
+    period_epoch: AtomicU64,
+    /// String form of the current period (e.g. `"2026-05"`). Only read
+    /// by `snapshot()` and `flush()` — both cold paths. The mutex
+    /// guards both the string and the rollover transition; the hot
+    /// path never touches it.
+    period_string: std::sync::Mutex<String>,
     calls: AtomicU64,
     rejected: AtomicU64,
     overage: AtomicU64,
@@ -147,7 +157,8 @@ impl QuotaTracker {
         let tracker = Arc::new(Self {
             plan,
             limit: AtomicU64::new(effective_limit),
-            period: std::sync::Mutex::new(period.clone()),
+            period_epoch: AtomicU64::new(current_period_epoch()),
+            period_string: std::sync::Mutex::new(period.clone()),
             calls: AtomicU64::new(calls),
             rejected: AtomicU64::new(rejected),
             overage: AtomicU64::new(0),
@@ -245,7 +256,7 @@ impl QuotaTracker {
     }
 
     pub fn snapshot(&self) -> QuotaSnapshot {
-        let period = self.period.lock().expect("period mutex").clone();
+        let period = self.period_string.lock().expect("period_string mutex").clone();
         let calls = self.calls.load(Ordering::Relaxed);
         let rejected = self.rejected.load(Ordering::Relaxed);
         let overage = self.overage.load(Ordering::Relaxed);
@@ -268,7 +279,11 @@ impl QuotaTracker {
     }
 
     pub async fn flush(&self) {
-        let period = self.period.lock().expect("period mutex").clone();
+        let period = self
+            .period_string
+            .lock()
+            .expect("period_string mutex")
+            .clone();
         let calls = self.calls.load(Ordering::Relaxed);
         let rejected = self.rejected.load(Ordering::Relaxed);
         if let Err(e) = self.repo.upsert_quota_usage(&period, calls, rejected).await {
@@ -276,22 +291,36 @@ impl QuotaTracker {
         }
     }
 
+    /// Detect period rollover with a single atomic load on the common case.
+    /// Pre-refactor this acquired `period: Mutex<String>` on every request
+    /// just to compare it to the current month — at 100k RPS that serialised
+    /// every request through one global lock. Now the fast path is one
+    /// relaxed `AtomicU64::load` + integer compare; the mutex is only taken
+    /// when the epoch actually changes (once per month).
     fn maybe_rollover(&self) {
-        let now = current_period();
-        let mut period = self.period.lock().expect("period mutex");
-        if *period != now {
-            info!(old = %period, new = %now, "quota period rollover — resetting counters");
-            *period = now;
-            self.calls.store(0, Ordering::Relaxed);
-            self.rejected.store(0, Ordering::Relaxed);
-            self.overage.store(0, Ordering::Relaxed);
-            // We can't reach into other threads' QUOTA_BATCH thread-locals
-            // from here, so up to (QUOTA_BATCH_SIZE - 1) × num_threads
-            // increments collected before the rollover will leak into the
-            // new period's count when those threads next flush. For a
-            // month-boundary rollover with millions of monthly calls, this
-            // drift is negligible.
+        let now_epoch = current_period_epoch();
+        if self.period_epoch.load(Ordering::Acquire) == now_epoch {
+            return;
         }
+        // Slow path: take the lock, double-check (another thread may have
+        // rolled over while we waited), update both fields, reset counters.
+        let mut period = self.period_string.lock().expect("period_string mutex");
+        if self.period_epoch.load(Ordering::Acquire) == now_epoch {
+            return;
+        }
+        let new_str = current_period();
+        info!(old = %*period, new = %new_str, "quota period rollover — resetting counters");
+        *period = new_str;
+        self.period_epoch.store(now_epoch, Ordering::Release);
+        self.calls.store(0, Ordering::Relaxed);
+        self.rejected.store(0, Ordering::Relaxed);
+        self.overage.store(0, Ordering::Relaxed);
+        // We can't reach into other threads' QUOTA_BATCH thread-locals
+        // from here, so up to (QUOTA_BATCH_SIZE - 1) × num_threads
+        // increments collected before the rollover will leak into the
+        // new period's count when those threads next flush. For a
+        // month-boundary rollover with millions of monthly calls, this
+        // drift is negligible.
     }
 }
 
@@ -328,4 +357,13 @@ pub struct QuotaSnapshot {
 
 fn current_period() -> String {
     Utc::now().format("%Y-%m").to_string()
+}
+
+/// Period encoded as `year * 12 + (month - 1)`. Comparing two epochs is a
+/// single integer compare; storing it in an `AtomicU64` lets the rollover
+/// fast path be lockless. Year is clamped to non-negative — Lynxx is not
+/// concerned with BCE quotas.
+fn current_period_epoch() -> u64 {
+    let now = Utc::now();
+    (now.year().max(0) as u64) * 12 + (now.month() as u64 - 1)
 }
