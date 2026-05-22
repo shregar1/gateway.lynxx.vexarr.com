@@ -5,6 +5,11 @@ static_resources:
     - name: listener_0
       address: { socket_address: { address: 0.0.0.0, port_value: 28080 } }
       per_connection_buffer_limit_bytes: 32768
+      # enable_reuse_port (default true since 1.18) gives each worker
+      # its own SO_REUSEPORT socket so accept() scales across cores.
+      # Skip exact_balance — its rebalance pass actually hurts here
+      # because the load is already evenly hashed by the kernel.
+      enable_reuse_port: true
       filter_chains:
         - filters:
             - name: envoy.filters.network.http_connection_manager
@@ -32,6 +37,26 @@ static_resources:
       connect_timeout: 1s
       type: STATIC
       lb_policy: ROUND_ROBIN
+      # Default circuit breakers are 1024/1024/1024/3 — that's the
+      # ~78% rejection we hit at 50k RPS. Raise to 100k so envoy is
+      # comparable with the others under sustained load.
+      circuit_breakers:
+        thresholds:
+          - priority: DEFAULT
+            max_connections: 100000
+            max_pending_requests: 100000
+            max_requests: 100000
+            max_retries: 3
+      # Explicit HTTP/1.1 upstream pool with unbounded
+      # max_requests_per_connection — the v1.32 default churns
+      # connections fast enough that the upstream pool can't keep up.
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http_protocol_options: {}
+          common_http_protocol_options:
+            max_requests_per_connection: 0
       upstream_connection_options:
         tcp_keepalive: { keepalive_probes: 3, keepalive_time: 30 }
       load_assignment:

@@ -77,14 +77,23 @@ phase_report () {
   cat results/report.md
 }
 
+# Cloud selector. `.env` sets CLOUD=azure (default) or CLOUD=gcp; the
+# only phase-specific scripts that care are provision + teardown, since
+# everything else just uses ssh/scp against the IPs in .ips.
+case "${CLOUD:-azure}" in
+  azure) PROVISION=00-provision.sh;     TEARDOWN=99-teardown.sh ;;
+  gcp)   PROVISION=00-provision-gcp.sh; TEARDOWN=99-teardown-gcp.sh ;;
+  *)     echo "ERROR: unknown CLOUD=$CLOUD in .env (expected: azure | gcp)"; exit 1 ;;
+esac
+
 case "${1:-help}" in
-  provision) bash 00-provision.sh ;;
+  provision) bash "$PROVISION" ;;
   setup)     phase_setup ;;
   deploy)    bash deploy-lynxx.sh ;;
   smoke)     phase_smoke ;;
   bench)     phase_bench ;;
   report)    phase_report ;;
-  teardown)  bash 99-teardown.sh ;;
-  all)       bash 00-provision.sh && phase_setup && bash deploy-lynxx.sh && phase_smoke && phase_bench && phase_report ;;
+  teardown)  bash "$TEARDOWN" ;;
+  all)       bash "$PROVISION" && phase_setup && bash deploy-lynxx.sh && phase_smoke && phase_bench && phase_report ;;
   *)         grep '^#' "$0" | head -16; exit 1 ;;
 esac

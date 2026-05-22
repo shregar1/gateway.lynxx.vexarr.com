@@ -1,4 +1,14 @@
 http:
+  # Default serversTransport.maxIdleConnsPerHost is 200 — at 50k RPS
+  # traefik tears down + recreates upstream conns constantly, the
+  # queue piles up, and p99 hit 224ms in earlier runs. Bump well past
+  # the client-side conns count so the upstream pool always wins.
+  serversTransports:
+    upstream-transport:
+      maxIdleConnsPerHost: 10000
+      forwardingTimeouts:
+        idleConnTimeout: 90s
+
   routers:
     bench:
       rule: "PathPrefix(`/`)"
@@ -9,5 +19,6 @@ http:
     upstream:
       loadBalancer:
         passHostHeader: true
+        serversTransport: upstream-transport
         servers:
           - url: "http://127.0.0.1:19090/"

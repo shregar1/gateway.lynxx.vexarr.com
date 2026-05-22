@@ -1,0 +1,39 @@
+{
+  "proxy": "envoy",
+  "seq": 3,
+  "status": "ladder_cut",
+  "started_at": "2026-05-22T04:23:44Z",
+  "finished_at": "2026-05-22T04:24:19Z",
+  "ladder_cut_at_rps": 50000,
+  "config": {
+    "rps_levels": [50000],
+    "duration_secs": 15,
+    "warmup_secs": 3,
+    "connections": 4096,
+    "p99_explode_ms": 100,
+    "err_explode_rate": 0.01
+  },
+  "host": {
+    "hostname": "instance-20260520-171612",
+    "vcpu": 8,
+    "kernel": "6.1.0-47-cloud-amd64",
+    "os": "Debian GNU/Linux 12 (bookworm)"
+  },
+  "levels": [
+    {
+      "target_rps": 50000,
+      "achieved_rps": 13549,
+      "duration_secs": 32.4,
+      "requests": 438547,
+      "errors": 342627,
+      "p50_ms": 6.85,
+      "p95_ms": 20.88,
+      "p99_ms": 30.19,
+      "p99_9_ms": 44.09,
+      "min_ms": 0.1070,
+      "max_ms": null,
+      "exploded": true,
+      "raw_file": "envoy-50000.txt"
+    }
+  ]
+}

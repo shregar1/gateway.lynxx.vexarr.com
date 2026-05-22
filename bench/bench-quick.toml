@@ -1,0 +1,38 @@
+# Quick-bench config for local macOS runs. SQLite-backed (fine for
+# the steady-state hot path — routes are cached in memory after first
+# load, no per-request DB hits). Telemetry minimised. No plugins.
+#
+# Usage:
+#   cargo build --release -p lynxx-gateway --bin lynxx-gateway
+#   cargo build --release -p lynxx-bench --bin lynxx-bench --bin lynxx-mock-upstream
+#   ./target/release/lynxx-mock-upstream --port 19090 &
+#   AUTH_URL=http://127.0.0.1:9100 ./target/release/lynxx-gateway --config bench/bench-quick.toml &
+#   ./target/release/lynxx-bench --target http://127.0.0.1:28080/bench \
+#       --rps 2000 --duration-secs 30 --connections 64
+#
+# Single-machine bench — client + gateway + upstream all share the
+# same CPU scheduler. Numbers are directional, not publication-grade.
+# For real comparison data, use bench/proxy-bench/ on a clean VM.
+
+[gateway]
+proxy_port = 28080
+admin_port = 28081
+database_url = "sqlite::memory:"
+seed_from_config = true
+health_check_interval_ms = 30000
+# Skip the per-request prometheus counter + histogram + access-log
+# write on the success path. We want to measure the proxy itself,
+# not its observability. See `config::minimal_telemetry`.
+minimal_telemetry = true
+
+[[services]]
+name = "bench"
+url  = "http://127.0.0.1:19090"
+retries = 0
+connect_timeout_ms = 1000
+
+[[routes]]
+service = "bench"
+paths   = ["/bench"]
+methods = ["GET", "POST", "PUT", "DELETE", "HEAD"]
+strip_path = true

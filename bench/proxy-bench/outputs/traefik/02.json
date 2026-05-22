@@ -1,0 +1,39 @@
+{
+  "proxy": "traefik",
+  "seq": 2,
+  "status": "complete",
+  "started_at": "2026-05-22T04:07:49Z",
+  "finished_at": "2026-05-22T04:08:07Z",
+  "ladder_cut_at_rps": null,
+  "config": {
+    "rps_levels": [10000],
+    "duration_secs": 15,
+    "warmup_secs": 3,
+    "connections": 2048,
+    "p99_explode_ms": 100,
+    "err_explode_rate": 0.01
+  },
+  "host": {
+    "hostname": "instance-20260520-171612",
+    "vcpu": 8,
+    "kernel": "6.1.0-47-cloud-amd64",
+    "os": "Debian GNU/Linux 12 (bookworm)"
+  },
+  "levels": [
+    {
+      "target_rps": 10000,
+      "achieved_rps": 9999,
+      "duration_secs": 15.0,
+      "requests": 150009,
+      "errors": 0,
+      "p50_ms": 0.2060,
+      "p95_ms": 0.3340,
+      "p99_ms": 0.4420,
+      "p99_9_ms": 0.9710,
+      "min_ms": 0.0800,
+      "max_ms": 2.12,
+      "exploded": false,
+      "raw_file": "traefik-10000.txt"
+    }
+  ]
+}
