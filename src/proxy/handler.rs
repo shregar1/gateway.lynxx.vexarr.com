@@ -207,11 +207,39 @@ static HOP_BY_HOP: [HeaderName; 9] = [
 ];
 
 #[inline]
-#[allow(dead_code)]
 fn is_hop_by_hop(name: &HeaderName) -> bool {
     // `HeaderName` equality is an interned-string byte compare — much
     // cheaper than re-parsing each entry via `from_bytes` per call.
     HOP_BY_HOP.iter().any(|h| h == name)
+}
+
+/// Strip hop-by-hop headers in a single pass over the map.
+///
+/// Pre-refactor this looped over the 9-entry `HOP_BY_HOP` array and
+/// called `headers.remove(&name)` once per entry — 9 hash probes per
+/// request even though most requests carry zero hop-by-hop headers.
+///
+/// The http 1.4 `HeaderMap` doesn't expose `retain()`, so we walk the
+/// map's keys once, stash matching names on the stack, and call
+/// `remove()` only for entries that are actually present. For the
+/// common case (zero hop-by-hop headers) this collapses to a single
+/// linear walk with zero removals — no allocations either, because
+/// the local `Vec` stays at capacity 0 unless a match is pushed.
+#[inline]
+fn strip_hop_by_hop(headers: &mut axum::http::HeaderMap) {
+    // Most requests have zero hop-by-hop headers; we keep this Vec at
+    // its empty inline state and only allocate if we find a match. At
+    // worst we collect a handful of names — the 9-entry HOP_BY_HOP list
+    // is the hard upper bound.
+    let mut to_remove: Vec<HeaderName> = Vec::new();
+    for name in headers.keys() {
+        if is_hop_by_hop(name) {
+            to_remove.push(name.clone());
+        }
+    }
+    for name in &to_remove {
+        headers.remove(name);
+    }
 }
 
 /// Find the value of a cookie named `name` in any `Cookie:` header.
@@ -921,9 +949,7 @@ pub async fn proxy_handler(
                 .headers
                 .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
             parts.headers.remove("x-lynxx-recorder-id");
-            for name in HOP_BY_HOP.iter() {
-                parts.headers.remove(name);
-            }
+            strip_hop_by_hop(&mut parts.headers);
 
             // Feature 110: passHostHeader for unix socket upstreams.
             if service.pass_host_header.unwrap_or(false) {
@@ -1115,9 +1141,7 @@ pub async fn proxy_handler(
         .headers
         .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
     parts.headers.remove("x-lynxx-recorder-id");
-    for name in HOP_BY_HOP.iter() {
-        parts.headers.remove(name);
-    }
+    strip_hop_by_hop(&mut parts.headers);
 
     // Feature 110: passHostHeader — re-insert the original client Host header
     // when the service opts in. By default the Host is stripped (standard
