@@ -20,7 +20,6 @@ use clap::{Parser, ValueEnum};
 use hdrhistogram::Histogram;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::Method;
-use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep_until, Instant as TokioInstant};
 
 #[derive(Parser, Debug, Clone)]
@@ -50,6 +49,20 @@ struct Args {
     /// Number of concurrent worker tasks (i.e. inflight cap).
     #[arg(long, default_value_t = 64)]
     connections: usize,
+
+    /// Number of independent worker shards. Each shard runs its own
+    /// open-loop producer + reqwest::Client + per-shard Histogram, then
+    /// the histograms get merged at end via `Histogram::add`. At
+    /// 100k+ RPS the single-shard design contends hard on the producer
+    /// mpsc receiver mutex (one acquire per request × N workers) and
+    /// the shared Histogram mutex (one acquire per measured success),
+    /// which caused bench-client OOM/SIGTERM kills at >=300k RPS when
+    /// the proxy under test stalled. Shards split RPS and connections
+    /// evenly; remainder goes to the first shard.
+    ///
+    /// 0 = auto: ceil(rps / 50k), clamped to [1, nproc].
+    #[arg(long, default_value_t = 0)]
+    workers: usize,
 
     /// HTTP method.
     #[arg(long, value_enum, default_value_t = HttpMethod::Get)]
@@ -135,25 +148,32 @@ impl Stats {
     }
 }
 
-fn build_client(args: &Args) -> Result<reqwest::Client> {
-    let mut headers = HeaderMap::new();
-    for (k, v) in &args.header {
-        let name = HeaderName::from_bytes(k.as_bytes())
-            .with_context(|| format!("invalid header name `{k}`"))?;
-        let value =
-            HeaderValue::from_str(v).with_context(|| format!("invalid header value for `{k}`"))?;
-        headers.insert(name, value);
+/// Resolve `args.workers` to a concrete shard count.
+///
+/// 0 = auto: 1 shard per 50k RPS, clamped to [1, nproc]. We picked
+/// 50k as the threshold empirically — below that, a single producer
+/// + shared-Mutex receiver does fine. Above 100k, contention on the
+/// receiver + histogram mutexes shows up as bench-client SIGTERM
+/// (OOM-killer trip) when the SUT stalls.
+fn resolve_workers(workers: usize, rps: u64) -> usize {
+    if workers > 0 {
+        return workers.max(1);
     }
-    let client = reqwest::Client::builder()
-        .pool_max_idle_per_host(args.connections)
-        .timeout(Duration::from_secs(args.timeout_secs))
-        .default_headers(headers)
-        .build()?;
-    Ok(client)
+    let nproc = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let auto = ((rps + 49_999) / 50_000) as usize;
+    auto.clamp(1, nproc.max(1))
 }
 
+/// Top-level bench driver. When `workers > 1` we shard the RPS + connection
+/// budget across N independent open-loop runners and merge their stats at
+/// the end. Each shard is a self-contained mini-bench — its own
+/// `reqwest::Client`, its own producer task, its own worker pool, and
+/// crucially its own `Histogram` (no cross-shard mutex). The merge step
+/// uses `hdrhistogram::Histogram::add`, which is cheap.
 async fn run_one(name: &str, url: &str, args: &Args) -> Result<Stats> {
-    let client = build_client(args)?;
+    let n_shards = resolve_workers(args.workers, args.rps);
     let body = match &args.body {
         Some(path) => Some(
             fs::read(path)
@@ -165,44 +185,152 @@ async fn run_one(name: &str, url: &str, args: &Args) -> Result<Stats> {
     let method: Method = args.method.into();
 
     eprintln!(
-        "[{name}] {method} {url}  rps={} duration={}s connections={} warmup={}s",
-        args.rps, args.duration_secs, args.connections, args.warmup_secs
+        "[{name}] {method} {url}  rps={} duration={}s connections={} warmup={}s workers={}",
+        args.rps, args.duration_secs, args.connections, args.warmup_secs, n_shards
     );
 
-    // Token bucket: emit one tick per request at the configured RPS.
-    let total_secs = args.warmup_secs + args.duration_secs;
-    let total_requests = args.rps.saturating_mul(total_secs);
-    let interval = (1_000_000_000u64)
-        .checked_div(args.rps)
-        .map(Duration::from_nanos)
-        .unwrap_or_else(|| Duration::from_millis(1));
+    if n_shards == 1 {
+        // Single-shard path is the original code — no need to coordinate.
+        return run_one_shard(
+            url.to_string(),
+            method,
+            body,
+            args.clone(),
+            args.rps,
+            args.connections,
+            args.warmup_secs,
+            args.duration_secs,
+        )
+        .await;
+    }
 
-    let (tx, rx) = mpsc::channel::<Ticket>(args.connections * 4);
-    let rx = Arc::new(Mutex::new(rx));
+    // Multi-shard: split RPS + connections evenly; remainder goes to shard 0.
+    let base_rps = args.rps / n_shards as u64;
+    let extra_rps = args.rps % n_shards as u64;
+    let base_conns = args.connections / n_shards;
+    let extra_conns = args.connections % n_shards;
 
-    let histogram = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)?;
-    let histogram = Arc::new(Mutex::new(histogram));
-    let measured_count = Arc::new(AtomicU64::new(0));
-    let error_count = Arc::new(AtomicU64::new(0));
-
-    // Spawn workers.
-    let mut handles = Vec::with_capacity(args.connections);
-    for _ in 0..args.connections {
-        let rx = rx.clone();
-        let client = client.clone();
+    let mut handles = Vec::with_capacity(n_shards);
+    for shard_idx in 0..n_shards {
         let url = url.to_string();
         let method = method.clone();
         let body = body.clone();
-        let hist = histogram.clone();
+        let args = args.clone();
+        let shard_rps = base_rps + if shard_idx == 0 { extra_rps } else { 0 };
+        let shard_conns = base_conns + if shard_idx == 0 { extra_conns } else { 0 };
+        handles.push(tokio::spawn(async move {
+            run_one_shard(
+                url,
+                method,
+                body,
+                args.clone(),
+                shard_rps,
+                shard_conns.max(1),
+                args.warmup_secs,
+                args.duration_secs,
+            )
+            .await
+        }));
+    }
+
+    // Aggregate: sum counts, max duration (shards finish staggered), merge
+    // histograms via `add()`. Errors from any shard surface here.
+    let mut merged_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)?;
+    let mut requests: u64 = 0;
+    let mut errors: u64 = 0;
+    let mut max_duration = Duration::ZERO;
+    for h in handles {
+        let s = h.await??;
+        requests = requests.saturating_add(s.requests);
+        errors = errors.saturating_add(s.errors);
+        if s.duration > max_duration {
+            max_duration = s.duration;
+        }
+        if let Some(h) = &s.histogram {
+            merged_hist
+                .add(h)
+                .map_err(|e| anyhow!("histogram merge: {e}"))?;
+        }
+    }
+    Ok(Stats {
+        requests,
+        errors,
+        duration: max_duration,
+        histogram: Some(merged_hist),
+    })
+}
+
+/// One independent shard of the open-loop bench. Owns its
+/// `reqwest::Client`, producer task, worker pool, and a local
+/// `Histogram`. Returns the shard's `Stats` for merging.
+///
+/// ## Concurrency design (post-upgrade)
+///
+/// Pre-upgrade this shard wrapped a `tokio::sync::mpsc::Receiver` in
+/// `Arc<Mutex<...>>` and shared the histogram via `Arc<Mutex<Histogram>>`.
+/// With up to 4 096 worker tasks per shard, every recv + every measured
+/// response acquired one of those two mutexes — at 100 k RPS the bench
+/// client itself was burning meaningful CPU on lock contention, masking
+/// the gateway's true latency profile.
+///
+/// The upgrade swaps two things:
+/// 1. **Ticket distribution**: `flume::bounded` (lock-free MPMC). The
+///    receiver is cloneable; each worker owns its own handle and pulls
+///    tickets without acquiring a shared mutex.
+/// 2. **Latency recording**: each worker keeps a *local* `Histogram`,
+///    sized identically to the per-shard merged histogram. On worker
+///    exit the local histogram is shipped back over a oneshot and
+///    merged into the shard total via `Histogram::add` (cheap, ~1µs
+///    per merge regardless of sample count). No more per-sample mutex.
+#[allow(clippy::too_many_arguments)]
+async fn run_one_shard(
+    url: String,
+    method: Method,
+    body: Option<Arc<Vec<u8>>>,
+    args: Args,
+    rps: u64,
+    connections: usize,
+    warmup_secs: u64,
+    duration_secs: u64,
+) -> Result<Stats> {
+    let client = build_client_with_pool(&args, connections)?;
+
+    // Token bucket: emit one tick per request at the shard's RPS.
+    let total_secs = warmup_secs + duration_secs;
+    let total_requests = rps.saturating_mul(total_secs);
+    let interval = (1_000_000_000u64)
+        .checked_div(rps.max(1))
+        .map(Duration::from_nanos)
+        .unwrap_or_else(|| Duration::from_millis(1));
+
+    // Lock-free MPMC channel. Each worker clones the receiver — no shared
+    // mutex on the recv path. Capacity matches the pre-upgrade
+    // `mpsc::channel(connections * 4)` so behaviour under producer
+    // pressure is the same.
+    let (tx, rx) = flume::bounded::<Ticket>(connections.saturating_mul(4).max(16));
+
+    let measured_count = Arc::new(AtomicU64::new(0));
+    let error_count = Arc::new(AtomicU64::new(0));
+
+    let mut handles = Vec::with_capacity(connections);
+    for _ in 0..connections {
+        let rx = rx.clone();
+        let client = client.clone();
+        let url = url.clone();
+        let method = method.clone();
+        let body = body.clone();
         let measured = measured_count.clone();
         let errors = error_count.clone();
         handles.push(tokio::spawn(async move {
+            // Per-worker histogram — no cross-worker mutex on the record
+            // path. Bounds match the shard-level merged histogram below.
+            let mut local_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)
+                .expect("histogram bounds valid");
             loop {
-                let ticket = {
-                    let mut guard = rx.lock().await;
-                    guard.recv().await
+                let ticket = match rx.recv_async().await {
+                    Ok(t) => t,
+                    Err(_) => break, // channel closed — producer done
                 };
-                let Some(ticket) = ticket else { break };
                 let req_start = Instant::now();
                 let mut req = client.request(method.clone(), &url);
                 if let Some(b) = &body {
@@ -212,7 +340,6 @@ async fn run_one(name: &str, url: &str, args: &Args) -> Result<Stats> {
                 let elapsed_us = req_start.elapsed().as_micros() as u64;
                 let ok = match result {
                     Ok(resp) => {
-                        // Drain body so the connection can be reused.
                         let status = resp.status();
                         let _ = resp.bytes().await;
                         status.is_success() || status.is_redirection()
@@ -223,45 +350,66 @@ async fn run_one(name: &str, url: &str, args: &Args) -> Result<Stats> {
                     continue;
                 }
                 if ok {
-                    let mut h = hist.lock().await;
-                    let _ = h.record(elapsed_us.max(1));
+                    let _ = local_hist.record(elapsed_us.max(1));
                     measured.fetch_add(1, Ordering::Relaxed);
                 } else {
                     errors.fetch_add(1, Ordering::Relaxed);
                 }
             }
+            local_hist
         }));
     }
 
-    // Producer — open-loop pacer.
     let bench_start = Instant::now();
-    let warmup_until = bench_start + Duration::from_secs(args.warmup_secs);
+    let warmup_until = bench_start + Duration::from_secs(warmup_secs);
     let producer_start = TokioInstant::now();
     for i in 0..total_requests {
         let target_at = producer_start + interval * (i as u32);
         sleep_until(target_at).await;
         let measure = Instant::now() >= warmup_until;
-        if tx.send(Ticket { measure }).await.is_err() {
+        if tx.send_async(Ticket { measure }).await.is_err() {
             break;
         }
     }
     drop(tx);
+    // Merge per-worker histograms into the shard total.
+    let mut merged_hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3)?;
     for h in handles {
-        let _ = h.await;
+        if let Ok(local) = h.await {
+            merged_hist
+                .add(&local)
+                .map_err(|e| anyhow!("histogram merge: {e}"))?;
+        }
     }
     let total_elapsed = bench_start.elapsed();
-    let measured_duration = total_elapsed.saturating_sub(Duration::from_secs(args.warmup_secs));
+    let measured_duration = total_elapsed.saturating_sub(Duration::from_secs(warmup_secs));
 
-    let hist = Arc::try_unwrap(histogram)
-        .map_err(|_| anyhow!("histogram still shared"))?
-        .into_inner();
-    let stats = Stats {
+    Ok(Stats {
         requests: measured_count.load(Ordering::Relaxed),
         errors: error_count.load(Ordering::Relaxed),
         duration: measured_duration,
-        histogram: Some(hist),
-    };
-    Ok(stats)
+        histogram: Some(merged_hist),
+    })
+}
+
+/// Variant of `build_client` that lets the per-shard runner override the
+/// pool size — so a shard with 512 in-flight connections doesn't end up
+/// fighting for an idle pool sized for the whole bench.
+fn build_client_with_pool(args: &Args, pool_size: usize) -> Result<reqwest::Client> {
+    let mut headers = HeaderMap::new();
+    for (k, v) in &args.header {
+        let name = HeaderName::from_bytes(k.as_bytes())
+            .with_context(|| format!("invalid header name `{k}`"))?;
+        let value =
+            HeaderValue::from_str(v).with_context(|| format!("invalid header value for `{k}`"))?;
+        headers.insert(name, value);
+    }
+    let client = reqwest::Client::builder()
+        .pool_max_idle_per_host(pool_size)
+        .timeout(Duration::from_secs(args.timeout_secs))
+        .default_headers(headers)
+        .build()?;
+    Ok(client)
 }
 
 #[derive(Clone, Copy)]
