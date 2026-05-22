@@ -82,6 +82,20 @@ pub struct ProxyState {
     /// `to_bytes(...)` allocation/copy. Saves the single biggest p99 hit
     /// on the hot path. See `config::default_stream_response_body`.
     pub stream_response_body: bool,
+    /// When true, per-request `HealthRegistry::record_success_at` /
+    /// `record_failure_at` calls are skipped on the streamed + buffered hot
+    /// paths. Set at startup when `gateway.health_check_interval_ms` is so
+    /// large (≥1 hour) that no active checker is polling the counters with
+    /// any useful frequency — i.e. the bench rig and any deployment that
+    /// explicitly turns active health off. Pre-refactor each record_success
+    /// path showed ~40k samples + ~30k nested `Utc::now()` in the
+    /// flamegraph at 100k RPS, dominated by DashMap entry-mut acquisition.
+    ///
+    /// The active health checker (when enabled) still drives the registry
+    /// via the cold path; this only suppresses the per-request *passive*
+    /// emission. The flag is off by default so production behaviour is
+    /// unchanged.
+    pub passive_record_disabled: bool,
 }
 
 // ── Per-request telemetry helpers
@@ -1385,13 +1399,15 @@ pub async fn proxy_handler(
                 )
                 .increment(1);
             }
-            state.health.record_failure_at(
-                &service.id,
-                &svc_name,
-                format!("upstream {status}"),
-                request_started,
-            );
-        } else {
+            if !state.passive_record_disabled {
+                state.health.record_failure_at(
+                    &service.id,
+                    &svc_name,
+                    format!("upstream {status}"),
+                    request_started,
+                );
+            }
+        } else if !state.passive_record_disabled {
             state.health.record_success_at(&service.id, &svc_name, request_started);
         }
         if let Some(tid) = picked_target_id {
@@ -1542,10 +1558,15 @@ pub async fn proxy_handler(
             )
             .increment(1);
         }
-        state
-            .health
-            .record_failure_at(&service.id, &svc_name, format!("upstream {status}"), request_started);
-    } else {
+        if !state.passive_record_disabled {
+            state.health.record_failure_at(
+                &service.id,
+                &svc_name,
+                format!("upstream {status}"),
+                request_started,
+            );
+        }
+    } else if !state.passive_record_disabled {
         state.health.record_success_at(&service.id, &svc_name, request_started);
     }
 

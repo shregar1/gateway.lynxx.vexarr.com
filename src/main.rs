@@ -559,6 +559,13 @@ async fn async_main() -> anyhow::Result<()> {
     let log_writer = crate::logs::LogWriter::new(repo.clone(), 4096);
     crate::logs::spawn_log_pruner(repo.clone(), 30);
 
+    // Active health is effectively disabled when the interval is ≥1 hour
+    // — at that cadence the per-request passive emission isn't being
+    // consumed by anyone with useful freshness, so we can skip it entirely
+    // on the hot path. The flag is sticky for the lifetime of the process;
+    // we'd need to rewire on a runtime reload to flip it back on.
+    let passive_record_disabled = config.gateway.health_check_interval_ms >= 3_600_000;
+
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_exec.clone(),
@@ -576,6 +583,7 @@ async fn async_main() -> anyhow::Result<()> {
         local_zone: None,
         minimal_telemetry: config.gateway.minimal_telemetry,
         stream_response_body: config.gateway.stream_response_body,
+        passive_record_disabled,
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
