@@ -575,6 +575,7 @@ async fn async_main() -> anyhow::Result<()> {
         deploy_registry: Some(deploy_registry.clone()),
         local_zone: None,
         minimal_telemetry: config.gateway.minimal_telemetry,
+        stream_response_body: config.gateway.stream_response_body,
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
