@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Datelike, Utc};
+use chrono::{DateTime, Datelike, Utc};
 use serde::Serialize;
 use tokio::time::interval;
 use tracing::{info, warn};
@@ -195,8 +195,24 @@ impl QuotaTracker {
         }
     }
 
+    /// Cached-timestamp variant for the proxy hot path. The handler captures
+    /// `Utc::now()` once per request at entry and threads the same
+    /// `DateTime` through every per-request consumer to eliminate
+    /// redundant `clock_gettime` syscalls. See `proxy_handler`.
+    pub fn check_and_count_at(&self, now: DateTime<Utc>) -> QuotaResult {
+        let now_epoch = epoch_from_datetime(now);
+        self.maybe_rollover_at(now_epoch, now);
+        self.check_and_count_inner()
+    }
+
+    /// Convenience: calls `check_and_count_at(Utc::now())`. The proxy
+    /// hot path uses `check_and_count_at` directly.
     pub fn check_and_count(&self) -> QuotaResult {
         self.maybe_rollover();
+        self.check_and_count_inner()
+    }
+
+    fn check_and_count_inner(&self) -> QuotaResult {
 
         // Hot path:
         //   1. Bump the thread-local batch counter (no atomic).
@@ -298,7 +314,10 @@ impl QuotaTracker {
     /// relaxed `AtomicU64::load` + integer compare; the mutex is only taken
     /// when the epoch actually changes (once per month).
     fn maybe_rollover(&self) {
-        let now_epoch = current_period_epoch();
+        self.maybe_rollover_at(current_period_epoch(), Utc::now());
+    }
+
+    fn maybe_rollover_at(&self, now_epoch: u64, now: DateTime<Utc>) {
         if self.period_epoch.load(Ordering::Acquire) == now_epoch {
             return;
         }
@@ -308,7 +327,7 @@ impl QuotaTracker {
         if self.period_epoch.load(Ordering::Acquire) == now_epoch {
             return;
         }
-        let new_str = current_period();
+        let new_str = now.format("%Y-%m").to_string();
         info!(old = %*period, new = %new_str, "quota period rollover — resetting counters");
         *period = new_str;
         self.period_epoch.store(now_epoch, Ordering::Release);
@@ -364,6 +383,9 @@ fn current_period() -> String {
 /// fast path be lockless. Year is clamped to non-negative — Lynxx is not
 /// concerned with BCE quotas.
 fn current_period_epoch() -> u64 {
-    let now = Utc::now();
+    epoch_from_datetime(Utc::now())
+}
+
+fn epoch_from_datetime(now: DateTime<Utc>) -> u64 {
     (now.year().max(0) as u64) * 12 + (now.month() as u64 - 1)
 }

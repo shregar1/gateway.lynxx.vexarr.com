@@ -1,6 +1,6 @@
 use crate::db::Repository;
 use crate::models::LogEntry;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -25,8 +25,14 @@ impl LogWriter {
         let _ = self.tx.try_send(entry);
     }
 
-    pub fn log(
+    /// Cached-timestamp variant for the proxy hot path. The handler captures
+    /// `Utc::now()` once per request at entry and threads it through every
+    /// per-request consumer (health registry, quota tracker, log writer)
+    /// to eliminate redundant `clock_gettime` syscalls. See `proxy_handler`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log_at(
         &self,
+        now: DateTime<Utc>,
         method: &str,
         path: &str,
         client_ip: &str,
@@ -40,7 +46,6 @@ impl LogWriter {
     ) {
         let nil = Uuid::nil();
         let route_id_val = route_id.filter(|id| *id != nil);
-        let now = Utc::now();
         self.send(LogEntry {
             id: Uuid::new_v4(),
             urn: Uuid::new_v4().to_string(),
@@ -63,6 +68,37 @@ impl LogWriter {
             created_at: now,
             updated_at: now,
         });
+    }
+
+    /// Convenience: calls `log_at(Utc::now(), ...)`. The proxy hot path
+    /// uses `log_at` directly with the per-request cached timestamp.
+    #[allow(clippy::too_many_arguments)]
+    pub fn log(
+        &self,
+        method: &str,
+        path: &str,
+        client_ip: &str,
+        service_id: Option<Uuid>,
+        route_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        status: Option<u16>,
+        duration_ms: i64,
+        level: &str,
+        message: &str,
+    ) {
+        self.log_at(
+            Utc::now(),
+            method,
+            path,
+            client_ip,
+            service_id,
+            route_id,
+            project_id,
+            status,
+            duration_ms,
+            level,
+            message,
+        );
     }
 }
 

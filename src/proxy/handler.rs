@@ -16,6 +16,7 @@ use crate::quota::QuotaTracker;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{HeaderName, Request, Response, Uri};
+use chrono::{DateTime, Utc};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
 use std::time::Instant;
@@ -140,6 +141,7 @@ impl ProxyState {
     #[inline]
     fn log_request(
         &self,
+        now: DateTime<Utc>,
         method: &str,
         path: &str,
         client_ip: &str,
@@ -151,7 +153,8 @@ impl ProxyState {
         level: &str,
         message: &str,
     ) {
-        self.log_writer.log(
+        self.log_writer.log_at(
+            now,
             method,
             path,
             client_ip,
@@ -336,6 +339,13 @@ pub async fn proxy_handler(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, GatewayError> {
     let start = Instant::now();
+    // Cache the wall-clock at request entry and thread the same value through
+    // every per-request consumer (health registry, quota tracker, log
+    // writer). Each `Utc::now()` is a `clock_gettime` syscall; the
+    // pre-refactor handler fired ~4 of them per success-path request. The
+    // few hundred microseconds of skew between request-entry and the actual
+    // log write are irrelevant for an access log timestamp.
+    let request_started: DateTime<Utc> = Utc::now();
     // Clone the `Uri` once at the top so `path` / `query_string` can be
     // borrowed `&str` for the rest of the function without holding an
     // immutable borrow on `req` (which is mutated downstream). Internally
@@ -390,6 +400,7 @@ pub async fn proxy_handler(
             if !state.minimal_telemetry {
                 state.record_request_metric("-", "-", method, "no_route", "-");
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &peer_ip_early,
@@ -426,6 +437,7 @@ pub async fn proxy_handler(
         if !state.minimal_telemetry {
             state.record_request_metric(&svc_name, &route_id, method, "health_gated", "-");
             state.log_request(
+                request_started,
                 method,
                 path,
                 &peer_ip_early,
@@ -452,6 +464,7 @@ pub async fn proxy_handler(
         if !state.minimal_telemetry {
             state.record_request_metric(&svc_name, &route_id, method, "circuit_open", "-");
             state.log_request(
+                request_started,
                 method,
                 path,
                 &peer_ip_early,
@@ -478,6 +491,7 @@ pub async fn proxy_handler(
         if !state.minimal_telemetry {
             state.record_request_metric(&svc_name, &route_id, method, "license_revoked", "-");
             state.log_request(
+                request_started,
                 method,
                 path,
                 &peer_ip_early,
@@ -493,11 +507,12 @@ pub async fn proxy_handler(
         return Err(GatewayError::LicenseRevoked);
     }
 
-    let quota_result = state.quota.check_and_count();
+    let quota_result = state.quota.check_and_count_at(request_started);
     if quota_result == crate::quota::QuotaResult::Rejected {
         if !state.minimal_telemetry {
             state.record_request_metric(&svc_name, &route_id, method, "quota_exceeded", "-");
             state.log_request(
+                request_started,
                 method,
                 path,
                 &peer_ip_early,
@@ -709,6 +724,7 @@ pub async fn proxy_handler(
                 );
 
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -752,6 +768,7 @@ pub async fn proxy_handler(
                 let ws_status = result.as_ref().ok().map(|r| r.status().as_u16());
                 let ws_level = if result.is_err() { "error" } else { "info" };
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -770,11 +787,12 @@ pub async fn proxy_handler(
             let result =
                 crate::proxy::grpc::handle_grpc_web(&state.grpc_client, req, upstream_url).await;
             match &result {
-                Ok(_) => state.health.record_success(&service.id, &svc_name),
-                Err(e) => state.health.record_failure(
+                Ok(_) => state.health.record_success_at(&service.id, &svc_name, request_started),
+                Err(e) => state.health.record_failure_at(
                     &service.id,
                     &svc_name,
                     format!("grpc-web upstream error: {e}"),
+                    request_started,
                 ),
             }
             if !state.minimal_telemetry {
@@ -799,6 +817,7 @@ pub async fn proxy_handler(
                 let gw_status = result.as_ref().ok().map(|r| r.status().as_u16());
                 let gw_level = if result.is_err() { "error" } else { "info" };
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -816,11 +835,12 @@ pub async fn proxy_handler(
         ProtocolKind::Grpc => {
             let result = handle_grpc(&state.grpc_client, req, upstream_url).await;
             match &result {
-                Ok(_) => state.health.record_success(&service.id, &svc_name),
-                Err(e) => state.health.record_failure(
+                Ok(_) => state.health.record_success_at(&service.id, &svc_name, request_started),
+                Err(e) => state.health.record_failure_at(
                     &service.id,
                     &svc_name,
                     format!("grpc upstream error: {e}"),
+                    request_started,
                 ),
             }
             if !state.minimal_telemetry {
@@ -845,6 +865,7 @@ pub async fn proxy_handler(
                 let grpc_status = result.as_ref().ok().map(|r| r.status().as_u16());
                 let grpc_level = if result.is_err() { "error" } else { "info" };
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -903,10 +924,11 @@ pub async fn proxy_handler(
             let unix_resp = match proxy_via_unix(&sock_path, unix_req).await {
                 Ok(r) => r,
                 Err(e) => {
-                    state.health.record_failure(
+                    state.health.record_failure_at(
                         &service.id,
                         &svc_name,
                         format!("unix socket upstream: {e}"),
+                        request_started,
                     );
                     if !state.minimal_telemetry {
                         state.record_request_metric(
@@ -917,6 +939,7 @@ pub async fn proxy_handler(
                             &target_label,
                         );
                         state.log_request(
+                            request_started,
                             method,
                             path,
                             &client_ip_owned,
@@ -940,6 +963,7 @@ pub async fn proxy_handler(
                 Err(e) => {
                     if !state.minimal_telemetry {
                         state.log_request(
+                            request_started,
                             method,
                             path,
                             &client_ip_owned,
@@ -959,9 +983,9 @@ pub async fn proxy_handler(
             if status.is_server_error() {
                 state
                     .health
-                    .record_failure(&service.id, &svc_name, format!("upstream {status}"));
+                    .record_failure_at(&service.id, &svc_name, format!("upstream {status}"), request_started);
             } else {
-                state.health.record_success(&service.id, &svc_name);
+                state.health.record_success_at(&service.id, &svc_name, request_started);
             }
 
             let mut plugin_resp = Response::new(Body::from(resp_body.clone()));
@@ -1010,6 +1034,7 @@ pub async fn proxy_handler(
                     "info"
                 };
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -1290,10 +1315,11 @@ pub async fn proxy_handler(
     let upstream_resp = match upstream_resp {
         Some(r) => r,
         None => {
-            state.health.record_failure(
+            state.health.record_failure_at(
                 &service.id,
                 &svc_name,
                 format!("upstream send error: {last_err}"),
+                request_started,
             );
             if !state.minimal_telemetry {
                 state.record_request_metric(&svc_name, &route_id, method, "5xx", &target_label);
@@ -1305,6 +1331,7 @@ pub async fn proxy_handler(
                     start.elapsed().as_secs_f64(),
                 );
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -1358,13 +1385,14 @@ pub async fn proxy_handler(
                 )
                 .increment(1);
             }
-            state.health.record_failure(
+            state.health.record_failure_at(
                 &service.id,
                 &svc_name,
                 format!("upstream {status}"),
+                request_started,
             );
         } else {
-            state.health.record_success(&service.id, &svc_name);
+            state.health.record_success_at(&service.id, &svc_name, request_started);
         }
         if let Some(tid) = picked_target_id {
             if state.passive_health.is_fail_status(status.as_u16()) {
@@ -1442,6 +1470,7 @@ pub async fn proxy_handler(
                 "info"
             };
             state.log_request(
+                request_started,
                 method,
                 path,
                 &client_ip_owned,
@@ -1465,10 +1494,11 @@ pub async fn proxy_handler(
     let resp_body = match axum::body::to_bytes(Body::new(incoming), usize::MAX).await {
         Ok(b) => b,
         Err(e) => {
-            state.health.record_failure(
+            state.health.record_failure_at(
                 &service.id,
                 &svc_name,
                 format!("upstream body error: {e}"),
+                request_started,
             );
             if !state.minimal_telemetry {
                 metrics::counter!(
@@ -1486,6 +1516,7 @@ pub async fn proxy_handler(
                     start.elapsed().as_secs_f64(),
                 );
                 state.log_request(
+                    request_started,
                     method,
                     path,
                     &client_ip_owned,
@@ -1513,9 +1544,9 @@ pub async fn proxy_handler(
         }
         state
             .health
-            .record_failure(&service.id, &svc_name, format!("upstream {status}"));
+            .record_failure_at(&service.id, &svc_name, format!("upstream {status}"), request_started);
     } else {
-        state.health.record_success(&service.id, &svc_name);
+        state.health.record_success_at(&service.id, &svc_name, request_started);
     }
 
     // ── Passive per-target health tracking ──
@@ -1621,6 +1652,7 @@ pub async fn proxy_handler(
             "info"
         };
         state.log_request(
+            request_started,
             method,
             path,
             &client_ip_owned,
