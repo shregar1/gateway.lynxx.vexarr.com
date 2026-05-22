@@ -156,6 +156,23 @@ impl TargetState {
 }
 
 /// RAII guard that decrements `in_flight` on drop.
+///
+/// `in_flight` is read synchronously by `pick_least_conn`,
+/// `pick_random_choose` (P2C), `pick_least_time`, and the drain-completion
+/// poll in `ServiceLoadBalancer::find_and_drain`. All four need an
+/// up-to-date per-target count to behave correctly:
+///
+///   * The LB pick algorithms make a routing decision *now*, using the
+///     count from every worker — batching per-worker would let other
+///     workers' increments lag behind and skew the choice.
+///   * Drain completion waits for `in_flight == 0`; a stale per-worker
+///     batch would mask a non-zero pending count and the drain would
+///     hang.
+///
+/// So unlike the quota counter (which is consulted approximately and at
+/// human-comprehensible scale), the `in_flight` counter must stay
+/// strictly correct per-update. We pay one `fetch_add` on increment and
+/// one `fetch_sub` on drop per request.
 pub struct InFlightGuard {
     state: Arc<TargetState>,
 }

@@ -11,6 +11,7 @@
 //! but flagged with `X-Lynxx-Overage: true`. The billing API charges per
 //! million overage calls at the tier's rate.
 
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,6 +25,38 @@ use crate::db::Repository;
 use crate::error::GatewayError;
 
 const FLUSH_INTERVAL_SECS: u64 = 30;
+
+/// Number of `check_and_count` calls absorbed into a thread-local Cell
+/// before the increment is flushed to the shared `calls` atomic. At 100k
+/// RPS this turns the per-request `AtomicU64::fetch_add` into a thread-
+/// local `Cell` write 63 calls out of 64 (the 64th call pays for the
+/// batch). Drift between the shared count and the true call count is
+/// bounded by `BATCH_SIZE × num_threads`, which for our usage (monthly
+/// tier limits in the millions) is well inside precision tolerance.
+///
+/// The drift is one-sided when reading (the global undercounts in-flight
+/// batches), which matters at two points:
+///   * `snapshot()` — admin API; off by < BATCH_SIZE per thread, fine.
+///   * `flush()` — periodic DB persist every 30s; same drift, fine.
+///   * `check_and_count` itself — the comparison `(global + local_pending)
+///     < limit` accounts for the current thread's pending count, so a
+///     thread cannot fool itself into thinking it has more quota than it
+///     does. Inter-thread drift can still cause a request to be classed
+///     as Allowed when it is just past the boundary; the next batch flush
+///     resyncs.
+const QUOTA_BATCH_SIZE: u32 = 64;
+
+thread_local! {
+    /// Per-thread accumulator for `check_and_count`. Flushed to
+    /// `QuotaTracker::calls` every `QUOTA_BATCH_SIZE` calls.
+    ///
+    /// There is exactly one `QuotaTracker` instance per process (see
+    /// `main.rs` boot), so a process-global thread-local is safe — it
+    /// is only ever read in the context of that one tracker. If we ever
+    /// support multiple trackers, this needs to be promoted to a
+    /// per-tracker store (e.g. `DashMap<TrackerId, Cell<u32>>` per thread).
+    static QUOTA_BATCH: Cell<u32> = const { Cell::new(0) };
+}
 
 // ---------------------------------------------------------------------------
 // Plan tier
@@ -154,21 +187,58 @@ impl QuotaTracker {
     pub fn check_and_count(&self) -> QuotaResult {
         self.maybe_rollover();
 
+        // Hot path:
+        //   1. Bump the thread-local batch counter (no atomic).
+        //   2. If the batch reached BATCH_SIZE, flush to the shared atomic
+        //      with a single `fetch_add(BATCH_SIZE)`.
+        //   3. Decide on Allowed / Overage / Rejected using
+        //      `(global + local_pending)` as the approximate post-count.
+        //
+        // Pre-batching cost: 1× `fetch_add` per request (+ extra atomics on
+        // the Overage / Rejected branches). Post-batching cost: 1 atomic per
+        // 64 requests on the Allowed branch — a 64× reduction at the call
+        // rate that motivated this change.
         let limit = self.limit.load(Ordering::Relaxed);
+
+        // `post_total`: the inclusive count *after* counting this request,
+        // expressed as global_total + local_pending.
+        let post_total = QUOTA_BATCH.with(|batch| {
+            let n = batch.get() + 1;
+            if n >= QUOTA_BATCH_SIZE {
+                // Flush. fetch_add returns the value before the add; the
+                // post-flush global is `prev_global + n`.
+                let prev_global = self.calls.fetch_add(n as u64, Ordering::Relaxed);
+                batch.set(0);
+                prev_global + n as u64
+            } else {
+                batch.set(n);
+                self.calls.load(Ordering::Relaxed) + n as u64
+            }
+        });
+
         if limit == 0 {
-            // Unlimited (enterprise)
-            self.calls.fetch_add(1, Ordering::Relaxed);
+            // Unlimited (enterprise) — no comparison needed.
             return QuotaResult::Allowed;
         }
 
-        let prev = self.calls.fetch_add(1, Ordering::Relaxed);
-        if prev < limit {
+        if post_total <= limit {
             QuotaResult::Allowed
         } else if self.allow_overage.load(Ordering::Relaxed) {
             self.overage.fetch_add(1, Ordering::Relaxed);
             QuotaResult::Overage
         } else {
-            self.calls.fetch_sub(1, Ordering::Relaxed);
+            // Reject: cold path. Roll back the count we just charged so
+            // `calls` continues to reflect only served requests. If the
+            // local batch is non-empty, decrement there; otherwise we
+            // already flushed in this call, so undo the global add.
+            QUOTA_BATCH.with(|batch| {
+                let n = batch.get();
+                if n > 0 {
+                    batch.set(n - 1);
+                } else {
+                    self.calls.fetch_sub(1, Ordering::Relaxed);
+                }
+            });
             self.rejected.fetch_add(1, Ordering::Relaxed);
             QuotaResult::Rejected
         }
@@ -215,6 +285,12 @@ impl QuotaTracker {
             self.calls.store(0, Ordering::Relaxed);
             self.rejected.store(0, Ordering::Relaxed);
             self.overage.store(0, Ordering::Relaxed);
+            // We can't reach into other threads' QUOTA_BATCH thread-locals
+            // from here, so up to (QUOTA_BATCH_SIZE - 1) × num_threads
+            // increments collected before the rollover will leak into the
+            // new period's count when those threads next flush. For a
+            // month-boundary rollover with millions of monthly calls, this
+            // drift is negligible.
         }
     }
 }
