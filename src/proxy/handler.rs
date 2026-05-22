@@ -466,7 +466,26 @@ pub async fn proxy_handler(
     };
 
     let svc_name = service.name.clone();
-    let route_id = route.id.to_string();
+    // `route_id` is used exclusively as a prometheus metric label inside
+    // `record_request_metric` / `record_request_duration`. Those call
+    // sites are already gated behind `if !state.minimal_telemetry`, so
+    // when the knob is on the formatted string is never read.
+    //
+    // The flamegraph at 100k RPS showed `uuid::Uuid::to_string` /
+    // `spec_to_string<uuid::Uuid>` at ~30k samples — pure work for a
+    // value that's discarded in the bench's `minimal_telemetry=true`
+    // configuration. Defer the format until we know we'll use it.
+    //
+    // We can't trivially return `&'static ""` here because callers
+    // borrow `&route_id` from this owned `String`, and a `let` binding
+    // unifies the two branches' types. An empty `String` allocates
+    // exactly zero bytes (the inline `Vec` is null-init), so the
+    // `minimal_telemetry=true` path pays no heap allocation.
+    let route_id: String = if state.minimal_telemetry {
+        String::new()
+    } else {
+        route.id.to_string()
+    };
     // `method` and `path` are &str borrowed from owned locals (method_obj /
     // uri) at the top of this function, so they remain valid through every
     // downstream call. No need to allocate `log_method` / `log_path`
