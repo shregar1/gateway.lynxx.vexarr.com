@@ -701,7 +701,14 @@ async fn async_main() -> anyhow::Result<()> {
             .fallback(proxy_handler)
             .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
             .layer(tower_http::trace::TraceLayer::new_for_http())
-            .with_state(proxy_state);
+            // Wrap in `Arc` so axum's per-request `State` extractor clones
+            // exactly one atomic refcount instead of cloning every one of
+            // ProxyState's ~8 internal `Arc<...>` fields. The symbolized
+            // perf record at 100k RPS / 4096 conns showed `drop_in_place
+            // <ProxyState>` and its child `drop_in_place<Client>` totalling
+            // ~14% of CPU samples — pure cache-line ping-pong from
+            // per-request fan-out clones of state-resident `Arc`s.
+            .with_state(std::sync::Arc::new(proxy_state));
 
         // Mount the install endpoints. Their routes take precedence over the
         // proxy fallback because merge() resolves explicit routes before the

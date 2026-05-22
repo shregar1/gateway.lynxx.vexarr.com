@@ -377,7 +377,7 @@ async fn proxy_via_unix(
 }
 
 pub async fn proxy_handler(
-    State(state): State<ProxyState>,
+    State(state): State<Arc<ProxyState>>,
     mut req: Request<Body>,
 ) -> Result<Response<Body>, GatewayError> {
     let start = Instant::now();
@@ -650,6 +650,16 @@ pub async fn proxy_handler(
         .lb
         .pick(&service.id, state.local_zone.as_deref(), &lb_ctx);
     let mut picked_target_id = picked.as_ref().map(|ts| ts.target.id);
+    // Parse the LB strategy once. The downstream sticky-cookie attach sites
+    // (one in the streaming path, one in the buffered path) only need to
+    // know whether this service uses cookie-sticky; doing the
+    // `LbStrategy::from_str(...)` match on `service.lb_strategy` twice per
+    // request showed up at ~90M samples in the post-fix flamegraph (a
+    // chain of `match` arms over `&str`). Compute it once here.
+    let is_cookie_sticky = matches!(
+        LbStrategy::from_str(&service.lb_strategy),
+        LbStrategy::CookieSticky
+    );
     let (upstream_base, mut target_label, _in_flight): (Arc<str>, Arc<str>, _) = match &picked {
         Some(ts) => {
             let guard = InFlightGuard::new(ts.clone());
@@ -1498,10 +1508,7 @@ pub async fn proxy_handler(
 
         // Sticky-session cookie + bench-info headers — these mutate
         // headers only, no body access needed.
-        if matches!(
-            LbStrategy::from_str(&service.lb_strategy),
-            LbStrategy::CookieSticky
-        ) {
+        if is_cookie_sticky {
             if let Some(tid) = picked_target_id {
                 if let Ok(val) = format!(
                     "{}={}; Path=/; HttpOnly; SameSite=Lax",
@@ -1682,11 +1689,9 @@ pub async fn proxy_handler(
     *final_resp.headers_mut() = final_parts.headers;
 
     // Set sticky-session cookie so subsequent requests from this client
-    // land on the same target.
-    if matches!(
-        LbStrategy::from_str(&service.lb_strategy),
-        LbStrategy::CookieSticky
-    ) {
+    // land on the same target. `is_cookie_sticky` parsed once at LB-pick
+    // time so both telemetry branches share it.
+    if is_cookie_sticky {
         if let Some(tid) = picked_target_id {
             if let Ok(val) = format!(
                 "{}={}; Path=/; HttpOnly; SameSite=Lax",

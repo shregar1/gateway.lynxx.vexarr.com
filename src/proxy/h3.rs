@@ -15,7 +15,7 @@ use tracing::{error, info};
 /// requires ALPN to include `"h3"`.
 pub async fn spawn_h3_server(
     addr: SocketAddr,
-    state: ProxyState,
+    state: Arc<ProxyState>,
     rustls_config: rustls::ServerConfig,
 ) -> anyhow::Result<()> {
     // quinn 0.11+ uses a specialized wrapper for rustls config.
@@ -47,7 +47,7 @@ pub async fn spawn_h3_server(
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Connection, state: ProxyState) -> anyhow::Result<()> {
+async fn handle_connection(conn: quinn::Connection, state: Arc<ProxyState>) -> anyhow::Result<()> {
     let mut h3_conn = h3::server::Connection::new(h3_quinn::Connection::new(conn)).await?;
 
     while let Ok(Some(resolver)) = h3_conn.accept().await {
@@ -83,7 +83,7 @@ async fn handle_connection(conn: quinn::Connection, state: ProxyState) -> anyhow
             let mut axum_req = Request::from_parts(parts, Body::from(body_bytes));
             *axum_req.version_mut() = Version::HTTP_3;
 
-            match proxy_handler(State(state), axum_req).await {
+            match proxy_handler(State(state.into()), axum_req).await {
                 Ok(resp) => {
                     let (parts, body) = resp.into_parts();
                     let h3_resp = Response::from_parts(parts, ());
