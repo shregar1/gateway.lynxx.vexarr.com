@@ -1133,19 +1133,32 @@ pub async fn proxy_handler(
         .parse()
         .map_err(|e| GatewayError::BadRequest(format!("invalid upstream uri: {e}")))?;
 
-    // Capture the proxy-cache key (set by the request-side plugin) before we
-    // strip it; we need to re-attach it to the response for `on_response`.
-    let cache_key = req
-        .headers()
-        .get(crate::plugins::proxy_cache::CACHE_KEY_HEADER)
-        .cloned();
-    // Same bridge for the request-recorder's capture id. The plugin sets a
-    // request header in on_request and reads it back in on_response.
-    let recorder_id = req.headers().get("x-lynxx-recorder-id").cloned();
-
-    // Feature 110: capture the original Host header before HOP_BY_HOP
-    // stripping so we can re-insert it when pass_host_header is enabled.
-    let original_host_hv = req.headers().get(axum::http::header::HOST).cloned();
+    // Both the proxy-cache marker and the request-recorder capture-id are
+    // ONLY ever set by their respective plugins on the request side. With
+    // an empty plugin chain there's no producer of these headers, so the
+    // `.get(...)` and `.remove(...)` calls below are pure waste — three
+    // hash probes per request that always return None. Gate them on
+    // `plugins.is_empty()` (single atomic load).
+    //
+    // Feature 110 (Host re-insertion for `pass_host_header`) needs the
+    // original Host header captured before HOP_BY_HOP strip; that's per
+    // service, not per plugin, so it stays.
+    let plugins_active = !state.plugins.is_empty();
+    let (cache_key, recorder_id) = if plugins_active {
+        (
+            req.headers()
+                .get(crate::plugins::proxy_cache::CACHE_KEY_HEADER)
+                .cloned(),
+            req.headers().get("x-lynxx-recorder-id").cloned(),
+        )
+    } else {
+        (None, None)
+    };
+    let original_host_hv = if service.pass_host_header.unwrap_or(false) {
+        req.headers().get(axum::http::header::HOST).cloned()
+    } else {
+        None
+    };
 
     // Move parts out so we don't clone the HeaderMap. `req` is consumed.
     let (mut parts, body) = req.into_parts();
@@ -1155,20 +1168,23 @@ pub async fn proxy_handler(
     // the response for the plugin chain.
     let extensions = std::mem::take(&mut parts.extensions);
 
-    // Strip hop-by-hop and our internal proxy-cache marker.
-    parts
-        .headers
-        .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
-    parts.headers.remove("x-lynxx-recorder-id");
+    // Strip hop-by-hop. The internal proxy-cache + recorder markers are
+    // only present if plugins are active — skip the `.remove()` probes
+    // on the no-plugin hot path.
+    if plugins_active {
+        parts
+            .headers
+            .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
+        parts.headers.remove("x-lynxx-recorder-id");
+    }
     strip_hop_by_hop(&mut parts.headers);
 
-    // Feature 110: passHostHeader — re-insert the original client Host header
-    // when the service opts in. By default the Host is stripped (standard
-    // reverse-proxy behaviour) and hyper sets it from the upstream URI.
-    if service.pass_host_header.unwrap_or(false) {
-        if let Some(hv) = original_host_hv {
-            parts.headers.insert(axum::http::header::HOST, hv);
-        }
+    // Feature 110: passHostHeader — re-insert the original client Host
+    // header when the service opts in. `original_host_hv` is only
+    // populated above when `service.pass_host_header == true`, so a
+    // `Some` here implies the service opted in.
+    if let Some(hv) = original_host_hv {
+        parts.headers.insert(axum::http::header::HOST, hv);
     }
 
     // Force HTTP/1.1 over the wire — the connector negotiates h2 via ALPN
