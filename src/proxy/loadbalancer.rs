@@ -3,11 +3,12 @@
 //! strategies. Targets are runtime-tracked for in-flight count and health.
 
 use crate::models::{Target, TargetLifecycle};
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use uuid::Uuid;
 
 pub const STICKY_COOKIE_NAME: &str = "_lynxx_upstream";
@@ -479,8 +480,22 @@ impl ServiceLoadBalancer {
 }
 
 /// Registry of per-service load balancers.
+///
+/// Reads (the per-request `pick`) outnumber writes (rebuild on config change,
+/// health flip) by ~6 orders of magnitude at steady state. We use `ArcSwap`
+/// instead of `RwLock` so the hot path becomes a single atomic load + `Arc`
+/// clone — no read-side lock acquisition, no cache-line ping-pong across
+/// cores at 100k RPS.
+///
+/// Per-target runtime state (`healthy`, `lifecycle`, `in_flight`,
+/// `avg_response_us`) is already stored in atomics on `Arc<TargetState>`
+/// inside `ServiceLoadBalancer`, so `mark_target_health` and
+/// `set_target_lifecycle` keep mutating in place via `load()` rather than
+/// RCU-replacing the whole `ServiceLoadBalancer` (which would also reset the
+/// `rr_counter`). RCU-style replacement only fires on `rebuild_for_service`,
+/// which is the only mutator that changes target topology.
 pub struct LoadBalancerRegistry {
-    inner: DashMap<Uuid, Arc<RwLock<ServiceLoadBalancer>>>,
+    inner: DashMap<Uuid, Arc<ArcSwap<ServiceLoadBalancer>>>,
 }
 
 impl LoadBalancerRegistry {
@@ -497,7 +512,16 @@ impl LoadBalancerRegistry {
         targets: Vec<Target>,
     ) {
         let lb = ServiceLoadBalancer::new(strategy, targets);
-        self.inner.insert(service_id, Arc::new(RwLock::new(lb)));
+        // Swap in-place when an `ArcSwap` already exists for this service so
+        // any reader currently holding an `Arc<ArcSwap<_>>` clone picks up
+        // the new targets on its next `load()`. Otherwise insert a fresh
+        // `ArcSwap` for first-time registration.
+        if let Some(existing) = self.inner.get(&service_id) {
+            existing.store(Arc::new(lb));
+        } else {
+            self.inner
+                .insert(service_id, Arc::new(ArcSwap::from_pointee(lb)));
+        }
     }
 
     pub fn pick(
@@ -506,9 +530,8 @@ impl LoadBalancerRegistry {
         local_zone: Option<&str>,
         ctx: &RequestContext,
     ) -> Option<Arc<TargetState>> {
-        let entry = self.inner.get(service_id)?;
-        let guard = entry.read().ok()?;
-        guard.pick(local_zone, ctx)
+        let lb = self.inner.get(service_id)?.load_full();
+        lb.pick(local_zone, ctx)
     }
 
     /// Pick any routable target not in `exclude`, using least-connections as
@@ -520,10 +543,8 @@ impl LoadBalancerRegistry {
         exclude: &[Uuid],
         _local_zone: Option<&str>,
     ) -> Option<Arc<TargetState>> {
-        let entry = self.inner.get(service_id)?;
-        let guard = entry.read().ok()?;
-        guard
-            .targets()
+        let lb = self.inner.get(service_id)?.load_full();
+        lb.targets()
             .iter()
             .filter(|s| s.is_routable() && !exclude.contains(&s.target.id))
             .min_by_key(|s| s.in_flight.load(Ordering::Relaxed))
@@ -531,9 +552,8 @@ impl LoadBalancerRegistry {
     }
 
     pub fn strategy_for(&self, service_id: &Uuid) -> Option<LbStrategy> {
-        let entry = self.inner.get(service_id)?;
-        let guard = entry.read().ok()?;
-        Some(guard.strategy())
+        let lb = self.inner.get(service_id)?.load_full();
+        Some(lb.strategy())
     }
 
     pub fn remove_service(&self, service_id: &Uuid) {
@@ -542,12 +562,11 @@ impl LoadBalancerRegistry {
 
     pub fn mark_target_health(&self, service_id: &Uuid, target_id: &Uuid, healthy: bool) {
         if let Some(entry) = self.inner.get(service_id) {
-            if let Ok(guard) = entry.read() {
-                for s in guard.targets() {
-                    if s.target.id == *target_id {
-                        s.healthy.store(healthy, Ordering::Relaxed);
-                        break;
-                    }
+            let lb = entry.load();
+            for s in lb.targets() {
+                if s.target.id == *target_id {
+                    s.healthy.store(healthy, Ordering::Relaxed);
+                    break;
                 }
             }
         }
@@ -555,12 +574,11 @@ impl LoadBalancerRegistry {
 
     pub fn set_target_lifecycle(&self, service_id: &Uuid, target_id: &Uuid, lc: TargetLifecycle) {
         if let Some(entry) = self.inner.get(service_id) {
-            if let Ok(guard) = entry.read() {
-                for s in guard.targets() {
-                    if s.target.id == *target_id {
-                        s.set_lifecycle(lc);
-                        break;
-                    }
+            let lb = entry.load();
+            for s in lb.targets() {
+                if s.target.id == *target_id {
+                    s.set_lifecycle(lc);
+                    break;
                 }
             }
         }
@@ -578,15 +596,12 @@ impl LoadBalancerRegistry {
         timeout_ms: u64,
     ) -> Option<Arc<TargetState>> {
         let ts = {
-            let entry = self.inner.get(service_id)?;
-            let guard = entry.read().ok()?;
-            guard
-                .targets()
+            let lb = self.inner.get(service_id)?.load_full();
+            lb.targets()
                 .iter()
                 .find(|s| s.target.id == *target_id)
-                .cloned()
+                .cloned()?
         };
-        let ts = ts?;
         ts.set_lifecycle(TargetLifecycle::Draining);
         let target_arc = ts.clone();
         tokio::spawn(async move {
@@ -617,10 +632,7 @@ impl LoadBalancerRegistry {
 
     pub fn has_healthy_active_target(&self, service_id: &Uuid) -> bool {
         match self.inner.get(service_id) {
-            Some(entry) => match entry.read() {
-                Ok(g) => g.targets().iter().any(|s| s.is_routable()),
-                Err(_) => false,
-            },
+            Some(entry) => entry.load().targets().iter().any(|s| s.is_routable()),
             None => false,
         }
     }
@@ -628,10 +640,7 @@ impl LoadBalancerRegistry {
     /// Snapshot of all targets for a service (including runtime state).
     pub fn snapshot(&self, service_id: &Uuid) -> Vec<Arc<TargetState>> {
         match self.inner.get(service_id) {
-            Some(entry) => match entry.read() {
-                Ok(g) => g.targets().to_vec(),
-                Err(_) => Vec::new(),
-            },
+            Some(entry) => entry.load().targets().to_vec(),
             None => Vec::new(),
         }
     }

@@ -99,6 +99,12 @@ tracing-opentelemetry = "0.28"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
+# Lock-free RCU for the per-service load-balancer state. The hot path
+# (request_handler → LoadBalancerRegistry::pick) is read-only and dwarfs
+# the rare writes from health checks / config reloads, so an `ArcSwap`
+# replace beats `RwLock` by a large margin — no cache-line ping-pong on
+# the read lock at 100k RPS on a multi-core box.
+arc-swap = "1"
 # ahash is 2-5× faster than the default SipHash that std + dashmap
 # pick to be DoS-resistant. For INTERNAL-only maps (route table,
 # admin-token cache, etc.) where the keys are server-generated UUIDs
