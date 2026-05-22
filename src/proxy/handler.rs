@@ -168,22 +168,33 @@ impl ProxyState {
 
 /// Hop-by-hop headers that must not be forwarded to the upstream. RFC 7230 §6.1.
 /// `host` is also excluded so hyper synthesises it from the upstream URI.
-const HOP_BY_HOP: [&str; 9] = [
-    "host",
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailers",
-    "transfer-encoding",
-    "upgrade",
+///
+/// Stored as pre-parsed `HeaderName` values so the per-request strip loop
+/// can call `headers.remove(&name)` directly instead of re-running
+/// `HeaderName::from_bytes(...)` per header per request. At 100k RPS that
+/// was ~900k `from_bytes` calls/sec — pure waste, since these strings are
+/// known-valid at compile time.
+///
+/// `HeaderName::from_static` is `const fn`, so this is one-time work at
+/// program-load with zero runtime overhead.
+static HOP_BY_HOP: [HeaderName; 9] = [
+    HeaderName::from_static("host"),
+    HeaderName::from_static("connection"),
+    HeaderName::from_static("keep-alive"),
+    HeaderName::from_static("proxy-authenticate"),
+    HeaderName::from_static("proxy-authorization"),
+    HeaderName::from_static("te"),
+    HeaderName::from_static("trailers"),
+    HeaderName::from_static("transfer-encoding"),
+    HeaderName::from_static("upgrade"),
 ];
 
 #[inline]
+#[allow(dead_code)]
 fn is_hop_by_hop(name: &HeaderName) -> bool {
-    let s = name.as_str();
-    HOP_BY_HOP.iter().any(|h| h.eq_ignore_ascii_case(s))
+    // `HeaderName` equality is an interned-string byte compare — much
+    // cheaper than re-parsing each entry via `from_bytes` per call.
+    HOP_BY_HOP.iter().any(|h| h == name)
 }
 
 /// Find the value of a cookie named `name` in any `Cookie:` header.
@@ -875,10 +886,8 @@ pub async fn proxy_handler(
                 .headers
                 .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
             parts.headers.remove("x-lynxx-recorder-id");
-            for h in HOP_BY_HOP.iter() {
-                if let Ok(name) = HeaderName::from_bytes(h.as_bytes()) {
-                    parts.headers.remove(&name);
-                }
+            for name in HOP_BY_HOP.iter() {
+                parts.headers.remove(name);
             }
 
             // Feature 110: passHostHeader for unix socket upstreams.
@@ -1067,11 +1076,8 @@ pub async fn proxy_handler(
         .headers
         .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
     parts.headers.remove("x-lynxx-recorder-id");
-    for h in HOP_BY_HOP.iter() {
-        // safety: the constants are valid header names.
-        if let Ok(name) = HeaderName::from_bytes(h.as_bytes()) {
-            parts.headers.remove(&name);
-        }
+    for name in HOP_BY_HOP.iter() {
+        parts.headers.remove(name);
     }
 
     // Feature 110: passHostHeader — re-insert the original client Host header
