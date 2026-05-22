@@ -305,3 +305,13 @@ panic = "abort"
 strip = "symbols"
 debug = false
 overflow-checks = false
+
+# Variant of `release` that keeps the symbol table and DWARF line tables
+# so `perf record --call-graph dwarf` resolves Rust function names
+# instead of showing `[lynxx-gateway]` for every frame. Identical
+# codegen to `release` (same LTO, codegen-units, panic strategy) so
+# perf numbers translate 1:1.
+[profile.release-debug]
+inherits = "release"
+strip = "debuginfo"
+debug = "line-tables-only"
