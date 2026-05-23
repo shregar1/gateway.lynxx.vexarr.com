@@ -2,6 +2,7 @@ pub mod acme;
 pub mod acme_server;
 pub mod buffer;
 pub mod cert_store;
+pub mod conn_reuse;
 pub mod directives;
 pub mod dns_challenge;
 pub mod error_pages;
