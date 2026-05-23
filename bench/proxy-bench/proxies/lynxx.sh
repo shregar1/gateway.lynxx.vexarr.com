@@ -61,8 +61,20 @@ start_proxy() {
 }
 
 stop_proxy() {
-  pkill -f 'lynxx-gateway' 2>/dev/null || true
-  sleep 2
+  # SIGKILL — the bench-side ladder relies on stop+start being
+  # near-instant. Newer lynxx-gateway builds added a 30s graceful
+  # drain on SIGTERM, which kept the OLD process holding :28080
+  # while the next bench level's start_proxy raced to bind it. The
+  # new instance silently failed on bind and wait_for_port timed out
+  # after 30s with "SKIP: lynxx failed to start". Force-kill here is
+  # safe because the bench owns the process lifecycle end-to-end.
+  pkill -9 -f 'lynxx-gateway' 2>/dev/null || true
+  # Wait for :28080 to actually free (forced exit can leave the
+  # socket in TIME_WAIT briefly).
+  for _ in 1 2 3 4 5; do
+    ss -tln 2>/dev/null | grep -q ":28080 " || break
+    sleep 1
+  done
 }
 
 main() {
