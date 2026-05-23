@@ -1220,4 +1220,436 @@ mod tests {
         set_header_strategy(HeaderStrategy::Block);
         assert_eq!(header_strategy(), HeaderStrategy::Block);
     }
+
+    // ── RingBuf: available_read / available_write / is_full / is_empty ──
+
+    #[test]
+    fn ring_available_read_write_after_operations() {
+        let mut ring = RingBuf::with_exact_capacity(16);
+        assert_eq!(ring.len(), 0);
+        assert_eq!(ring.remaining(), 16);
+        assert!(ring.is_empty());
+
+        ring.write(b"abcde");
+        assert_eq!(ring.len(), 5);        // available_read
+        assert_eq!(ring.remaining(), 11); // available_write
+
+        ring.consume(3);
+        assert_eq!(ring.len(), 2);
+        assert_eq!(ring.remaining(), 14);
+
+        ring.write(b"fghij");
+        assert_eq!(ring.len(), 7);
+        assert_eq!(ring.remaining(), 9);
+    }
+
+    #[test]
+    fn ring_is_full() {
+        let mut ring = RingBuf::with_exact_capacity(4);
+        assert_eq!(ring.remaining(), 4);
+        ring.write(b"ABCD");
+        assert_eq!(ring.remaining(), 0);
+        assert_eq!(ring.len(), 4);
+    }
+
+    #[test]
+    fn ring_is_empty_after_consume_all() {
+        let mut ring = RingBuf::with_exact_capacity(8);
+        ring.write(b"data");
+        assert!(!ring.is_empty());
+        ring.consume(4);
+        assert!(ring.is_empty());
+        assert_eq!(ring.remaining(), 8);
+    }
+
+    #[test]
+    fn ring_wrap_around_write_and_read_correctness() {
+        let mut ring = RingBuf::with_exact_capacity(8);
+        // Write 6, consume 4 → head=4, len=2, tail=6
+        ring.write(b"ABCDEF");
+        ring.consume(4);
+        assert_eq!(ring.len(), 2);
+
+        // Write 5 more → tail wraps: 6+5=11, 11%8=3
+        let n = ring.write(b"GHIJK");
+        assert_eq!(n, 5);
+        assert_eq!(ring.len(), 7);
+
+        // Verify two-slice read
+        let (a, b) = ring.read_slices();
+        assert_eq!(a.len() + b.len(), 7);
+        let mut all = a.to_vec();
+        all.extend_from_slice(b);
+        assert_eq!(&all, b"EFGHIJK");
+    }
+
+    #[test]
+    fn ring_try_write_when_full_returns_zero() {
+        let mut ring = RingBuf::with_exact_capacity(4);
+        ring.write(b"FULL");
+        assert_eq!(ring.remaining(), 0);
+        let n = ring.write(b"X");
+        assert_eq!(n, 0);
+        assert_eq!(ring.len(), 4);
+    }
+
+    #[test]
+    fn ring_peek_returns_data_without_consuming() {
+        let mut ring = RingBuf::with_exact_capacity(16);
+        ring.write(b"peek test");
+        let (a, b) = ring.read_slices();
+        let mut peeked = a.to_vec();
+        peeked.extend_from_slice(b);
+        assert_eq!(&peeked, b"peek test");
+        // Data is still there — not consumed.
+        assert_eq!(ring.len(), 9);
+        let (a2, _) = ring.read_slices();
+        assert_eq!(a2, b"peek test");
+    }
+
+    #[test]
+    fn ring_consume_more_than_available_clamps() {
+        let mut ring = RingBuf::with_exact_capacity(8);
+        ring.write(b"ABC");
+        ring.consume(100); // more than len=3
+        assert!(ring.is_empty());
+        assert_eq!(ring.len(), 0);
+    }
+
+    #[test]
+    fn ring_compact_wrap_around() {
+        let mut ring = RingBuf::with_exact_capacity(8);
+        // Force wrap: write 6, consume 5 → head=5, len=1
+        ring.write(b"ABCDEF");
+        ring.consume(5);
+        // Write 5 more → wraps around
+        ring.write(b"GHIJK");
+        assert_eq!(ring.len(), 6); // F + GHIJK
+
+        let contiguous = ring.as_contiguous();
+        assert_eq!(contiguous, b"FGHIJK");
+    }
+
+    #[test]
+    fn ring_clear() {
+        let mut ring = RingBuf::with_exact_capacity(16);
+        ring.write(b"some data");
+        ring.clear();
+        assert!(ring.is_empty());
+        assert_eq!(ring.remaining(), 16);
+    }
+
+    // ── CompactBuf: capacity, len, is_empty, consume partial, reset ──
+
+    #[test]
+    fn compact_buf_is_empty() {
+        let buf = CompactBuf::new(32);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn compact_buf_consume_partial() {
+        let mut buf = CompactBuf::new(64);
+        buf.write(b"ABCDEFGHIJ"); // 10 bytes
+        buf.consume(4);
+        assert_eq!(buf.len(), 6);
+        assert_eq!(buf.data(), b"EFGHIJ");
+        buf.consume(3);
+        assert_eq!(buf.len(), 3);
+        assert_eq!(buf.data(), b"HIJ");
+    }
+
+    #[test]
+    fn compact_buf_consume_all_resets() {
+        let mut buf = CompactBuf::new(64);
+        buf.write(b"ABCDEF");
+        buf.consume(6); // consume exactly all
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        // After full consume, internal state resets — write fresh data.
+        buf.write(b"GH");
+        assert_eq!(buf.data(), b"GH");
+    }
+
+    #[test]
+    fn compact_buf_auto_compact_trigger() {
+        // Create a small-capacity buffer to trigger compaction easily.
+        let mut buf = CompactBuf::new(8);
+        // Write 8 bytes (fills capacity).
+        buf.write(b"AAAABBBB");
+        // Consume 5 bytes → read_pos=5, capacity/2 = at least 4, so 5 > cap/2.
+        buf.consume(5);
+        assert_eq!(buf.data(), b"BBB");
+
+        // Next write triggers maybe_compact.
+        buf.write(b"CC");
+        assert_eq!(buf.data(), b"BBBCC");
+        // Verify total_written reflects the compaction (internal length).
+        assert_eq!(buf.len(), 5);
+    }
+
+    #[test]
+    fn compact_buf_clear() {
+        let mut buf = CompactBuf::new(32);
+        buf.write(b"ABCDEF");
+        buf.consume(2);
+        buf.clear();
+        assert!(buf.is_empty());
+        assert_eq!(buf.total_written(), 0);
+    }
+
+    #[test]
+    fn compact_buf_total_written() {
+        let mut buf = CompactBuf::new(64);
+        buf.write(b"ABC");
+        buf.write(b"DEF");
+        assert_eq!(buf.total_written(), 6);
+        buf.consume(3);
+        // total_written still reflects total inner len.
+        assert_eq!(buf.total_written(), 6);
+    }
+
+    // ── HeaderBlock: get, set overwrite, remove non-existent, iter order, len after removes, compact reclaims, from_map empty ──
+
+    #[test]
+    fn header_block_get_returns_correct_value() {
+        let mut block = HeaderBlock::empty();
+        block.set("content-type", b"text/html");
+        block.set("x-request-id", b"r-42");
+
+        let entries: Vec<_> = block.iter().collect();
+        let ct = entries.iter().find(|(n, _)| *n == b"content-type");
+        assert!(ct.is_some());
+        assert_eq!(ct.unwrap().1, b"text/html");
+    }
+
+    #[test]
+    fn header_block_set_overwrites_existing() {
+        let mut block = HeaderBlock::empty();
+        block.set("key", b"old-value");
+        block.set("key", b"new-value");
+        assert_eq!(block.len(), 1);
+
+        let entries: Vec<_> = block.iter().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, b"new-value");
+    }
+
+    #[test]
+    fn header_block_remove_nonexistent_key() {
+        let mut block = HeaderBlock::empty();
+        block.set("a", b"1");
+        let removed = block.remove("nonexistent");
+        assert_eq!(removed, 0);
+        assert_eq!(block.len(), 1);
+    }
+
+    #[test]
+    fn header_block_iter_returns_all_live() {
+        let mut block = HeaderBlock::empty();
+        block.set("x", b"1");
+        block.set("y", b"2");
+        block.set("z", b"3");
+
+        let names: Vec<&[u8]> = block.iter().map(|(n, _)| n).collect();
+        assert_eq!(names.len(), 3);
+        assert!(names.contains(&b"x".as_ref()));
+        assert!(names.contains(&b"y".as_ref()));
+        assert!(names.contains(&b"z".as_ref()));
+    }
+
+    #[test]
+    fn header_block_len_after_multiple_removes() {
+        let mut block = HeaderBlock::empty();
+        block.set("a", b"1");
+        block.set("b", b"2");
+        block.set("c", b"3");
+        block.set("d", b"4");
+        assert_eq!(block.len(), 4);
+
+        block.remove("a");
+        block.remove("c");
+        assert_eq!(block.len(), 2);
+
+        block.remove("d");
+        assert_eq!(block.len(), 1);
+    }
+
+    #[test]
+    fn header_block_compact_reclaims_space() {
+        let mut block = HeaderBlock::empty();
+        block.set("keep", b"yes");
+        block.set("remove1", b"xxxxxxxxxxxxxxxxxxxx");
+        block.set("remove2", b"yyyyyyyyyyyyyyyyyyyy");
+        block.set("also-keep", b"yes");
+
+        block.remove("remove1");
+        block.remove("remove2");
+
+        let before = block.data.len();
+        block.compact();
+        let after = block.data.len();
+
+        assert!(after < before, "compact should shrink data: before={before}, after={after}");
+        assert_eq!(block.len(), 2);
+        assert_eq!(block.count, 2);
+
+        // Verify data integrity after compaction.
+        let map = block.into_header_map();
+        assert_eq!(map.get("keep").unwrap(), "yes");
+        assert_eq!(map.get("also-keep").unwrap(), "yes");
+    }
+
+    #[test]
+    fn header_block_from_empty_map() {
+        let map = axum::http::HeaderMap::new();
+        let block = HeaderBlock::from_header_map(&map);
+        assert_eq!(block.len(), 0);
+        assert!(block.is_empty());
+        let map2 = block.into_header_map();
+        assert!(map2.is_empty());
+    }
+
+    // ── HopByHopStripper — Direct and Block strategies ──
+
+    #[test]
+    fn strip_direct_with_empty_headers() {
+        let mut map = axum::http::HeaderMap::new();
+        strip_hop_by_hop_direct(&mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn strip_direct_with_no_hop_by_hop_headers() {
+        let mut map = axum::http::HeaderMap::new();
+        map.insert("content-type", "text/html".parse().unwrap());
+        map.insert("x-custom", "value".parse().unwrap());
+        map.insert("accept", "application/json".parse().unwrap());
+
+        strip_hop_by_hop_direct(&mut map);
+        assert_eq!(map.len(), 3);
+        assert_eq!(map.get("content-type").unwrap(), "text/html");
+        assert_eq!(map.get("x-custom").unwrap(), "value");
+        assert_eq!(map.get("accept").unwrap(), "application/json");
+    }
+
+    #[test]
+    fn strip_block_with_empty_headers() {
+        let mut map = axum::http::HeaderMap::new();
+        strip_hop_by_hop_block(&mut map);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn strip_block_with_no_hop_by_hop_headers() {
+        let mut map = axum::http::HeaderMap::new();
+        map.insert("content-type", "text/html".parse().unwrap());
+        map.insert("x-request-id", "123".parse().unwrap());
+
+        strip_hop_by_hop_block(&mut map);
+        assert_eq!(map.len(), 2);
+    }
+
+    #[test]
+    fn header_block_strip_case_insensitive() {
+        // HeaderBlock::from_header_map uses HeaderMap which lowercases names,
+        // but the is_hop_by_hop_name check should be case-insensitive.
+        assert!(super::is_hop_by_hop_name("Connection"));
+        assert!(super::is_hop_by_hop_name("CONNECTION"));
+        assert!(super::is_hop_by_hop_name("connection"));
+        assert!(super::is_hop_by_hop_name("Transfer-Encoding"));
+        assert!(!super::is_hop_by_hop_name("content-type"));
+    }
+
+    // ── BodyBuf — all three variants ──
+
+    #[test]
+    fn body_buf_linear_len_is_empty() {
+        BUFFER_STRATEGY.store(BufferStrategy::Standard as u8, Ordering::Relaxed);
+        let buf = BodyBuf::acquire(32);
+        assert!(buf.is_empty());
+        assert_eq!(buf.len(), 0);
+        BUFFER_STRATEGY.store(BufferStrategy::Pooled as u8, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn body_buf_ring_len_is_empty() {
+        BUFFER_STRATEGY.store(BufferStrategy::Ring as u8, Ordering::Relaxed);
+        let mut buf = BodyBuf::acquire(32);
+        assert!(buf.is_empty());
+        buf.write(b"data");
+        assert!(!buf.is_empty());
+        assert_eq!(buf.len(), 4);
+        BUFFER_STRATEGY.store(BufferStrategy::Pooled as u8, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn body_buf_into_vec_all_variants() {
+        for strategy in [BufferStrategy::Standard, BufferStrategy::Pooled, BufferStrategy::Ring] {
+            BUFFER_STRATEGY.store(strategy as u8, Ordering::Relaxed);
+            let mut buf = BodyBuf::acquire(64);
+            buf.write(b"convert me");
+            let vec = buf.into_vec();
+            assert_eq!(&vec, b"convert me", "failed for strategy {:?}", strategy);
+        }
+        BUFFER_STRATEGY.store(BufferStrategy::Pooled as u8, Ordering::Relaxed);
+    }
+
+    // ── Strategy from_u8 edge cases ──
+
+    #[test]
+    fn buffer_strategy_from_u8_unknown_defaults() {
+        assert_eq!(BufferStrategy::from_u8(0), BufferStrategy::Standard);
+        assert_eq!(BufferStrategy::from_u8(1), BufferStrategy::Pooled);
+        assert_eq!(BufferStrategy::from_u8(2), BufferStrategy::Ring);
+        assert_eq!(BufferStrategy::from_u8(255), BufferStrategy::Standard); // unknown
+        assert_eq!(BufferStrategy::from_u8(99), BufferStrategy::Standard);  // unknown
+    }
+
+    #[test]
+    fn header_strategy_from_u8_unknown_defaults() {
+        assert_eq!(HeaderStrategy::from_u8(0), HeaderStrategy::Standard);
+        assert_eq!(HeaderStrategy::from_u8(1), HeaderStrategy::Direct);
+        assert_eq!(HeaderStrategy::from_u8(2), HeaderStrategy::Block);
+        assert_eq!(HeaderStrategy::from_u8(255), HeaderStrategy::Standard); // unknown
+        assert_eq!(HeaderStrategy::from_u8(42), HeaderStrategy::Standard);  // unknown
+    }
+
+    // ── buf_xfer: wrap-around transfer ──
+
+    #[test]
+    fn xfer_with_wrap_around_src() {
+        let mut src = RingBuf::with_exact_capacity(8);
+        let mut dst = RingBuf::with_exact_capacity(16);
+
+        // Force wrap in src: write 6, consume 5, write 5 more
+        src.write(b"ABCDEF");
+        src.consume(5);
+        src.write(b"GHIJK");
+        // src now has F,G,H,I,J,K with wrap
+        assert_eq!(src.len(), 6);
+        let (_a, b) = src.read_slices();
+        assert!(!b.is_empty(), "src should be wrapped");
+
+        let n = buf_xfer(&mut src, &mut dst);
+        assert_eq!(n, 6);
+        assert!(src.is_empty());
+
+        let vec = dst.into_vec();
+        assert_eq!(&vec, b"FGHIJK");
+    }
+
+    #[test]
+    fn xfer_full_dst() {
+        let mut src = RingBuf::with_exact_capacity(8);
+        let mut dst = RingBuf::with_exact_capacity(4);
+
+        src.write(b"ABCDEF");
+        dst.write(b"XXXX"); // dst is full
+
+        let n = buf_xfer(&mut src, &mut dst);
+        assert_eq!(n, 0);
+        assert_eq!(src.len(), 6); // unchanged
+    }
 }

@@ -394,4 +394,105 @@ mod tests {
         let core = current_core().unwrap();
         assert!(core < available_cores() * 2); // Reasonable bound.
     }
+
+    // ── WorkerConfig defaults ──
+
+    #[test]
+    fn worker_config_new_buffer_pool_size_default() {
+        let config = WorkerConfig::new(5);
+        assert_eq!(config.buffer_pool_size, 64 * 1024 * 1024); // 64 MB
+        assert_eq!(config.id, 5);
+    }
+
+    #[test]
+    fn worker_config_pinned_max_connections_default() {
+        let config = WorkerConfig::pinned(1, 3);
+        assert_eq!(config.max_connections, 10_000);
+        assert_eq!(config.buffer_pool_size, 64 * 1024 * 1024);
+    }
+
+    // ── pin_to_core / current_core ──
+
+    #[test]
+    fn pin_to_core_zero_succeeds() {
+        // On macOS this is a no-op, on Linux core 0 always exists.
+        assert!(pin_to_core(0).is_ok());
+    }
+
+    #[test]
+    fn current_core_returns_value() {
+        let core = current_core().unwrap();
+        // On macOS always 0; on Linux a valid core index.
+        assert!(core < 1024); // Sanity bound.
+    }
+
+    // ── NUMA ──
+
+    #[test]
+    fn numa_node_for_core_zero() {
+        // Core 0 exists on every system; returns 0 on macOS and single-socket.
+        assert_eq!(numa_node_for_core(0), 0);
+    }
+
+    #[test]
+    fn prefer_numa_node_does_not_error() {
+        assert!(prefer_numa_node(0).is_ok());
+    }
+
+    // ── init_worker with pinning enabled ──
+
+    #[test]
+    fn init_worker_with_pinning_enabled() {
+        set_cpu_pinning(true);
+        let config = WorkerConfig::pinned(7, 0);
+        assert!(init_worker(&config).is_ok());
+        assert_eq!(worker_id(), Some(7));
+        // Cleanup.
+        set_cpu_pinning(false);
+        WORKER_ID.with(|w| w.set(u32::MAX));
+    }
+
+    // ── core_assignments edge cases ──
+
+    #[test]
+    fn core_assignments_zero_workers() {
+        let assignments = core_assignments(0);
+        assert!(assignments.is_empty());
+    }
+
+    #[test]
+    fn core_assignments_single_worker() {
+        let assignments = core_assignments(1);
+        assert_eq!(assignments, vec![0]);
+    }
+
+    // ── per_core_configs validation ──
+
+    #[test]
+    fn per_core_configs_fields_correct() {
+        let configs = per_core_configs();
+        for config in &configs {
+            assert_eq!(config.buffer_pool_size, 64 * 1024 * 1024);
+            assert_eq!(config.max_connections, 10_000);
+            assert!(config.core_id.is_some());
+            assert_eq!(config.core_id.unwrap(), config.id as usize);
+        }
+    }
+
+    // ── cpu_pinning interaction with init_worker ──
+
+    #[test]
+    fn cpu_pinning_disabled_skips_affinity() {
+        set_cpu_pinning(false);
+        let config = WorkerConfig::pinned(10, 0);
+        assert!(init_worker(&config).is_ok());
+        assert_eq!(worker_id(), Some(10));
+        // Worker ID is set but no affinity call happened (no error).
+        WORKER_ID.with(|w| w.set(u32::MAX));
+    }
+
+    #[test]
+    fn available_cores_positive() {
+        assert!(available_cores() > 0);
+    }
 }

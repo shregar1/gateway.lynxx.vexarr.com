@@ -470,6 +470,7 @@ impl Drop for SplicePipe {
 
 /// Stub for non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
+#[derive(Debug)]
 pub struct SplicePipe;
 
 #[cfg(not(target_os = "linux"))]
@@ -627,5 +628,157 @@ mod tests {
         assert!(!tcp_fastopen_default());
         set_tcp_fastopen_default(true);
         assert!(tcp_fastopen_default());
+    }
+
+    // ── SocketConfig clone / debug ──
+
+    #[test]
+    fn socket_config_clone_and_debug() {
+        let config = SocketConfig {
+            reuse_port: false,
+            tcp_fastopen_queue: 128,
+            tcp_nodelay: false,
+            keepalive_idle_secs: 30,
+            keepalive_interval_secs: 5,
+            keepalive_count: 2,
+            busy_poll_us: 50,
+            recv_buf_size: 8192,
+            send_buf_size: 16384,
+        };
+        let cloned = config.clone();
+        assert_eq!(cloned.reuse_port, false);
+        assert_eq!(cloned.tcp_fastopen_queue, 128);
+        assert_eq!(cloned.tcp_nodelay, false);
+        assert_eq!(cloned.keepalive_idle_secs, 30);
+        assert_eq!(cloned.keepalive_interval_secs, 5);
+        assert_eq!(cloned.keepalive_count, 2);
+        assert_eq!(cloned.busy_poll_us, 50);
+        assert_eq!(cloned.recv_buf_size, 8192);
+        assert_eq!(cloned.send_buf_size, 16384);
+
+        // Debug should produce non-empty output.
+        let dbg = format!("{:?}", config);
+        assert!(dbg.contains("SocketConfig"));
+        assert!(dbg.contains("128"));
+    }
+
+    // ── set_tcp_fastopen on a real socket ──
+
+    #[cfg(unix)]
+    #[test]
+    fn tcp_fastopen_on_socket() {
+        let fd = create_test_socket();
+        // On macOS this is a no-op, on Linux it sets the option.
+        // Either way it should not return an error.
+        let result = set_tcp_fastopen(fd, 256);
+        assert!(result.is_ok());
+        close_fd(fd);
+    }
+
+    // ── set_busy_poll on a real socket ──
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_poll_on_socket() {
+        let fd = create_test_socket();
+        // On non-Linux this is a no-op. On Linux it may fail without
+        // CAP_NET_ADMIN but the no-op stub should succeed.
+        let result = set_busy_poll(fd, 100);
+        assert!(result.is_ok());
+        close_fd(fd);
+    }
+
+    // ── set_zerocopy returns Unsupported on macOS ──
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn zerocopy_unsupported_on_non_linux() {
+        let fd = create_test_socket();
+        let result = set_zerocopy(fd, true);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+        close_fd(fd);
+    }
+
+    // ── get_recv_buffer / get_send_buffer read defaults ──
+
+    #[cfg(unix)]
+    #[test]
+    fn get_buffer_defaults() {
+        let fd = create_test_socket();
+        // A fresh socket should have non-zero default buffer sizes.
+        let rcv = get_recv_buffer(fd).unwrap();
+        let snd = get_send_buffer(fd).unwrap();
+        assert!(rcv > 0, "default recv buffer should be > 0, got {rcv}");
+        assert!(snd > 0, "default send buffer should be > 0, got {snd}");
+        close_fd(fd);
+    }
+
+    // ── apply_listener_opts with tcp_fastopen_queue=0 (disabled) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_listener_opts_fastopen_disabled() {
+        let fd = create_test_socket();
+        let config = SocketConfig {
+            tcp_fastopen_queue: 0, // Disabled.
+            ..Default::default()
+        };
+        assert!(apply_listener_opts(fd, &config).is_ok());
+        close_fd(fd);
+    }
+
+    // ── apply_connection_opts with all options disabled (zeros) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_connection_opts_all_disabled() {
+        let fd = create_test_socket();
+        let config = SocketConfig {
+            tcp_nodelay: false,
+            keepalive_idle_secs: 0,
+            keepalive_interval_secs: 0,
+            keepalive_count: 0,
+            busy_poll_us: 0,
+            recv_buf_size: 0,
+            send_buf_size: 0,
+            ..Default::default()
+        };
+        // With everything disabled/zeroed, no socket options should be
+        // applied beyond tcp_nodelay=false.
+        assert!(apply_connection_opts(fd, &config).is_ok());
+        close_fd(fd);
+    }
+
+    // ── apply_connection_opts with busy_poll > 0 ──
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_connection_opts_busy_poll_nonzero() {
+        let fd = create_test_socket();
+        let config = SocketConfig {
+            busy_poll_us: 50,
+            ..Default::default()
+        };
+        // busy_poll is non-fatal (ignored on non-Linux or without CAP_NET_ADMIN).
+        assert!(apply_connection_opts(fd, &config).is_ok());
+        close_fd(fd);
+    }
+
+    // ── SplicePipe stub on macOS returns Unsupported ──
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn splice_pipe_stub_unsupported() {
+        let result = SplicePipe::new();
+        assert!(result.is_err());
+        match result {
+            Err(err) => {
+                assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
+                assert!(err.to_string().contains("splice"));
+            }
+            Ok(_) => panic!("expected Err"),
+        }
     }
 }
