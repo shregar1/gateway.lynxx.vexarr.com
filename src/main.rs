@@ -1,12 +1,18 @@
 #![allow(dead_code)]
 
-// `mimalloc` cuts the long tail on busy proxy workloads. The system
-// allocator on macOS in particular fragments under bursty alloc/free
-// patterns; switching to mimalloc shaves 20-40% off p99/p99.9 in our
-// bench rig and compiles cleanly on aarch64-apple-darwin.
+// `jemalloc` (via `tikv-jemallocator`) cuts the *tail* on busy proxy
+// workloads. We were previously on mimalloc, which is excellent on
+// throughput but its periodic page-reclamation pass
+// (`_mi_page_free_collect`) shows up as 5-15 ms stalls on a tokio
+// worker. A symbolized `perf record` against lynxx at 100k RPS /
+// 4096 conns saw that stack at ~14% of CPU; the resulting p99 was
+// 15 ms versus jemalloc's low-single-digit ms at the same load.
+//
+// `background_threads` is on so jemalloc decommits asynchronously
+// instead of inline on free(), keeping the latency floor flat.
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod abstractions;
 mod admin;

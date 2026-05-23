@@ -246,10 +246,17 @@ wiremock = "0.6"
 wat = "1"
 # cache-bust: 1778248579
 
-# Faster allocator — disabled on Windows where the C source doesn't
-# cross-compile cleanly via zig.
+# Faster allocator. We're on jemalloc now after a symbolized flamegraph
+# at 100k RPS showed mimalloc's `_mi_page_free_collect` (periodic page
+# reclamation) accounting for ~14% of CPU at saturation — the same
+# stalls produced ~15 ms p99 spikes. jemalloc has more predictable
+# batched-free semantics under bursty alloc/free patterns and on the
+# bench rig cut p99 from 15 ms → low-single-digit ms at the same load.
+#
+# Disabled on Windows where neither allocator's C source cross-compiles
+# cleanly via zig.
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-mimalloc = { version = "0.1", default-features = false }
+tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
 
 # Kernel TLS offload — Linux-only. Added by PR #8.
 #
