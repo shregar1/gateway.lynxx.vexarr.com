@@ -64,6 +64,9 @@ pub enum LbStrategy {
     /// Least-time: routes to the target with the lowest composite score of
     /// response latency and active connections. Score = avg_response_us * (in_flight + 1).
     LeastTime,
+    /// Hash the RDP `mstshash=` cookie from an X.224 Connection Request PDU
+    /// for TCP-level session persistence. Mirrors HAProxy's `balance rdp-cookie`.
+    RdpCookie,
 }
 
 impl LbStrategy {
@@ -84,6 +87,7 @@ impl LbStrategy {
             "uri-hash" | "uri_hash" | "urihash" => LbStrategy::UriHash,
             "client-ip-hash" | "client_ip_hash" => LbStrategy::ClientIpHash,
             "least-time" | "least_time" | "leasttime" => LbStrategy::LeastTime,
+            "rdp-cookie" | "rdp_cookie" | "rdpcookie" => LbStrategy::RdpCookie,
             _ => LbStrategy::RoundRobin,
         }
     }
@@ -100,6 +104,9 @@ pub struct RequestContext<'a> {
     pub header_hash_value: Option<&'a str>,
     /// Value of the query parameter named by `Service.lb_hash_query_param`.
     pub query_hash_value: Option<&'a str>,
+    /// RDP cookie value extracted from TCP connection initiation.
+    /// Populated by the TCP router for RDP connections.
+    pub rdp_cookie: Option<&'a str>,
 }
 
 fn hrw_hash(key: &str, target_id: &Uuid) -> u64 {
@@ -660,6 +667,7 @@ impl ServiceLoadBalancer {
             LbStrategy::UriHash => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
             LbStrategy::ClientIpHash => self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0")),
             LbStrategy::LeastTime => self.pick_least_time(),
+            LbStrategy::RdpCookie => self.pick_hrw(ctx.rdp_cookie.unwrap_or("__no_rdp_cookie__")),
         }
     }
 
@@ -2042,5 +2050,46 @@ mod tests {
 
         let picked = reg.pick_excluding(&svc_id, &[ids[0]], None).unwrap();
         assert_eq!(picked.target.id, ids[2]);
+    }
+
+    // ── RdpCookie ──
+
+    #[test]
+    fn rdp_cookie_consistent() {
+        let targets = make_targets(5);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RdpCookie, targets);
+        let ctx = RequestContext {
+            rdp_cookie: Some("admin-pc"),
+            ..Default::default()
+        };
+        let first = lb.pick(None, &ctx).unwrap();
+        for _ in 0..20 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.id, first.target.id, "rdp_cookie not consistent");
+        }
+    }
+
+    #[test]
+    fn rdp_cookie_different_values_spread() {
+        let targets = make_targets(4);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RdpCookie, targets);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..20 {
+            let cookie = format!("user-{i}");
+            let ctx = RequestContext {
+                rdp_cookie: Some(&cookie),
+                ..Default::default()
+            };
+            let t = lb.pick(None, &ctx).unwrap();
+            seen.insert(t.target.url.clone());
+        }
+        assert!(seen.len() > 1, "rdp_cookie didn't spread: {:?}", seen);
+    }
+
+    #[test]
+    fn strategy_parsing_rdp_cookie() {
+        assert_eq!(LbStrategy::from_str("rdp-cookie"), LbStrategy::RdpCookie);
+        assert_eq!(LbStrategy::from_str("rdp_cookie"), LbStrategy::RdpCookie);
+        assert_eq!(LbStrategy::from_str("rdpcookie"), LbStrategy::RdpCookie);
     }
 }

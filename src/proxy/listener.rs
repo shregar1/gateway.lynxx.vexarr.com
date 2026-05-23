@@ -20,6 +20,36 @@
 //! best-case balance for a large gain in cache locality and tail
 //! latency predictability — which is exactly what we need to close
 //! the gap from p99=15 ms (queue-bound at 76k RPS) to p99<4 ms.
+//!
+//! ## LocalSet discipline (Phase 2 audit)
+//!
+//! Each worker is built on a `current_thread` runtime + `LocalSet`,
+//! so any `tokio::spawn(...)` reachable from the proxy hot path lands
+//! on *this worker's* runtime — no inter-worker migration is even
+//! possible because no multi_thread scheduler is in scope. Symbolized
+//! `perf record` at 100 k RPS confirms: zero
+//! `tokio::runtime::scheduler::multi_thread::worker::Stealer::steal`
+//! frames on the `lynxx-proxy-*` threads (vs. the pre-Phase-1 capture
+//! where `multi_thread::worker::run` dominated `lynxx-worker` stacks).
+//!
+//! The hot-path spawn audit (commit ref: the Phase 2 follow-up notes)
+//! found that with `minimal_telemetry = true` and no plugins configured
+//! — the spec bench setup — there are **zero per-request
+//! `tokio::spawn` calls active**. The known spawn sites
+//! (`handler.rs::proxy_via_unix`, the various `plugins/*.rs` exporters,
+//! `loadbalancer.rs::drain_target`, `quota::spawn_quota_flusher`,
+//! `auth::middleware::extract_token`) are either dormant in the bench
+//! config or are explicitly long-lived background workers that should
+//! continue to live on the shared multi-thread runtime built in
+//! `main()`. They reach that runtime naturally because they are
+//! spawned from `async_main` — which is what `main()`'s `rt.block_on`
+//! drives — *not* from inside a per-worker accept loop.
+//!
+//! If a future PR adds a hot-path spawn (per-request fan-out, request
+//! mirroring, etc.), switch it to `tokio::task::spawn_local` so the
+//! discipline is enforced by the type system. The `LocalSet` is in
+//! scope inside each worker's `block_on`, so `spawn_local` works there
+//! without ceremony.
 
 use std::io;
 use std::net::SocketAddr;

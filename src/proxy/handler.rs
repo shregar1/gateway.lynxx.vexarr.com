@@ -642,6 +642,7 @@ pub async fn proxy_handler(
         sticky_cookie,
         header_hash_value: header_hash,
         query_hash_value: query_hash,
+        rdp_cookie: None,
     };
 
     // Pick a target via load balancer if one is configured for this service.

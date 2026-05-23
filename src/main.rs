@@ -1332,11 +1332,13 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::warn!(
             "ACME enabled but no certificate available; waiting for background provisioning..."
         );
-        let proxy_serve = axum::serve(proxy_listener, proxy_app);
+        let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
+        let proxy_serve = serve_proxy_plain(proxy_listener, proxy_addr_socket, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     } else {
         tracing::info!("proxy listening on {proxy_addr}");
-        let proxy_serve = axum::serve(proxy_listener, proxy_app);
+        let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
+        let proxy_serve = serve_proxy_plain(proxy_listener, proxy_addr_socket, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     }
 
@@ -1350,6 +1352,61 @@ async fn async_main() -> anyhow::Result<()> {
     opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
+}
+
+/// Serve the proxy on the plain (no TLS) listener path. On Linux this
+/// dispatches to [`crate::proxy::listener::serve_per_worker`], which
+/// fans out N independent `SO_REUSEPORT` listeners across N OS threads
+/// each running a private `current_thread` tokio runtime + `LocalSet`.
+/// The kernel's socket-hash spreads incoming SYN packets across those
+/// listeners, so a connection enters one thread on accept() and stays
+/// there for its whole lifetime — no work-stealing migration, no
+/// cross-worker cache-line traffic.
+///
+/// On non-Linux platforms the fanout is not available (Darwin's
+/// `SO_REUSEPORT` doesn't load-balance; it just lets multiple binds
+/// coexist). We fall back to the single-listener path so contributors
+/// on macOS still get a working `cargo run`.
+///
+/// `proxy_listener` is the resilient-bind socket built in `async_main`
+/// — used as-is on non-Linux. On Linux it's dropped here because each
+/// per-worker thread re-binds its own `SO_REUSEPORT` socket; the brief
+/// drop-then-rebind window (microseconds) is acceptable on a
+/// single-tenant proxy host. `proxy_addr` is the resolved bind address
+/// (after any fallback in resilient_bind), used by the per-worker
+/// path to re-bind.
+async fn serve_proxy_plain(
+    proxy_listener: tokio::net::TcpListener,
+    proxy_addr: std::net::SocketAddr,
+    proxy_app: axum::Router,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // Release the resilient_bind listener so the per-worker
+        // sockets can rebind to the same port. Without this the kernel
+        // would distribute incoming connections across the original
+        // single listener (which we'd never accept from) *and* the
+        // workers, and the orphan listener's share of connections
+        // would time out. Drop is synchronous; the worker rebinds
+        // typically complete within a few microseconds.
+        drop(proxy_listener);
+        let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+        let workers = num_cpus::get().max(1);
+        tracing::info!(
+            workers,
+            cores = core_ids.len(),
+            "proxy: launching per-worker SO_REUSEPORT runtimes"
+        );
+        crate::proxy::listener::serve_per_worker(proxy_addr, proxy_app, workers, core_ids).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // proxy_addr is unused on non-Linux; the listener is already
+        // bound. Silence the warning explicitly so the linter stays
+        // useful elsewhere.
+        let _ = proxy_addr;
+        axum::serve(proxy_listener, proxy_app).await
+    }
 }
 
 /// Spawn a task that subscribes to the cluster bus and refreshes local
