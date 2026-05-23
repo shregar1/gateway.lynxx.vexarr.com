@@ -48,3 +48,5 @@ pub mod thread_group;
 pub mod worker;
 pub mod cluster;
 pub mod predictive_scaling;
+pub mod orchestrator;
+pub mod auto_deploy;
