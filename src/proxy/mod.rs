@@ -15,6 +15,7 @@ pub mod h3;
 pub mod handler;
 pub mod http_client;
 pub mod ktls_listener;
+pub mod listener;
 pub mod loadbalancer;
 pub mod matchers;
 pub mod ocsp;
