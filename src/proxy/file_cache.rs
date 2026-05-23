@@ -1023,4 +1023,240 @@ mod tests {
         let d = ymd_to_days(2024, 2, 29);
         assert_eq!(days_to_ymd(d), (2024, 2, 29));
     }
+
+    // ── FileServeStrategy — repr(u8) roundtrip ──
+
+    #[test]
+    fn file_serve_strategy_repr_u8_values() {
+        assert_eq!(FileServeStrategy::Read as u8, 0);
+        assert_eq!(FileServeStrategy::Mmap as u8, 1);
+        assert_eq!(FileServeStrategy::Sendfile as u8, 2);
+    }
+
+    #[test]
+    fn file_serve_strategy_from_u8_roundtrip() {
+        assert_eq!(FileServeStrategy::from_u8(0), FileServeStrategy::Read);
+        assert_eq!(FileServeStrategy::from_u8(1), FileServeStrategy::Mmap);
+        assert_eq!(FileServeStrategy::from_u8(2), FileServeStrategy::Sendfile);
+        // Unknown values fall back to Read.
+        assert_eq!(FileServeStrategy::from_u8(3), FileServeStrategy::Read);
+        assert_eq!(FileServeStrategy::from_u8(255), FileServeStrategy::Read);
+    }
+
+    // ── DirectoryListing toggle ──
+
+    #[test]
+    fn directory_listing_toggle() {
+        set_directory_listing_enabled(true);
+        assert!(is_directory_listing_enabled());
+        set_directory_listing_enabled(false);
+        assert!(!is_directory_listing_enabled());
+    }
+
+    // ── MappedFile additional tests (Unix) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn mmap_len_and_not_empty() {
+        let (_f, path) = temp_file(b"not empty");
+        let file = std::fs::File::open(&path).unwrap();
+        let mmap = MappedFile::new(file).unwrap();
+        assert_eq!(mmap.len(), 9);
+        assert!(!mmap.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mmap_range_start_zero_full_read() {
+        let content = b"full read from zero";
+        let (_f, path) = temp_file(content);
+        let file = std::fs::File::open(&path).unwrap();
+        let mmap = MappedFile::new(file).unwrap();
+        // offset=0, len=full length is equivalent to as_slice()
+        assert_eq!(mmap.range(0, content.len()), content.as_slice());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mmap_range_start_beyond_len_returns_empty() {
+        let (_f, path) = temp_file(b"short");
+        let file = std::fs::File::open(&path).unwrap();
+        let mmap = MappedFile::new(file).unwrap();
+        // offset past the end => clamped to empty slice
+        assert_eq!(mmap.range(999, 10), b"");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mmap_to_bytes_full_content() {
+        let content = b"bytes from mmap";
+        let (_f, path) = temp_file(content);
+        let file = std::fs::File::open(&path).unwrap();
+        let mmap = Arc::new(MappedFile::new(file).unwrap());
+        let bytes = mmap_to_bytes(&mmap, 0, mmap.len());
+        assert_eq!(&bytes[..], content.as_slice());
+    }
+
+    // ── CachedMetadata additional tests ──
+
+    #[test]
+    fn metadata_from_fs_populates_all_fields() {
+        let (_f, path) = temp_file(b"hello");
+        let meta = std::fs::metadata(&path).unwrap();
+        let cached = CachedMetadata::from_fs(&path, &meta);
+        assert_eq!(cached.size, 5);
+        assert!(!cached.etag.is_empty());
+        assert!(!cached.last_modified_http.is_empty());
+        assert!(!cached.content_type.is_empty());
+        // modified should be recent (not UNIX_EPOCH)
+        assert!(cached.modified > SystemTime::UNIX_EPOCH);
+    }
+
+    #[test]
+    fn metadata_etag_matches_without_quotes() {
+        let (_f, path) = temp_file(b"etag test");
+        let meta = std::fs::metadata(&path).unwrap();
+        let cached = CachedMetadata::from_fs(&path, &meta);
+        // The etag is stored with quotes e.g. "\"9-1234567\"".
+        // etag_matches should match the raw inner value without quotes too.
+        let inner = cached.etag.trim_matches('"');
+        assert!(cached.etag_matches(inner));
+    }
+
+    #[test]
+    fn metadata_etag_does_not_match_random_string() {
+        let (_f, path) = temp_file(b"no match");
+        let meta = std::fs::metadata(&path).unwrap();
+        let cached = CachedMetadata::from_fs(&path, &meta);
+        assert!(!cached.etag_matches("\"99999-0\""));
+        assert!(!cached.etag_matches("garbage"));
+    }
+
+    // ── content_type for various extensions ──
+
+    #[test]
+    fn content_type_html_css_js_json() {
+        assert_eq!(guess_content_type(Path::new("index.html")), "text/html; charset=utf-8");
+        assert_eq!(guess_content_type(Path::new("page.htm")), "text/html; charset=utf-8");
+        assert_eq!(guess_content_type(Path::new("style.css")), "text/css; charset=utf-8");
+        assert_eq!(guess_content_type(Path::new("bundle.js")), "application/javascript; charset=utf-8");
+        assert_eq!(guess_content_type(Path::new("data.json")), "application/json; charset=utf-8");
+    }
+
+    #[test]
+    fn content_type_images_and_fonts() {
+        assert_eq!(guess_content_type(Path::new("logo.png")), "image/png");
+        assert_eq!(guess_content_type(Path::new("photo.jpg")), "image/jpeg");
+        assert_eq!(guess_content_type(Path::new("photo.jpeg")), "image/jpeg");
+        assert_eq!(guess_content_type(Path::new("icon.svg")), "image/svg+xml");
+        assert_eq!(guess_content_type(Path::new("font.woff2")), "font/woff2");
+        assert_eq!(guess_content_type(Path::new("font.woff")), "font/woff");
+    }
+
+    #[test]
+    fn content_type_unknown_extension() {
+        assert_eq!(guess_content_type(Path::new("file.zzz")), "application/octet-stream");
+        assert_eq!(guess_content_type(Path::new("noext")), "application/octet-stream");
+    }
+
+    // ── FileCache additional tests ──
+
+    #[test]
+    fn cache_is_empty_after_creation() {
+        let cache = FileCache::with_defaults();
+        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn cache_get_metadata_returns_none_for_missing() {
+        let cache = FileCache::with_defaults();
+        assert!(cache.get_metadata(Path::new("/nonexistent/file.txt")).is_none());
+    }
+
+    #[test]
+    fn cache_get_metadata_returns_some_after_insert() {
+        let cache = FileCache::with_defaults();
+        let (_f, path) = temp_file(b"metadata test");
+        cache.get_or_open(&path).unwrap();
+        let meta = cache.get_metadata(&path);
+        assert!(meta.is_some());
+        assert_eq!(meta.unwrap().size, 13);
+    }
+
+    #[test]
+    fn cache_clear_removes_all() {
+        let cache = FileCache::with_defaults();
+        let (_f1, p1) = temp_file(b"one");
+        let (_f2, p2) = temp_file(b"two");
+        cache.get_or_open(&p1).unwrap();
+        cache.get_or_open(&p2).unwrap();
+        assert_eq!(cache.len(), 2);
+        cache.clear();
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn cache_eviction_increments_metric() {
+        let config = FileCacheConfig {
+            max_entries: 1,
+            ..Default::default()
+        };
+        let cache = FileCache::new(config);
+        let (_f1, p1) = temp_file(b"evict1");
+        let (_f2, p2) = temp_file(b"evict2");
+        cache.get_or_open(&p1).unwrap();
+        cache.get_or_open(&p2).unwrap();
+        assert!(cache.metrics.evictions.load(Ordering::Relaxed) >= 1);
+    }
+
+    // ── http_date / parse_http_date with known dates ──
+
+    #[test]
+    fn format_http_date_epoch() {
+        let formatted = format_http_date(SystemTime::UNIX_EPOCH);
+        assert_eq!(formatted, "Thu, 01 Jan 1970 00:00:00 GMT");
+    }
+
+    #[test]
+    fn format_http_date_y2k() {
+        // 2000-01-01 00:00:00 UTC = 946684800 seconds since epoch
+        let time = SystemTime::UNIX_EPOCH + Duration::from_secs(946684800);
+        let formatted = format_http_date(time);
+        assert_eq!(formatted, "Sat, 01 Jan 2000 00:00:00 GMT");
+    }
+
+    #[test]
+    fn parse_http_date_known_value() {
+        let parsed = parse_http_date("Thu, 01 Jan 1970 00:00:00 GMT").unwrap();
+        assert_eq!(parsed, SystemTime::UNIX_EPOCH);
+    }
+
+    // ── civil_date formatting ──
+
+    #[test]
+    fn civil_date_end_of_year() {
+        let d = ymd_to_days(1999, 12, 31);
+        assert_eq!(days_to_ymd(d), (1999, 12, 31));
+    }
+
+    #[test]
+    fn civil_date_century_boundary() {
+        // 1900 is NOT a leap year (divisible by 100 but not 400)
+        let d = ymd_to_days(1900, 3, 1);
+        assert_eq!(days_to_ymd(d), (1900, 3, 1));
+        // 2000 IS a leap year
+        let d = ymd_to_days(2000, 2, 29);
+        assert_eq!(days_to_ymd(d), (2000, 2, 29));
+    }
+
+    // ── sendfile stub (non-Linux) ──
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn sendfile_unsupported_on_non_linux() {
+        let result = sendfile_transfer(0, 0, &mut 0i64, 0);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+    }
 }

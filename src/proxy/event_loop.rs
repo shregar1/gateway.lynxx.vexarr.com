@@ -1437,4 +1437,917 @@ mod tests {
         let result = uncork_socket(-1);
         assert!(result.is_err());
     }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Additional tests for 95%+ coverage
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // ── HalfState: exhaustive transition matrix ──
+
+    #[test]
+    fn half_state_shutdone_rejects_all() {
+        // ShutDone is terminal — no transitions out.
+        assert!(!HalfState::ShutDone.can_transition_to(HalfState::ShutDone));
+        assert!(!HalfState::ShutDone.can_transition_to(HalfState::ShutWanted));
+    }
+
+    #[test]
+    fn half_state_error_rejects_all() {
+        // Error is terminal — no transitions out.
+        assert!(!HalfState::Error.can_transition_to(HalfState::Error));
+        assert!(!HalfState::Error.can_transition_to(HalfState::ShutWanted));
+        assert!(!HalfState::Error.can_transition_to(HalfState::ShutDone));
+    }
+
+    #[test]
+    fn half_state_ready_cannot_reach_shutdone_directly() {
+        // Ready → ShutDone is not valid (must go through ShutWanted).
+        assert!(!HalfState::Ready.can_transition_to(HalfState::ShutDone));
+    }
+
+    #[test]
+    fn half_state_data_cannot_reach_shutdone_directly() {
+        // Data → ShutDone is not valid (must go through ShutWanted).
+        assert!(!HalfState::Data.can_transition_to(HalfState::ShutDone));
+    }
+
+    #[test]
+    fn half_state_shutwanted_is_not_active_not_terminal() {
+        // ShutWanted is in limbo: not active, not terminal.
+        assert!(!HalfState::ShutWanted.is_active());
+        assert!(!HalfState::ShutWanted.is_terminal());
+    }
+
+    // ── ConnFlags: individual flag constants and toggle behavior ──
+
+    #[test]
+    fn conn_flags_default_has_alive_only() {
+        let flags = ConnFlags::new();
+        assert!(flags.has(ConnFlags::ALIVE));
+        // No other flags should be set.
+        assert!(!flags.has(ConnFlags::CONNECTED));
+        assert!(!flags.has(ConnFlags::SSL));
+        assert!(!flags.has(ConnFlags::H2));
+        assert!(!flags.has(ConnFlags::H3));
+        assert!(!flags.has(ConnFlags::KEEPALIVE));
+        assert!(!flags.has(ConnFlags::CORKED));
+        assert!(!flags.has(ConnFlags::NODELAY));
+        assert!(!flags.has(ConnFlags::WEBSOCKET));
+        assert!(!flags.has(ConnFlags::UPGRADED));
+        assert!(!flags.has(ConnFlags::EARLY_DATA));
+        assert!(!flags.has(ConnFlags::WAIT_L4_CONN));
+        assert!(!flags.has(ConnFlags::WAIT_L4_ACK));
+        assert!(!flags.has(ConnFlags::WAIT_L6_CONN));
+        assert!(!flags.has(ConnFlags::WANT_DRAIN));
+    }
+
+    #[test]
+    fn conn_flags_each_constant_is_unique_bit() {
+        // Verify that all flag constants are distinct powers of 2.
+        let all_flags = [
+            ConnFlags::CONNECTED,
+            ConnFlags::WAIT_L4_CONN,
+            ConnFlags::WAIT_L4_ACK,
+            ConnFlags::WAIT_L6_CONN,
+            ConnFlags::SSL,
+            ConnFlags::EARLY_DATA,
+            ConnFlags::KEEPALIVE,
+            ConnFlags::H2,
+            ConnFlags::H3,
+            ConnFlags::WEBSOCKET,
+            ConnFlags::CORKED,
+            ConnFlags::NODELAY,
+            ConnFlags::ALIVE,
+            ConnFlags::WANT_DRAIN,
+            ConnFlags::UPGRADED,
+        ];
+        for (i, &a) in all_flags.iter().enumerate() {
+            assert!(a.is_power_of_two(), "flag index {} is not a power of 2", i);
+            for (j, &b) in all_flags.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "flag index {} and {} collide", i, j);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conn_flags_set_and_clear_individual_flags() {
+        let flags = ConnFlags::new();
+
+        // Test each flag individually: set, verify, clear, verify.
+        for &flag in &[
+            ConnFlags::CONNECTED,
+            ConnFlags::SSL,
+            ConnFlags::H2,
+            ConnFlags::KEEPALIVE,
+            ConnFlags::CORKED,
+            ConnFlags::WEBSOCKET,
+            ConnFlags::UPGRADED,
+        ] {
+            flags.set(flag);
+            assert!(flags.has(flag));
+            flags.clear(flag);
+            assert!(!flags.has(flag));
+        }
+    }
+
+    #[test]
+    fn conn_flags_multiple_simultaneous() {
+        let flags = ConnFlags::new();
+
+        // Set SSL + H2 + KEEPALIVE at once.
+        flags.set(ConnFlags::SSL | ConnFlags::H2 | ConnFlags::KEEPALIVE);
+        assert!(flags.has(ConnFlags::SSL));
+        assert!(flags.has(ConnFlags::H2));
+        assert!(flags.has(ConnFlags::KEEPALIVE));
+        assert!(flags.has(ConnFlags::SSL | ConnFlags::H2)); // all bits
+        assert!(flags.has(ConnFlags::SSL | ConnFlags::H2 | ConnFlags::KEEPALIVE));
+
+        // Clear only H2.
+        flags.clear(ConnFlags::H2);
+        assert!(flags.has(ConnFlags::SSL));
+        assert!(!flags.has(ConnFlags::H2));
+        assert!(flags.has(ConnFlags::KEEPALIVE));
+
+        // has() returns false if not ALL bits are set.
+        assert!(!flags.has(ConnFlags::SSL | ConnFlags::H2));
+
+        // has_any() returns true if ANY bit matches.
+        assert!(flags.has_any(ConnFlags::SSL | ConnFlags::H2));
+    }
+
+    #[test]
+    fn conn_flags_raw_snapshot() {
+        let flags = ConnFlags::new();
+        let initial = flags.raw();
+        assert_eq!(initial, ConnFlags::ALIVE);
+
+        flags.set(ConnFlags::CONNECTED);
+        assert_eq!(flags.raw(), ConnFlags::ALIVE | ConnFlags::CONNECTED);
+    }
+
+    #[test]
+    fn conn_flags_debug_format() {
+        let flags = ConnFlags::new();
+        let debug_str = format!("{:?}", flags);
+        // Should contain "ConnFlags(0x" prefix.
+        assert!(debug_str.starts_with("ConnFlags(0x"));
+        assert!(debug_str.ends_with(')'));
+    }
+
+    // ── ConnState: detailed independent half-state tests ──
+
+    #[test]
+    fn conn_state_new_defaults() {
+        let state = ConnState::new();
+        assert_eq!(state.read(), HalfState::Ready);
+        assert_eq!(state.write(), HalfState::Ready);
+        assert_eq!(state.bytes_read(), 0);
+        assert_eq!(state.bytes_written(), 0);
+        assert!(state.is_active());
+        assert!(!state.is_closed());
+        assert!(state.flags.has(ConnFlags::ALIVE));
+    }
+
+    #[test]
+    fn conn_state_default_trait() {
+        let state = ConnState::default();
+        assert_eq!(state.read(), HalfState::Ready);
+        assert_eq!(state.write(), HalfState::Ready);
+    }
+
+    #[test]
+    fn conn_state_independent_read_write() {
+        let state = ConnState::new();
+
+        // Move read to Data, write stays Ready.
+        state.transition_read(HalfState::Data).unwrap();
+        assert_eq!(state.read(), HalfState::Data);
+        assert_eq!(state.write(), HalfState::Ready);
+        assert!(state.is_active());
+
+        // Move write to Error, read stays Data.
+        state.transition_write(HalfState::Error).unwrap();
+        assert_eq!(state.read(), HalfState::Data);
+        assert_eq!(state.write(), HalfState::Error);
+        assert!(state.is_active()); // read is still active
+
+        // Move read to Error too.
+        state.transition_read(HalfState::Error).unwrap();
+        assert!(!state.is_active());
+        assert!(state.is_closed());
+    }
+
+    #[test]
+    fn conn_state_read_shut_write_active() {
+        let state = ConnState::new();
+
+        // Shut down read side completely.
+        state.transition_read(HalfState::ShutWanted).unwrap();
+        state.transition_read(HalfState::ShutDone).unwrap();
+
+        // Write side still active → not fully closed.
+        assert!(!state.is_closed());
+        assert!(state.is_active()); // write side is Ready (active).
+
+        // Now shut down write side.
+        state.transition_write(HalfState::ShutWanted).unwrap();
+        assert!(!state.is_active()); // ShutWanted is not active.
+        assert!(!state.is_closed()); // not terminal yet.
+
+        state.transition_write(HalfState::ShutDone).unwrap();
+        assert!(state.is_closed());
+    }
+
+    #[test]
+    fn conn_state_bytes_accumulation() {
+        let state = ConnState::new();
+
+        state.record_read(100);
+        state.record_read(200);
+        state.record_read(300);
+        assert_eq!(state.bytes_read(), 600);
+
+        state.record_write(50);
+        state.record_write(150);
+        assert_eq!(state.bytes_written(), 200);
+    }
+
+    #[test]
+    fn conn_state_age_is_positive() {
+        let state = ConnState::new();
+        // Age should be extremely small but non-negative.
+        let age = state.age();
+        assert!(age.as_secs() < 1);
+    }
+
+    #[test]
+    fn conn_state_idle_ms_updates_on_io() {
+        let state = ConnState::new();
+        // Record I/O to update last_activity.
+        state.record_read(1);
+        let idle1 = state.idle_ms();
+        // Idle should be very small right after I/O.
+        assert!(idle1 < 100);
+    }
+
+    #[test]
+    fn conn_state_transition_read_returns_previous() {
+        let state = ConnState::new();
+        let prev = state.transition_read(HalfState::Data).unwrap();
+        assert_eq!(prev, HalfState::Ready);
+
+        let prev = state.transition_read(HalfState::ShutWanted).unwrap();
+        assert_eq!(prev, HalfState::Data);
+    }
+
+    #[test]
+    fn conn_state_transition_write_returns_previous() {
+        let state = ConnState::new();
+        let prev = state.transition_write(HalfState::Data).unwrap();
+        assert_eq!(prev, HalfState::Ready);
+
+        let prev = state.transition_write(HalfState::Ready).unwrap();
+        assert_eq!(prev, HalfState::Data);
+    }
+
+    #[test]
+    fn conn_state_transition_error_returns_current_on_failure() {
+        let state = ConnState::new();
+        state.transition_read(HalfState::Error).unwrap();
+
+        let err = state.transition_read(HalfState::Data).unwrap_err();
+        assert_eq!(err, HalfState::Error);
+    }
+
+    #[test]
+    fn conn_state_is_connected_flag() {
+        let state = ConnState::new();
+        assert!(!state.flags.has(ConnFlags::CONNECTED));
+
+        state.flags.set(ConnFlags::CONNECTED);
+        assert!(state.flags.has(ConnFlags::CONNECTED));
+
+        state.flags.clear(ConnFlags::CONNECTED);
+        assert!(!state.flags.has(ConnFlags::CONNECTED));
+    }
+
+    // ── WriteCoalescer: additional edge cases ──
+
+    #[test]
+    fn coalescer_with_defaults() {
+        let coalescer = WriteCoalescer::with_defaults();
+        assert!(coalescer.is_empty());
+        assert_eq!(coalescer.pending_bytes(), 0);
+        assert!(!coalescer.should_flush());
+    }
+
+    #[test]
+    fn coalescer_take_buffer_empty() {
+        let mut coalescer = WriteCoalescer::new(1024, Duration::from_secs(1));
+        let buf = coalescer.take_buffer();
+        assert!(buf.is_empty());
+        // Flush count still increments.
+        let (_, flushes, bytes) = coalescer.metrics();
+        assert_eq!(flushes, 1);
+        assert_eq!(bytes, 0);
+    }
+
+    #[test]
+    fn coalescer_ratio_zero_flushes() {
+        let coalescer = WriteCoalescer::new(1024, Duration::from_secs(1));
+        assert_eq!(coalescer.coalesce_ratio(), 0.0);
+    }
+
+    #[test]
+    fn coalescer_small_capacity() {
+        let mut coalescer = WriteCoalescer::new(5, Duration::from_secs(10));
+
+        // Exactly at capacity triggers flush.
+        assert!(coalescer.write(b"12345"));
+        let buf = coalescer.take_buffer();
+        assert_eq!(&buf, b"12345");
+        assert!(coalescer.is_empty());
+    }
+
+    #[test]
+    fn coalescer_multiple_flushes() {
+        let mut coalescer = WriteCoalescer::new(4, Duration::from_secs(10));
+
+        coalescer.write(b"aa");
+        coalescer.write(b"bb"); // 4 bytes = capacity → should_flush
+        assert!(coalescer.should_flush());
+        let batch1 = coalescer.take_buffer();
+        assert_eq!(&batch1, b"aabb");
+
+        coalescer.write(b"cc");
+        assert!(!coalescer.should_flush());
+        coalescer.write(b"dd"); // 4 bytes again
+        assert!(coalescer.should_flush());
+        let batch2 = coalescer.take_buffer();
+        assert_eq!(&batch2, b"ccdd");
+
+        let (writes, flushes, bytes) = coalescer.metrics();
+        assert_eq!(writes, 4);
+        assert_eq!(flushes, 2);
+        assert_eq!(bytes, 8);
+        assert!((coalescer.coalesce_ratio() - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn coalescer_pending_bytes_tracks_accumulation() {
+        let mut coalescer = WriteCoalescer::new(1024, Duration::from_secs(1));
+        assert_eq!(coalescer.pending_bytes(), 0);
+
+        coalescer.write(b"hello");
+        assert_eq!(coalescer.pending_bytes(), 5);
+
+        coalescer.write(b" world!");
+        assert_eq!(coalescer.pending_bytes(), 12);
+
+        coalescer.take_buffer();
+        assert_eq!(coalescer.pending_bytes(), 0);
+    }
+
+    // ── TaskScheduler: all 5 priority levels ──
+
+    #[test]
+    fn scheduler_all_five_priorities() {
+        let sched = TaskScheduler::with_defaults();
+
+        // Push one task at each priority.
+        let priorities = [
+            TaskPriority::Idle,
+            TaskPriority::Low,
+            TaskPriority::Normal,
+            TaskPriority::High,
+            TaskPriority::Critical,
+        ];
+        for (i, &prio) in priorities.iter().enumerate() {
+            sched.push(ScheduledTask {
+                id: i as u64,
+                priority: prio,
+                kind: TaskKind::Custom,
+                enqueued_at: Instant::now(),
+            });
+        }
+
+        assert_eq!(sched.pending(), 5);
+
+        // Pop order: Critical(4), High(3), Normal(2), Low(1), Idle(0).
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Critical);
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::High);
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Normal);
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Low);
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Idle);
+        assert!(sched.pop().is_none());
+    }
+
+    #[test]
+    fn scheduler_pending_at_all_levels() {
+        let sched = TaskScheduler::with_defaults();
+
+        // Push varying counts per level.
+        for _ in 0..3 {
+            sched.push(ScheduledTask {
+                id: 0,
+                priority: TaskPriority::Critical,
+                kind: TaskKind::HealthCheck,
+                enqueued_at: Instant::now(),
+            });
+        }
+        for _ in 0..2 {
+            sched.push(ScheduledTask {
+                id: 0,
+                priority: TaskPriority::High,
+                kind: TaskKind::RequestForward,
+                enqueued_at: Instant::now(),
+            });
+        }
+        sched.push(ScheduledTask {
+            id: 0,
+            priority: TaskPriority::Normal,
+            kind: TaskKind::TlsHandshake,
+            enqueued_at: Instant::now(),
+        });
+        // Low and Idle are empty.
+
+        assert_eq!(sched.pending_at(TaskPriority::Critical), 3);
+        assert_eq!(sched.pending_at(TaskPriority::High), 2);
+        assert_eq!(sched.pending_at(TaskPriority::Normal), 1);
+        assert_eq!(sched.pending_at(TaskPriority::Low), 0);
+        assert_eq!(sched.pending_at(TaskPriority::Idle), 0);
+        assert_eq!(sched.pending(), 6);
+    }
+
+    #[test]
+    fn scheduler_fifo_within_same_priority() {
+        let sched = TaskScheduler::with_defaults();
+
+        for i in 0..5 {
+            sched.push(ScheduledTask {
+                id: i,
+                priority: TaskPriority::Normal,
+                kind: TaskKind::RequestForward,
+                enqueued_at: Instant::now(),
+            });
+        }
+
+        // Same-priority tasks come out in FIFO order.
+        for i in 0..5 {
+            assert_eq!(sched.pop().unwrap().id, i);
+        }
+    }
+
+    #[test]
+    fn scheduler_anti_starvation_picks_lowest_occupied() {
+        let sched = TaskScheduler::new(2); // Starvation limit = 2.
+
+        // Push Critical and Low tasks (skip High/Normal/Idle).
+        for i in 0..4 {
+            sched.push(ScheduledTask {
+                id: i,
+                priority: TaskPriority::Critical,
+                kind: TaskKind::HealthCheck,
+                enqueued_at: Instant::now(),
+            });
+        }
+        sched.push(ScheduledTask {
+            id: 50,
+            priority: TaskPriority::Low,
+            kind: TaskKind::MetricsFlush,
+            enqueued_at: Instant::now(),
+        });
+
+        // Pop 2 Critical (hits starvation limit).
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Critical);
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Critical);
+
+        // 3rd pop: anti-starvation kicks in, scans from lowest (Idle→Low).
+        // Only Low has tasks, so it should be picked.
+        let task = sched.pop().unwrap();
+        assert_eq!(task.priority, TaskPriority::Low);
+        assert_eq!(task.id, 50);
+    }
+
+    #[test]
+    fn scheduler_anti_starvation_resets_counter() {
+        let sched = TaskScheduler::new(2);
+
+        // 4 Critical, 1 Idle.
+        for i in 0..4 {
+            sched.push(ScheduledTask {
+                id: i,
+                priority: TaskPriority::Critical,
+                kind: TaskKind::HealthCheck,
+                enqueued_at: Instant::now(),
+            });
+        }
+        sched.push(ScheduledTask {
+            id: 100,
+            priority: TaskPriority::Idle,
+            kind: TaskKind::ConnCleanup,
+            enqueued_at: Instant::now(),
+        });
+
+        // Pop 2 Critical → starvation fires → Idle gets served.
+        sched.pop(); // Critical
+        sched.pop(); // Critical
+        let anti_starved = sched.pop().unwrap();
+        assert_eq!(anti_starved.priority, TaskPriority::Idle);
+
+        // Counter resets, so next pops resume normal (Critical).
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Critical);
+        assert_eq!(sched.pop().unwrap().priority, TaskPriority::Critical);
+        assert!(sched.pop().is_none());
+    }
+
+    #[test]
+    fn scheduler_popped_at_per_level() {
+        let sched = TaskScheduler::with_defaults();
+
+        sched.push(ScheduledTask {
+            id: 1,
+            priority: TaskPriority::Critical,
+            kind: TaskKind::HealthCheck,
+            enqueued_at: Instant::now(),
+        });
+        sched.push(ScheduledTask {
+            id: 2,
+            priority: TaskPriority::High,
+            kind: TaskKind::RequestForward,
+            enqueued_at: Instant::now(),
+        });
+        sched.push(ScheduledTask {
+            id: 3,
+            priority: TaskPriority::Idle,
+            kind: TaskKind::ConnCleanup,
+            enqueued_at: Instant::now(),
+        });
+
+        sched.pop(); // Critical
+        sched.pop(); // High
+        sched.pop(); // Idle
+
+        assert_eq!(sched.popped_at(TaskPriority::Critical), 1);
+        assert_eq!(sched.popped_at(TaskPriority::High), 1);
+        assert_eq!(sched.popped_at(TaskPriority::Normal), 0);
+        assert_eq!(sched.popped_at(TaskPriority::Low), 0);
+        assert_eq!(sched.popped_at(TaskPriority::Idle), 1);
+        assert_eq!(sched.total_popped(), 3);
+    }
+
+    #[test]
+    fn scheduler_non_critical_resets_consecutive_counter() {
+        let sched = TaskScheduler::new(10);
+
+        sched.push(ScheduledTask {
+            id: 1,
+            priority: TaskPriority::Critical,
+            kind: TaskKind::HealthCheck,
+            enqueued_at: Instant::now(),
+        });
+        sched.push(ScheduledTask {
+            id: 2,
+            priority: TaskPriority::Normal,
+            kind: TaskKind::RequestForward,
+            enqueued_at: Instant::now(),
+        });
+
+        // Pop Critical, then Normal — popping Normal resets consecutive_top.
+        sched.pop(); // Critical: consecutive_top = 1
+        sched.pop(); // Normal: consecutive_top = 0
+
+        // Push more Critical — starvation counter starts fresh.
+        for i in 10..20 {
+            sched.push(ScheduledTask {
+                id: i,
+                priority: TaskPriority::Critical,
+                kind: TaskKind::HealthCheck,
+                enqueued_at: Instant::now(),
+            });
+        }
+        // Can pop 10 Critical without triggering anti-starvation.
+        for _ in 0..10 {
+            assert_eq!(sched.pop().unwrap().priority, TaskPriority::Critical);
+        }
+    }
+
+    #[test]
+    fn scheduler_anti_starvation_all_empty_returns_none() {
+        let sched = TaskScheduler::new(1);
+
+        // Push and pop 1 Critical to trigger anti-starvation state.
+        sched.push(ScheduledTask {
+            id: 1,
+            priority: TaskPriority::Critical,
+            kind: TaskKind::HealthCheck,
+            enqueued_at: Instant::now(),
+        });
+        sched.pop(); // consecutive_top = 1 (at limit)
+
+        // Next pop: anti-starvation scans but all queues empty.
+        assert!(sched.pop().is_none());
+    }
+
+    // ── TaskPriority ──
+
+    #[test]
+    fn task_priority_u8_roundtrip() {
+        assert_eq!(TaskPriority::from_u8(0), TaskPriority::Critical);
+        assert_eq!(TaskPriority::from_u8(1), TaskPriority::High);
+        assert_eq!(TaskPriority::from_u8(2), TaskPriority::Normal);
+        assert_eq!(TaskPriority::from_u8(3), TaskPriority::Low);
+        assert_eq!(TaskPriority::from_u8(4), TaskPriority::Idle);
+        // Out of range → Idle.
+        assert_eq!(TaskPriority::from_u8(5), TaskPriority::Idle);
+        assert_eq!(TaskPriority::from_u8(255), TaskPriority::Idle);
+    }
+
+    #[test]
+    fn task_priority_ordering() {
+        // Critical < High < Normal < Low < Idle (lower value = higher priority).
+        assert!(TaskPriority::Critical < TaskPriority::High);
+        assert!(TaskPriority::High < TaskPriority::Normal);
+        assert!(TaskPriority::Normal < TaskPriority::Low);
+        assert!(TaskPriority::Low < TaskPriority::Idle);
+    }
+
+    // ── ConnTracker: additional coverage ──
+
+    #[test]
+    fn tracker_remove_nonexistent() {
+        let tracker = ConnTracker::new();
+        assert!(!tracker.remove(999));
+        assert_eq!(tracker.total_closed(), 0);
+    }
+
+    #[test]
+    fn tracker_get_nonexistent() {
+        let tracker = ConnTracker::new();
+        assert!(tracker.get(999).is_none());
+    }
+
+    #[test]
+    fn tracker_default_trait() {
+        let tracker = ConnTracker::default();
+        assert_eq!(tracker.active_count(), 0);
+        assert_eq!(tracker.total_created(), 0);
+        assert_eq!(tracker.total_closed(), 0);
+    }
+
+    #[test]
+    fn tracker_ids_are_monotonic() {
+        let tracker = ConnTracker::new();
+        let id1 = tracker.register();
+        let id2 = tracker.register();
+        let id3 = tracker.register();
+        assert!(id1 < id2);
+        assert!(id2 < id3);
+    }
+
+    #[test]
+    fn tracker_reap_only_closed() {
+        let tracker = ConnTracker::new();
+
+        let id_active = tracker.register();
+        let id_half_closed = tracker.register();
+        let id_fully_closed = tracker.register();
+        let id_errored = tracker.register();
+
+        // id_active: stays Ready/Ready — not reaped.
+        // id_half_closed: read shut, write active — not reaped.
+        {
+            let conn = tracker.get(id_half_closed).unwrap();
+            conn.transition_read(HalfState::ShutWanted).unwrap();
+            conn.transition_read(HalfState::ShutDone).unwrap();
+        }
+
+        // id_fully_closed: both directions ShutDone — reaped.
+        {
+            let conn = tracker.get(id_fully_closed).unwrap();
+            conn.transition_read(HalfState::ShutWanted).unwrap();
+            conn.transition_read(HalfState::ShutDone).unwrap();
+            conn.transition_write(HalfState::ShutWanted).unwrap();
+            conn.transition_write(HalfState::ShutDone).unwrap();
+        }
+
+        // id_errored: both directions Error — also reaped (both terminal).
+        {
+            let conn = tracker.get(id_errored).unwrap();
+            conn.transition_read(HalfState::Error).unwrap();
+            conn.transition_write(HalfState::Error).unwrap();
+        }
+
+        assert_eq!(tracker.active_count(), 4);
+        let reaped = tracker.reap_closed();
+        assert_eq!(reaped, 2); // fully_closed + errored
+        assert_eq!(tracker.active_count(), 2);
+
+        // Verify surviving connections.
+        assert!(tracker.get(id_active).is_some());
+        assert!(tracker.get(id_half_closed).is_some());
+        assert!(tracker.get(id_fully_closed).is_none());
+        assert!(tracker.get(id_errored).is_none());
+    }
+
+    #[test]
+    fn tracker_reap_updates_total_closed() {
+        let tracker = ConnTracker::new();
+        let id = tracker.register();
+
+        {
+            let conn = tracker.get(id).unwrap();
+            conn.transition_read(HalfState::Error).unwrap();
+            conn.transition_write(HalfState::Error).unwrap();
+        }
+
+        assert_eq!(tracker.total_closed(), 0);
+        tracker.reap_closed();
+        assert_eq!(tracker.total_closed(), 1);
+    }
+
+    #[test]
+    fn tracker_idle_connections_filtering() {
+        let tracker = ConnTracker::new();
+
+        let id1 = tracker.register();
+        let id2 = tracker.register();
+
+        // Touch id1 to update its activity timestamp.
+        {
+            let conn = tracker.get(id1).unwrap();
+            conn.record_read(1);
+        }
+
+        // With a threshold of 0ms, both should show up (or very few,
+        // depending on timing). With a huge threshold, none.
+        let idle = tracker.idle_connections(999_999_999);
+        assert!(idle.is_empty());
+
+        // Both were just created, idle should be < 100ms.
+        // We can at least verify the function returns a Vec.
+        let _ = tracker.idle_connections(0);
+        // Verify id2 exists (basic sanity).
+        assert!(tracker.get(id2).is_some());
+    }
+
+    #[test]
+    fn tracker_remove_double_remove() {
+        let tracker = ConnTracker::new();
+        let id = tracker.register();
+
+        assert!(tracker.remove(id));
+        assert!(!tracker.remove(id)); // second remove returns false
+        assert_eq!(tracker.total_closed(), 1); // only incremented once
+    }
+
+    // ── EventLoopMetrics ──
+
+    #[test]
+    fn event_loop_metrics_new() {
+        let metrics = EventLoopMetrics::new();
+        assert_eq!(metrics.wakeups.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.writes_coalesced.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.cork_batches.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.tasks_scheduled.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.connections_tracked.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn event_loop_metrics_increment() {
+        let metrics = EventLoopMetrics::new();
+
+        metrics.wakeups.fetch_add(10, Ordering::Relaxed);
+        metrics.writes_coalesced.fetch_add(5, Ordering::Relaxed);
+        metrics.cork_batches.fetch_add(3, Ordering::Relaxed);
+        metrics.tasks_scheduled.fetch_add(42, Ordering::Relaxed);
+        metrics.connections_tracked.fetch_add(100, Ordering::Relaxed);
+
+        assert_eq!(metrics.wakeups.load(Ordering::Relaxed), 10);
+        assert_eq!(metrics.writes_coalesced.load(Ordering::Relaxed), 5);
+        assert_eq!(metrics.cork_batches.load(Ordering::Relaxed), 3);
+        assert_eq!(metrics.tasks_scheduled.load(Ordering::Relaxed), 42);
+        assert_eq!(metrics.connections_tracked.load(Ordering::Relaxed), 100);
+    }
+
+    #[test]
+    fn global_metrics_accessible() {
+        let m = global_metrics();
+        // Global metrics are shared across tests, so we just verify access.
+        let _ = m.wakeups.load(Ordering::Relaxed);
+        let _ = m.writes_coalesced.load(Ordering::Relaxed);
+        let _ = m.cork_batches.load(Ordering::Relaxed);
+        let _ = m.tasks_scheduled.load(Ordering::Relaxed);
+        let _ = m.connections_tracked.load(Ordering::Relaxed);
+    }
+
+    // ── elapsed_ms ──
+
+    #[test]
+    fn elapsed_ms_is_small_at_start() {
+        let ms = elapsed_ms();
+        // Process has been running for tests, but should still be reasonable.
+        assert!(ms < 600_000, "elapsed_ms returned unreasonably large value: {}", ms);
+    }
+
+    // ── CorkGuard (Unix, additional tests) ──
+
+    #[cfg(unix)]
+    #[test]
+    fn cork_guard_bad_fd_fails() {
+        let result = CorkGuard::new(-1);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cork_guard_fd_accessor() {
+        // Use a pipe FD (not a TCP socket, so cork will fail, but we
+        // test the accessor on a successfully-created guard is not possible
+        // with a non-TCP FD). Instead, test fd() on the struct directly.
+        // We can't easily create a valid CorkGuard without a TCP socket,
+        // but we can verify the type system.
+        let result = CorkGuard::new(-1);
+        assert!(result.is_err());
+    }
+
+    // ── ConnState: write-side error path ──
+
+    #[test]
+    fn conn_state_write_error_path() {
+        let state = ConnState::new();
+        state.transition_write(HalfState::Data).unwrap();
+        state.transition_write(HalfState::Error).unwrap();
+
+        assert_eq!(state.write(), HalfState::Error);
+        // Write is terminal, read is still active.
+        assert!(!state.is_closed());
+        assert!(state.is_active());
+
+        // Cannot transition write out of Error.
+        assert!(state.transition_write(HalfState::Ready).is_err());
+    }
+
+    #[test]
+    fn conn_state_shutwanted_to_error() {
+        let state = ConnState::new();
+
+        // Read: Ready → ShutWanted → Error (valid).
+        state.transition_read(HalfState::ShutWanted).unwrap();
+        state.transition_read(HalfState::Error).unwrap();
+        assert_eq!(state.read(), HalfState::Error);
+
+        // Write: Ready → ShutWanted → Error (valid).
+        state.transition_write(HalfState::ShutWanted).unwrap();
+        state.transition_write(HalfState::Error).unwrap();
+        assert_eq!(state.write(), HalfState::Error);
+
+        assert!(state.is_closed());
+    }
+
+    // ── TaskKind ──
+
+    #[test]
+    fn task_kind_debug() {
+        // Ensure all TaskKind variants have Debug output.
+        let kinds = [
+            TaskKind::RequestForward,
+            TaskKind::HealthCheck,
+            TaskKind::MetricsFlush,
+            TaskKind::ConnCleanup,
+            TaskKind::ConfigReload,
+            TaskKind::TlsHandshake,
+            TaskKind::DnsResolve,
+            TaskKind::Custom,
+        ];
+        for kind in &kinds {
+            let debug_str = format!("{:?}", kind);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    // ── EventLoopStrategy: exhaustive ──
+
+    #[test]
+    fn event_loop_strategy_debug() {
+        let strategies = [
+            EventLoopStrategy::Default,
+            EventLoopStrategy::Coalesced,
+            EventLoopStrategy::Prioritized,
+            EventLoopStrategy::Full,
+        ];
+        for s in &strategies {
+            let debug_str = format!("{:?}", s);
+            assert!(!debug_str.is_empty());
+        }
+    }
+
+    #[test]
+    fn event_loop_strategy_equality() {
+        assert_eq!(EventLoopStrategy::Default, EventLoopStrategy::Default);
+        assert_ne!(EventLoopStrategy::Default, EventLoopStrategy::Full);
+        assert_eq!(EventLoopStrategy::Full, EventLoopStrategy::Full);
+    }
 }

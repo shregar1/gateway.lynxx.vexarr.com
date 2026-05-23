@@ -1218,4 +1218,275 @@ mod tests {
         // Key B should still have full quota.
         assert!(limiter.check_at("b", now).is_allowed());
     }
+
+    // ── StickTableConfig defaults ──
+
+    #[test]
+    fn stick_table_config_defaults() {
+        let cfg = StickTableConfig::default();
+        assert_eq!(cfg.shard_count, 256);
+        assert_eq!(cfg.max_entries_per_shard, 4096);
+        assert_eq!(cfg.entry_ttl, Duration::from_secs(600));
+    }
+
+    // ── StickTable::is_empty ──
+
+    #[test]
+    fn stick_table_is_empty() {
+        let table = StickTable::with_defaults();
+        assert!(table.is_empty());
+
+        {
+            let mut shard = table.shard_for("x");
+            shard
+                .entries
+                .insert("x".to_string(), StickEntry::new(Instant::now()));
+        }
+        assert!(!table.is_empty());
+
+        table.clear();
+        assert!(table.is_empty());
+    }
+
+    // ── StickTableMetrics ──
+
+    #[test]
+    fn stick_table_metrics_hit_miss_eviction() {
+        let table = StickTable::new(StickTableConfig {
+            shard_count: 1,
+            max_entries_per_shard: 2,
+            entry_ttl: Duration::from_secs(60),
+        });
+        let now = Instant::now();
+
+        // First access is a miss.
+        drop(table.get_or_create("k1", now, |_| {}));
+        assert_eq!(table.metrics.misses.load(Ordering::Relaxed), 1);
+        assert_eq!(table.metrics.hits.load(Ordering::Relaxed), 0);
+
+        // Second access to the same key is a hit.
+        drop(table.get_or_create("k1", now, |_| {}));
+        assert_eq!(table.metrics.hits.load(Ordering::Relaxed), 1);
+
+        // Fill shard to capacity then trigger eviction.
+        drop(table.get_or_create("k2", now, |_| {}));
+        assert_eq!(table.metrics.misses.load(Ordering::Relaxed), 2);
+        drop(table.get_or_create("k3", now, |_| {}));
+        assert!(table.metrics.evictions.load(Ordering::Relaxed) >= 1);
+    }
+
+    // ── RateLimiter::new / with_defaults ──
+
+    #[test]
+    fn rate_limiter_defaults() {
+        let limiter = RateLimiter::with_defaults();
+        // Default config: token bucket, rate=10, burst=20.
+        assert_eq!(limiter.entry_count(), 0);
+        // First 20 requests should be allowed (burst=20).
+        let now = Instant::now();
+        for _ in 0..20 {
+            assert!(limiter.check_at("client", now).is_allowed());
+        }
+        assert!(limiter.check_at("client", now).is_denied());
+    }
+
+    // ── RateLimiter::check (public API, not check_at) ──
+
+    #[test]
+    fn rate_limiter_check_public_api() {
+        let limiter = token_bucket_limiter(1000.0, 5);
+        // check() uses Instant::now() internally.
+        for _ in 0..5 {
+            let result = limiter.check("user1");
+            assert!(result.is_allowed());
+        }
+        let result = limiter.check("user1");
+        assert!(result.is_denied());
+    }
+
+    // ── increment_gpc ──
+
+    #[test]
+    fn increment_gpc_counter() {
+        let limiter = token_bucket_limiter(100.0, 100);
+        let now = Instant::now();
+        limiter.check_at("gpc_test", now); // Create entry.
+
+        limiter.increment_gpc("gpc_test", 2);
+        limiter.increment_gpc("gpc_test", 2);
+        limiter.increment_gpc("gpc_test", 3);
+        // Out-of-bounds index should be ignored.
+        limiter.increment_gpc("gpc_test", 4);
+        limiter.increment_gpc("gpc_test", 99);
+
+        let c = limiter.get_counters("gpc_test").unwrap();
+        assert_eq!(c.gpc[0], 0);
+        assert_eq!(c.gpc[1], 0);
+        assert_eq!(c.gpc[2], 2);
+        assert_eq!(c.gpc[3], 1);
+    }
+
+    // ── get_counters for non-existing key ──
+
+    #[test]
+    fn get_counters_nonexistent_key() {
+        let limiter = token_bucket_limiter(10.0, 5);
+        assert!(limiter.get_counters("does_not_exist").is_none());
+    }
+
+    // ── entry_count delegation ──
+
+    #[test]
+    fn entry_count_matches_table_len() {
+        let limiter = token_bucket_limiter(10.0, 5);
+        let now = Instant::now();
+        assert_eq!(limiter.entry_count(), 0);
+
+        limiter.check_at("a", now);
+        limiter.check_at("b", now);
+        assert_eq!(limiter.entry_count(), 2);
+
+        limiter.check_at("a", now); // Hit existing entry, no new entry.
+        assert_eq!(limiter.entry_count(), 2);
+    }
+
+    // ── RateLimitCounters::default ──
+
+    #[test]
+    fn rate_limit_counters_default_all_zeros() {
+        let c = RateLimitCounters::default();
+        assert_eq!(c.http_req_cnt, 0);
+        assert_eq!(c.http_err_cnt, 0);
+        assert_eq!(c.conn_cnt, 0);
+        assert_eq!(c.bytes_in, 0);
+        assert_eq!(c.bytes_out, 0);
+        assert_eq!(c.gpc, [0, 0, 0, 0]);
+    }
+
+    // ── PeerUpdate creates entry for non-existing key ──
+
+    #[test]
+    fn peer_update_creates_new_entry() {
+        let table = StickTable::new(StickTableConfig {
+            shard_count: 4,
+            ..Default::default()
+        });
+        assert_eq!(table.len(), 0);
+
+        table.apply_update(&PeerUpdate {
+            key: "new_peer_key".to_string(),
+            counters: RateLimitCounters {
+                http_req_cnt: 42,
+                conn_cnt: 7,
+                gpc: [1, 2, 3, 4],
+                ..Default::default()
+            },
+            timestamp: Instant::now(),
+        });
+
+        assert_eq!(table.len(), 1);
+        let shard = table.shard_for("new_peer_key");
+        let entry = shard.entries.get("new_peer_key").unwrap();
+        assert_eq!(entry.counters.http_req_cnt, 42);
+        assert_eq!(entry.counters.conn_cnt, 7);
+        assert_eq!(entry.counters.gpc, [1, 2, 3, 4]);
+    }
+
+    // ── Token bucket: retry_after is reasonable ──
+
+    #[test]
+    fn token_bucket_retry_after_reasonable_duration() {
+        // rate=2/s, burst=1 => after 1 request, next needs ~0.5s.
+        let limiter = token_bucket_limiter(2.0, 1);
+        let now = Instant::now();
+        assert!(limiter.check_at("c", now).is_allowed());
+
+        match limiter.check_at("c", now) {
+            RateLimitResult::Deny { retry_after, limit } => {
+                assert_eq!(limit, 1);
+                // Should be around 500ms (1 token / 2 per sec).
+                assert!(retry_after.as_millis() >= 400, "retry_after too short: {:?}", retry_after);
+                assert!(retry_after.as_millis() <= 600, "retry_after too long: {:?}", retry_after);
+            }
+            _ => panic!("expected Deny"),
+        }
+    }
+
+    // ── Sliding window: exact boundary ──
+
+    #[test]
+    fn sliding_window_exact_boundary() {
+        let limiter = sliding_window_limiter(Duration::from_secs(10), 5);
+        let t0 = Instant::now();
+
+        // Fill the first window.
+        for _ in 0..5 {
+            limiter.check_at("client", t0);
+        }
+        assert!(limiter.check_at("client", t0).is_denied());
+
+        // At exactly the window boundary (t0+10s), the previous window
+        // rotates out. fraction=0 so weighted = previous_count * 1.0 = 5.
+        // This means still denied at the exact boundary.
+        let t_boundary = t0 + Duration::from_secs(10);
+        assert!(limiter.check_at("client", t_boundary).is_denied());
+
+        // Just past two full windows, everything resets.
+        let t_past = t0 + Duration::from_secs(20) + Duration::from_millis(1);
+        assert!(limiter.check_at("client", t_past).is_allowed());
+    }
+
+    // ── Fixed window: concurrent keys don't interfere ──
+
+    #[test]
+    fn fixed_window_concurrent_keys_independent() {
+        let limiter = fixed_window_limiter(Duration::from_secs(60), 3);
+        let now = Instant::now();
+
+        // Fill key "alpha" to capacity.
+        for _ in 0..3 {
+            limiter.check_at("alpha", now);
+        }
+        assert!(limiter.check_at("alpha", now).is_denied());
+
+        // "beta" is independent and should still have full quota.
+        for _ in 0..3 {
+            assert!(limiter.check_at("beta", now).is_allowed());
+        }
+        assert!(limiter.check_at("beta", now).is_denied());
+
+        // "alpha" is still denied, unaffected by "beta".
+        assert!(limiter.check_at("alpha", now).is_denied());
+    }
+
+    // ── Leaky bucket: capacity overflow ──
+
+    #[test]
+    fn leaky_bucket_capacity_overflow() {
+        // capacity=3, rate=1/s. Fill to capacity then verify overflow.
+        let limiter = leaky_bucket_limiter(1.0, 3);
+        let now = Instant::now();
+
+        for _ in 0..3 {
+            assert!(limiter.check_at("client", now).is_allowed());
+        }
+        // Bucket is full (level=3, capacity=3). Next request overflows.
+        let result = limiter.check_at("client", now);
+        assert!(result.is_denied());
+
+        // Verify retry_after reflects the drain needed.
+        if let RateLimitResult::Deny { retry_after, limit } = result {
+            assert_eq!(limit, 3);
+            // level=3, need to drain to <3 then add 1, so wait=(3-3+1)/1=1s.
+            assert!(retry_after.as_millis() >= 900, "retry_after too short: {:?}", retry_after);
+            assert!(retry_after.as_millis() <= 1100, "retry_after too long: {:?}", retry_after);
+        }
+
+        // After enough time, bucket drains and accepts again.
+        let t1 = now + Duration::from_secs(4); // Drains 4 units, level goes to -1 → clamped to 0.
+        for _ in 0..3 {
+            assert!(limiter.check_at("client", t1).is_allowed());
+        }
+        assert!(limiter.check_at("client", t1).is_denied());
+    }
 }

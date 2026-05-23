@@ -919,4 +919,178 @@ mod tests {
         let snap = BUF_METRICS.snapshot();
         assert!(snap.acquires > 0);
     }
+
+    // ── PooledBuf: Deref / DerefMut to Vec<u8> ──
+
+    #[test]
+    fn pooled_buf_deref_read_and_write() {
+        enable_pools();
+        let mut buf = acquire_buf(128);
+        // DerefMut: write via Vec methods
+        buf.extend_from_slice(b"hello");
+        buf.push(b' ');
+        buf.extend_from_slice(b"world");
+        // Deref: read via Vec methods
+        assert_eq!(buf.len(), 11);
+        assert_eq!(&buf[0..5], b"hello");
+        assert_eq!(&buf[..], b"hello world");
+        assert!(buf.starts_with(b"hello"));
+        assert!(buf.ends_with(b"world"));
+    }
+
+    // ── PooledBuf: Drop returns to pool ──
+
+    #[test]
+    fn pooled_buf_drop_returns_to_pool() {
+        enable_pools();
+        let releases_before = BUF_METRICS.releases.load(Ordering::Relaxed);
+
+        {
+            let mut buf = acquire_buf(100);
+            buf.extend_from_slice(b"drop me");
+        } // dropped here
+
+        let releases_after = BUF_METRICS.releases.load(Ordering::Relaxed);
+        assert!(
+            releases_after > releases_before,
+            "release count should increase after drop"
+        );
+    }
+
+    // ── PooledBuf: multiple allocate/release cycles ──
+
+    #[test]
+    fn pooled_buf_multiple_cycles() {
+        enable_pools();
+        for i in 0..20 {
+            let mut buf = acquire_buf(256);
+            buf.extend_from_slice(format!("cycle-{i}").as_bytes());
+            assert!(!buf.is_empty());
+            // buf dropped → returned to pool, reused next iteration
+        }
+        // After many cycles, thread cache should still be bounded.
+        THREAD_CACHE.with(|tc| {
+            let cache = tc.borrow();
+            let limit = config().thread_cache_limit;
+            assert!(cache.buf_caches[BufTier::Small.index()].len() <= limit);
+        });
+    }
+
+    // ── Allocate all, release all, reallocate ──
+
+    #[test]
+    fn allocate_release_reallocate_cycle() {
+        enable_pools();
+        // Allocate a batch of buffers.
+        let mut bufs: Vec<PooledBuf> = (0..32).map(|_| acquire_buf(100)).collect();
+        for (i, buf) in bufs.iter_mut().enumerate() {
+            buf.extend_from_slice(format!("buf-{i}").as_bytes());
+        }
+        // Release all.
+        drop(bufs);
+
+        // Reallocate — should hit thread cache.
+        let thread_hits_before = BUF_METRICS.thread_hits.load(Ordering::Relaxed);
+        let bufs2: Vec<PooledBuf> = (0..16).map(|_| acquire_buf(100)).collect();
+        let thread_hits_after = BUF_METRICS.thread_hits.load(Ordering::Relaxed);
+        assert!(
+            thread_hits_after > thread_hits_before,
+            "re-acquire should hit thread cache"
+        );
+        // Verify re-acquired bufs are clean (cleared on return).
+        for buf in &bufs2 {
+            assert_eq!(buf.len(), 0, "recycled buf should be empty");
+        }
+        drop(bufs2);
+    }
+
+    // ── PooledString: into_string detaches ──
+
+    #[test]
+    fn pooled_string_into_string_detaches() {
+        enable_pools();
+        let mut s = acquire_string();
+        s.push_str("detach-me");
+        let plain = s.into_string();
+        assert_eq!(plain, "detach-me");
+        // plain is a normal String, not pooled.
+    }
+
+    // ── PooledString: multiple cycles ──
+
+    #[test]
+    fn pooled_string_multiple_cycles() {
+        enable_pools();
+        for i in 0..15 {
+            let mut s = acquire_string();
+            s.push_str(&format!("string-cycle-{i}"));
+            assert!(!s.is_empty());
+            drop(s);
+        }
+        // Re-acquire — should get recycled strings.
+        let s = acquire_string();
+        assert!(s.is_empty(), "recycled string should be empty");
+        assert!(s.capacity() > 0, "recycled string should have capacity");
+    }
+
+    // ── GlobalStringPool: return and take ──
+
+    #[test]
+    fn global_string_pool_return_and_take() {
+        let pool = GlobalStringPool::new(100);
+        let mut items = vec![
+            String::with_capacity(32),
+            String::with_capacity(32),
+        ];
+        pool.return_batch(&mut items);
+        assert!(items.is_empty());
+
+        let taken = pool.take_batch(1);
+        assert_eq!(taken.len(), 1);
+
+        let taken2 = pool.take_batch(5);
+        assert_eq!(taken2.len(), 1); // only 1 left
+    }
+
+    #[test]
+    fn global_string_pool_respects_limit() {
+        let pool = GlobalStringPool::new(2);
+        let mut items = vec![
+            String::from("a"),
+            String::from("b"),
+            String::from("c"),
+        ];
+        pool.return_batch(&mut items);
+        assert_eq!(items.len(), 1); // 1 rejected (limit=2)
+    }
+
+    // ── Metrics snapshot correctness ──
+
+    #[test]
+    fn metrics_snapshot_reflects_operations() {
+        enable_pools();
+        let before = BUF_METRICS.snapshot();
+
+        let buf1 = acquire_buf(200);
+        let buf2 = acquire_buf(200);
+        drop(buf1);
+        drop(buf2);
+
+        let after = BUF_METRICS.snapshot();
+        assert!(after.acquires >= before.acquires + 2);
+        assert!(after.releases >= before.releases + 2);
+    }
+
+    // ── is_enabled / set_enabled toggle ──
+
+    #[test]
+    fn set_enabled_toggles_pool() {
+        let original = is_enabled();
+        set_enabled(false);
+        assert!(!is_enabled());
+        set_enabled(true);
+        assert!(is_enabled());
+        // Restore original state.
+        set_enabled(original);
+    }
 }
