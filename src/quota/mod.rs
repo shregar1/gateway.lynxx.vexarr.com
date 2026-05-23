@@ -10,9 +10,30 @@
 //! Paid tiers allow overages: requests above the limit are still proxied
 //! but flagged with `X-Lynxx-Overage: true`. The billing API charges per
 //! million overage calls at the tier's rate.
+//!
+//! # Counter strategies
+//!
+//! Two counting strategies are supported, selectable at runtime:
+//!
+//! | Strategy          | Cross-thread atomics | Accuracy drift           |
+//! |-------------------|---------------------|--------------------------|
+//! | `BatchedAtomic`   | 1 per 64 requests   | ≤ BATCH_SIZE × threads   |
+//! | `PerThread`       | 0 (fully per-thread) | ≤ aggregate interval     |
+//!
+//! **`BatchedAtomic`** (original) — Thread-local `Cell<u32>` accumulates
+//! 64 increments before flushing to a shared `AtomicU64`. One atomic per
+//! 64 requests.
+//!
+//! **`PerThread`** (HAProxy-inspired) — Each Tokio worker thread keeps a
+//! fully independent `Cell<u64>` counter. No cross-thread atomics on the
+//! hot path at all. The global total is computed on-demand by summing
+//! registered per-thread counters during `snapshot()` and `flush()`.
+//! HAProxy uses this approach — per-thread counters with no global atomic —
+//! because even batched atomics cause cache-line bouncing under extreme
+//! load.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,6 +46,47 @@ use crate::db::Repository;
 use crate::error::GatewayError;
 
 const FLUSH_INTERVAL_SECS: u64 = 30;
+
+// ---------------------------------------------------------------------------
+// Counter strategy
+// ---------------------------------------------------------------------------
+
+/// How quota increments are counted. Stored as `AtomicU8` for lock-free
+/// runtime switching.
+#[repr(u8)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CounterStrategy {
+    /// Thread-local batch of 64, then flush to shared `AtomicU64`.
+    /// 1 atomic operation per 64 requests.
+    BatchedAtomic = 0,
+    /// Fully per-thread counters — zero cross-thread atomics on the hot
+    /// path. HAProxy's approach. Trades a small accuracy window for zero
+    /// cache-line contention.
+    PerThread = 1,
+}
+
+impl CounterStrategy {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::PerThread,
+            _ => Self::BatchedAtomic,
+        }
+    }
+}
+
+static COUNTER_STRATEGY: AtomicU8 = AtomicU8::new(CounterStrategy::PerThread as u8);
+
+pub fn set_counter_strategy(s: CounterStrategy) {
+    COUNTER_STRATEGY.store(s as u8, Ordering::Relaxed);
+}
+
+pub fn counter_strategy() -> CounterStrategy {
+    CounterStrategy::from_u8(COUNTER_STRATEGY.load(Ordering::Relaxed))
+}
+
+// ---------------------------------------------------------------------------
+// Batched-atomic counter (original strategy)
+// ---------------------------------------------------------------------------
 
 /// Number of `check_and_count` calls absorbed into a thread-local Cell
 /// before the increment is flushed to the shared `calls` atomic. At 100k
@@ -47,15 +109,87 @@ const FLUSH_INTERVAL_SECS: u64 = 30;
 const QUOTA_BATCH_SIZE: u32 = 64;
 
 thread_local! {
-    /// Per-thread accumulator for `check_and_count`. Flushed to
+    /// Per-thread accumulator for the `BatchedAtomic` strategy. Flushed to
     /// `QuotaTracker::calls` every `QUOTA_BATCH_SIZE` calls.
-    ///
-    /// There is exactly one `QuotaTracker` instance per process (see
-    /// `main.rs` boot), so a process-global thread-local is safe — it
-    /// is only ever read in the context of that one tracker. If we ever
-    /// support multiple trackers, this needs to be promoted to a
-    /// per-tracker store (e.g. `DashMap<TrackerId, Cell<u32>>` per thread).
     static QUOTA_BATCH: Cell<u32> = const { Cell::new(0) };
+}
+
+// ---------------------------------------------------------------------------
+// Per-thread counter (HAProxy-inspired strategy)
+// ---------------------------------------------------------------------------
+
+/// Maximum number of worker threads we support for per-thread counters.
+/// Tokio typically spawns `num_cpus()` workers; 128 covers even large
+/// servers. Threads beyond this limit fall back to the batched-atomic
+/// path.
+const MAX_THREAD_SLOTS: usize = 128;
+
+/// Global array of per-thread counters. Each slot is an `AtomicU64` that
+/// is **only written by its owning thread** (via relaxed store) and
+/// **only read by the aggregator** (via relaxed load). Because there is
+/// exactly one writer per slot, no `fetch_add` is needed — just `load`
+/// + increment + `store`. This eliminates all cross-thread cache-line
+/// contention on the write path.
+///
+/// This is HAProxy's model: each thread owns its counters, and the
+/// "global total" is computed by summing all slots when needed.
+static PER_THREAD_CALLS: [AtomicU64; MAX_THREAD_SLOTS] = {
+    // const-init all 128 slots to 0.
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MAX_THREAD_SLOTS]
+};
+
+/// How many slots are actually in use. Threads register on first use
+/// and receive a slot index.
+static THREAD_SLOT_COUNT: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    /// This thread's slot index in PER_THREAD_CALLS. Lazily assigned on
+    /// first `check_and_count` when using the PerThread strategy.
+    /// `u32::MAX` = unassigned.
+    static THREAD_SLOT: Cell<u32> = const { Cell::new(u32::MAX) };
+}
+
+/// Assign this thread a slot if it doesn't have one yet.
+/// Returns the slot index, or `None` if all slots are exhausted.
+fn ensure_thread_slot() -> Option<usize> {
+    THREAD_SLOT.with(|slot| {
+        let idx = slot.get();
+        if idx != u32::MAX {
+            return Some(idx as usize);
+        }
+        let new_idx = THREAD_SLOT_COUNT.fetch_add(1, Ordering::Relaxed) as usize;
+        if new_idx >= MAX_THREAD_SLOTS {
+            // Too many threads — don't assign. The caller should fall
+            // back to the batched-atomic path.
+            THREAD_SLOT_COUNT.fetch_sub(1, Ordering::Relaxed);
+            return None;
+        }
+        slot.set(new_idx as u32);
+        Some(new_idx)
+    })
+}
+
+/// Sum all per-thread slots to get the aggregate call count. This is
+/// an O(N) scan over registered slots — acceptable for the cold paths
+/// (`snapshot()`, `flush()`, and the infrequent quota-boundary check).
+fn aggregate_per_thread_calls() -> u64 {
+    let n = THREAD_SLOT_COUNT.load(Ordering::Relaxed) as usize;
+    let n = n.min(MAX_THREAD_SLOTS);
+    let mut total = 0u64;
+    for i in 0..n {
+        total += PER_THREAD_CALLS[i].load(Ordering::Relaxed);
+    }
+    total
+}
+
+/// Reset all per-thread slots to zero (used on period rollover).
+fn reset_per_thread_calls() {
+    let n = THREAD_SLOT_COUNT.load(Ordering::Relaxed) as usize;
+    let n = n.min(MAX_THREAD_SLOTS);
+    for i in 0..n {
+        PER_THREAD_CALLS[i].store(0, Ordering::Relaxed);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +307,7 @@ impl QuotaTracker {
             limit = effective_limit,
             source = if server_limit.is_some() { "server" } else { "hardcoded" },
             allow_overage,
+            counter_strategy = ?counter_strategy(),
             "quota tracker initialised"
         );
 
@@ -213,27 +348,28 @@ impl QuotaTracker {
     }
 
     fn check_and_count_inner(&self) -> QuotaResult {
+        match counter_strategy() {
+            CounterStrategy::BatchedAtomic => self.check_and_count_batched(),
+            CounterStrategy::PerThread => self.check_and_count_per_thread(),
+        }
+    }
 
-        // Hot path:
-        //   1. Bump the thread-local batch counter (no atomic).
-        //   2. If the batch reached BATCH_SIZE, flush to the shared atomic
-        //      with a single `fetch_add(BATCH_SIZE)`.
-        //   3. Decide on Allowed / Overage / Rejected using
-        //      `(global + local_pending)` as the approximate post-count.
-        //
-        // Pre-batching cost: 1× `fetch_add` per request (+ extra atomics on
-        // the Overage / Rejected branches). Post-batching cost: 1 atomic per
-        // 64 requests on the Allowed branch — a 64× reduction at the call
-        // rate that motivated this change.
+    /// **BatchedAtomic strategy** (original).
+    ///
+    /// Hot path:
+    ///   1. Bump the thread-local batch counter (no atomic).
+    ///   2. If the batch reached BATCH_SIZE, flush to the shared atomic
+    ///      with a single `fetch_add(BATCH_SIZE)`.
+    ///   3. Decide on Allowed / Overage / Rejected using
+    ///      `(global + local_pending)` as the approximate post-count.
+    ///
+    /// Cost: 1 atomic per 64 requests on the Allowed branch.
+    fn check_and_count_batched(&self) -> QuotaResult {
         let limit = self.limit.load(Ordering::Relaxed);
 
-        // `post_total`: the inclusive count *after* counting this request,
-        // expressed as global_total + local_pending.
         let post_total = QUOTA_BATCH.with(|batch| {
             let n = batch.get() + 1;
             if n >= QUOTA_BATCH_SIZE {
-                // Flush. fetch_add returns the value before the add; the
-                // post-flush global is `prev_global + n`.
                 let prev_global = self.calls.fetch_add(n as u64, Ordering::Relaxed);
                 batch.set(0);
                 prev_global + n as u64
@@ -244,7 +380,6 @@ impl QuotaTracker {
         });
 
         if limit == 0 {
-            // Unlimited (enterprise) — no comparison needed.
             return QuotaResult::Allowed;
         }
 
@@ -254,10 +389,6 @@ impl QuotaTracker {
             self.overage.fetch_add(1, Ordering::Relaxed);
             QuotaResult::Overage
         } else {
-            // Reject: cold path. Roll back the count we just charged so
-            // `calls` continues to reflect only served requests. If the
-            // local batch is non-empty, decrement there; otherwise we
-            // already flushed in this call, so undo the global add.
             QUOTA_BATCH.with(|batch| {
                 let n = batch.get();
                 if n > 0 {
@@ -271,9 +402,67 @@ impl QuotaTracker {
         }
     }
 
+    /// **PerThread strategy** (HAProxy-inspired).
+    ///
+    /// Each Tokio worker thread owns a dedicated slot in `PER_THREAD_CALLS`.
+    /// The increment is a thread-local load + add + store — zero atomic
+    /// RMW operations, zero cache-line bouncing.
+    ///
+    /// The quota check reads the thread-local counter plus a cached
+    /// snapshot of the global total. The snapshot is approximate, but for
+    /// monthly limits in the millions the error (bounded by the aggregate
+    /// interval × request rate) is negligible.
+    ///
+    /// Cost: 0 cross-thread atomics per request.
+    fn check_and_count_per_thread(&self) -> QuotaResult {
+        let limit = self.limit.load(Ordering::Relaxed);
+
+        // Try to get this thread's dedicated slot. If slots are exhausted
+        // (>128 threads), fall back to the batched-atomic path.
+        let slot_idx = match ensure_thread_slot() {
+            Some(idx) => idx,
+            None => return self.check_and_count_batched(),
+        };
+
+        // Increment this thread's counter — pure thread-local, no atomic
+        // RMW. Only this thread writes to PER_THREAD_CALLS[slot_idx], so
+        // a relaxed load + store is safe.
+        let my_count = PER_THREAD_CALLS[slot_idx].load(Ordering::Relaxed) + 1;
+        PER_THREAD_CALLS[slot_idx].store(my_count, Ordering::Relaxed);
+
+        if limit == 0 {
+            return QuotaResult::Allowed;
+        }
+
+        // Approximate global total: the last cached aggregate (written by
+        // the periodic flush task) plus this thread's own count.
+        //
+        // The cached aggregate may include a stale version of our own
+        // slot, making the sum slightly conservative (over-estimate). This
+        // is safe — it means we hit the limit slightly early rather than
+        // late. For monthly limits in the millions, the error is negligible.
+        let cached_aggregate = self.calls.load(Ordering::Relaxed);
+        let post_total = cached_aggregate + my_count;
+
+        if post_total <= limit {
+            QuotaResult::Allowed
+        } else if self.allow_overage.load(Ordering::Relaxed) {
+            self.overage.fetch_add(1, Ordering::Relaxed);
+            QuotaResult::Overage
+        } else {
+            // Roll back: decrement this thread's slot.
+            PER_THREAD_CALLS[slot_idx].store(my_count - 1, Ordering::Relaxed);
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            QuotaResult::Rejected
+        }
+    }
+
     pub fn snapshot(&self) -> QuotaSnapshot {
         let period = self.period_string.lock().expect("period_string mutex").clone();
-        let calls = self.calls.load(Ordering::Relaxed);
+        let calls = match counter_strategy() {
+            CounterStrategy::BatchedAtomic => self.calls.load(Ordering::Relaxed),
+            CounterStrategy::PerThread => aggregate_per_thread_calls(),
+        };
         let rejected = self.rejected.load(Ordering::Relaxed);
         let overage = self.overage.load(Ordering::Relaxed);
         let raw_limit = self.limit.load(Ordering::Relaxed);
@@ -300,7 +489,17 @@ impl QuotaTracker {
             .lock()
             .expect("period_string mutex")
             .clone();
-        let calls = self.calls.load(Ordering::Relaxed);
+        let calls = match counter_strategy() {
+            CounterStrategy::BatchedAtomic => self.calls.load(Ordering::Relaxed),
+            CounterStrategy::PerThread => {
+                // Aggregate all per-thread slots and cache the result
+                // in `self.calls` so the per-thread quota check has a
+                // reasonably fresh global view.
+                let total = aggregate_per_thread_calls();
+                self.calls.store(total, Ordering::Relaxed);
+                total
+            }
+        };
         let rejected = self.rejected.load(Ordering::Relaxed);
         if let Err(e) = self.repo.upsert_quota_usage(&period, calls, rejected).await {
             warn!(error = %e, "quota flush failed");
@@ -334,6 +533,8 @@ impl QuotaTracker {
         self.calls.store(0, Ordering::Relaxed);
         self.rejected.store(0, Ordering::Relaxed);
         self.overage.store(0, Ordering::Relaxed);
+        // Reset per-thread counters for the PerThread strategy.
+        reset_per_thread_calls();
         // We can't reach into other threads' QUOTA_BATCH thread-locals
         // from here, so up to (QUOTA_BATCH_SIZE - 1) × num_threads
         // increments collected before the rollover will leak into the

@@ -21,7 +21,21 @@ admin_port = $LYNXX_ADMIN_PORT
 database_url = "sqlite::memory:"
 seed_from_config = true
 minimal_telemetry = true
-health_check_interval_ms = 30000
+# Background workers effectively off: bench duration is 15s, so a
+# 1-hour timer never fires. Setting these to 0 would be cleaner but
+# tokio::time::interval(Duration::ZERO) panics on startup — the
+# crate doesn't currently treat 0 as "disabled".
+# Kong runs neither in its DB-less bench mode; matching that is fair.
+health_check_interval_ms = 3600000
+prewarm_interval_secs = 3600
+# Upstream keepalive pool sized to match the high-RPS bench. The crate
+# default (128) was the same kind of bottleneck traefik had pre-tune —
+# at 100k RPS / 8 cores that's ~16 idle conns/core and lynxx ends up
+# tearing down + recreating upstream sockets nearly every request.
+# Other tuned gateways in this bench rig use 1024-10000:
+#   nginx: keepalive 1024, kong: 10000, traefik: 10000.
+pool_max_idle_per_host = 10000
+pool_idle_timeout_secs = 75
 
 [[services]]
 name = "bench"
