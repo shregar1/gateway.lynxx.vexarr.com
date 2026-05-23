@@ -312,35 +312,6 @@ impl LicenseState {
         *nc = (active, max);
     }
 
-    /// Always `"verified"` — api-key-only mode has no unverified
-    /// path. Kept on the status endpoint for backwards compatibility.
-    pub fn mode(&self) -> &'static str {
-        "verified"
-    }
-
-    /// Forward an arbitrary customer api key to the licence backend for
-    /// validation. The dashboard sign-in flow uses this so it never has
-    /// to talk to the billing server directly.
-    pub async fn validate_key(&self, api_key: &str) -> Result<LicenseInfo, VerifierError> {
-        let resp = verify_online(api_key, &self.inner.verify_url)
-            .await
-            .map_err(|e| match e {
-                LicenseError::Rejected(msg) => VerifierError::Rejected(msg),
-                LicenseError::Offline(msg) => VerifierError::Transport(msg),
-                LicenseError::Malformed(msg) => VerifierError::Malformed(msg),
-                other => VerifierError::Transport(other.to_string()),
-            })?;
-        Ok(LicenseInfo {
-            customer_urn: resp.customer_urn,
-            tier: resp.tier,
-            expires_at: resp.expires_at,
-            max_nodes: resp.max_nodes,
-            active_nodes: resp.active_nodes,
-            monthly_call_limit: resp.monthly_call_limit,
-            allow_overage: resp.allow_overage,
-        })
-    }
-
     pub(crate) fn flip_inactive(&self, reason: &str) {
         self.inner
             .active
