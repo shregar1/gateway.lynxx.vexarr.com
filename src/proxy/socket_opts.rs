@@ -8,6 +8,7 @@
 //! ├── TCP_NODELAY       — Disable Nagle for low-latency responses
 //! ├── TCP_FASTOPEN      — Faster TCP handshake (save 1 RTT)
 //! ├── TCP_KEEPALIVE     — Detect dead connections (idle, interval, count)
+//! ├── TCP_QUICKACK      — Disable delayed ACKs for faster response (Linux)
 //! ├── SO_BUSY_POLL      — Kernel busy-polling for sub-ms latency (Linux)
 //! ├── SO_RCVBUF/SNDBUF  — Tune socket buffer sizes
 //! ├── SplicePipe        — Zero-copy socket→socket forwarding via pipe (Linux)
@@ -40,6 +41,7 @@ use std::os::unix::io::RawFd;
 static TCP_NODELAY_DEFAULT: AtomicBool = AtomicBool::new(true);
 static SO_REUSEPORT_DEFAULT: AtomicBool = AtomicBool::new(true);
 static TCP_FASTOPEN_DEFAULT: AtomicBool = AtomicBool::new(true);
+static TCP_QUICKACK_DEFAULT: AtomicBool = AtomicBool::new(true);
 
 pub fn set_tcp_nodelay_default(v: bool) {
     TCP_NODELAY_DEFAULT.store(v, Ordering::Relaxed);
@@ -58,6 +60,12 @@ pub fn set_tcp_fastopen_default(v: bool) {
 }
 pub fn tcp_fastopen_default() -> bool {
     TCP_FASTOPEN_DEFAULT.load(Ordering::Relaxed)
+}
+pub fn set_tcp_quickack_default(v: bool) {
+    TCP_QUICKACK_DEFAULT.store(v, Ordering::Relaxed);
+}
+pub fn tcp_quickack_default() -> bool {
+    TCP_QUICKACK_DEFAULT.load(Ordering::Relaxed)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -83,6 +91,8 @@ pub struct SocketConfig {
     pub keepalive_interval_secs: u32,
     /// Number of keepalive probes before declaring dead. Default: 3.
     pub keepalive_count: u32,
+    /// `TCP_QUICKACK`: disable delayed ACKs. Default: true (Linux-only).
+    pub tcp_quickack: bool,
     /// `SO_BUSY_POLL` in microseconds (Linux, requires CAP_NET_ADMIN).
     /// 0 = disabled. Default: 0.
     pub busy_poll_us: u32,
@@ -98,6 +108,7 @@ impl Default for SocketConfig {
             reuse_port: true,
             tcp_fastopen_queue: 256,
             tcp_nodelay: true,
+            tcp_quickack: true,
             keepalive_idle_secs: 60,
             keepalive_interval_secs: 10,
             keepalive_count: 3,
@@ -251,6 +262,21 @@ pub fn set_keepalive(
     Ok(())
 }
 
+/// Set `TCP_QUICKACK` — disable delayed ACKs. When enabled, the kernel
+/// sends ACKs immediately instead of waiting up to 40ms. Critical for
+/// proxies where Nagle + delayed ACK creates latency spikes.
+///
+/// **Linux only.** On other platforms this is a no-op.
+#[cfg(target_os = "linux")]
+pub fn set_tcp_quickack(fd: RawFd, enable: bool) -> std::io::Result<()> {
+    setsockopt_int(fd, libc::IPPROTO_TCP, libc::TCP_QUICKACK, enable as i32)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn set_tcp_quickack(_fd: RawFd, _enable: bool) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Set `SO_BUSY_POLL` — kernel busy-polling on the socket's receive
 /// queue. Reduces latency by avoiding the interrupt→wakeup path at the
 /// cost of CPU. Requires `CAP_NET_ADMIN` or `sysctl net.core.busy_poll`.
@@ -326,6 +352,11 @@ pub fn apply_listener_opts(fd: RawFd, config: &SocketConfig) -> std::io::Result<
 #[cfg(unix)]
 pub fn apply_connection_opts(fd: RawFd, config: &SocketConfig) -> std::io::Result<()> {
     set_tcp_nodelay(fd, config.tcp_nodelay)?;
+
+    if config.tcp_quickack {
+        // Non-fatal: TCP_QUICKACK is Linux-only.
+        let _ = set_tcp_quickack(fd, true);
+    }
 
     if config.keepalive_idle_secs > 0 {
         set_keepalive(
@@ -638,6 +669,7 @@ mod tests {
             reuse_port: false,
             tcp_fastopen_queue: 128,
             tcp_nodelay: false,
+            tcp_quickack: false,
             keepalive_idle_secs: 30,
             keepalive_interval_secs: 5,
             keepalive_count: 2,
@@ -649,6 +681,7 @@ mod tests {
         assert_eq!(cloned.reuse_port, false);
         assert_eq!(cloned.tcp_fastopen_queue, 128);
         assert_eq!(cloned.tcp_nodelay, false);
+        assert_eq!(cloned.tcp_quickack, false);
         assert_eq!(cloned.keepalive_idle_secs, 30);
         assert_eq!(cloned.keepalive_interval_secs, 5);
         assert_eq!(cloned.keepalive_count, 2);
@@ -737,6 +770,7 @@ mod tests {
         let fd = create_test_socket();
         let config = SocketConfig {
             tcp_nodelay: false,
+            tcp_quickack: false,
             keepalive_idle_secs: 0,
             keepalive_interval_secs: 0,
             keepalive_count: 0,
@@ -763,6 +797,52 @@ mod tests {
         };
         // busy_poll is non-fatal (ignored on non-Linux or without CAP_NET_ADMIN).
         assert!(apply_connection_opts(fd, &config).is_ok());
+        close_fd(fd);
+    }
+
+    // ── TCP_QUICKACK ──
+
+    #[test]
+    fn tcp_quickack_default_enabled() {
+        // Reset to true in case a previous test toggled it.
+        set_tcp_quickack_default(true);
+        assert!(tcp_quickack_default());
+    }
+
+    #[test]
+    fn tcp_quickack_toggle() {
+        set_tcp_quickack_default(false);
+        assert!(!tcp_quickack_default());
+        set_tcp_quickack_default(true);
+        assert!(tcp_quickack_default());
+    }
+
+    #[test]
+    fn socket_config_quickack_default() {
+        let config = SocketConfig::default();
+        assert!(config.tcp_quickack, "tcp_quickack should default to true");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_connection_opts_with_quickack() {
+        let fd = create_test_socket();
+        let config = SocketConfig {
+            tcp_quickack: true,
+            ..Default::default()
+        };
+        // Should not panic. On non-Linux, set_tcp_quickack is a no-op.
+        assert!(apply_connection_opts(fd, &config).is_ok());
+        close_fd(fd);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tcp_quickack_on_socket() {
+        let fd = create_test_socket();
+        // On macOS this is a no-op, on Linux it sets the option.
+        let result = set_tcp_quickack(fd, true);
+        assert!(result.is_ok());
         close_fd(fd);
     }
 
