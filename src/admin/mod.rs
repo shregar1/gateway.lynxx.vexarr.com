@@ -50,7 +50,6 @@ use http_body_util::BodyExt;
 use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use rust_embed::RustEmbed;
-use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use uuid::Uuid;
