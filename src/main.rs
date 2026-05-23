@@ -311,8 +311,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // --- Telemetry init -------------------------------------------------
     // Reads from config.telemetry (populated from TOML + env overrides).
-    // Endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
-    // When unset the OTel layer is omitted entirely.
+    // Primary endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
+    // Fluxx sidecar:    [telemetry].fluxx_endpoint / FLUXX_OTEL_ENDPOINT
+    // When neither is set the OTel layer is omitted entirely.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug"));
     let fmt_layer = tracing_subscriber::fmt::layer();
@@ -322,13 +323,18 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         Some(config.telemetry.endpoint.clone())
     };
+    let fluxx_endpoint = if config.telemetry.fluxx_endpoint.is_empty() {
+        None
+    } else {
+        Some(config.telemetry.fluxx_endpoint.clone())
+    };
     let telemetry_api_key = if config.telemetry.api_key.is_empty() {
         None
     } else {
         Some(config.telemetry.api_key.clone())
     };
 
-    if let Some(ref endpoint) = primary_endpoint {
+    if primary_endpoint.is_some() || fluxx_endpoint.is_some() {
         // Inject the telemetry API key via the standard OTEL headers env var
         // so the OTLP HTTP exporter picks it up automatically.
         if let Some(ref key) = telemetry_api_key {
@@ -342,17 +348,35 @@ async fn async_main() -> anyhow::Result<()> {
 
         let svc_name = config.telemetry.service_name.clone();
 
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(format!("{endpoint}/v1/traces"))
-            .build()
-            .expect("otlp exporter");
-        let provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
+        let mut provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_resource(opentelemetry_sdk::Resource::new(vec![
                 opentelemetry::KeyValue::new("service.name", svc_name),
-            ]))
-            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
-        tracing::info!("otel exporter → {endpoint}");
+            ]));
+
+        // --- primary exporter ---
+        if let Some(ref endpoint) = primary_endpoint {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{endpoint}/v1/traces"))
+                .build()
+                .expect("primary otlp exporter");
+            provider_builder =
+                provider_builder.with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
+            tracing::info!("primary otel exporter → {endpoint}");
+        }
+
+        // --- fluxx exporter (additional, loopback-only) ---
+        if let Some(ref endpoint) = fluxx_endpoint {
+            if let Ok(fluxx_exporter) = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{endpoint}/v1/traces"))
+                .build()
+            {
+                provider_builder = provider_builder
+                    .with_batch_exporter(fluxx_exporter, opentelemetry_sdk::runtime::Tokio);
+                tracing::info!("fluxx telemetry enabled → {endpoint}");
+            }
+        }
 
         let provider = provider_builder.build();
         opentelemetry::global::set_tracer_provider(provider.clone());
@@ -390,14 +414,14 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let keyx_client = Arc::new(crate::integrations::keyx::KeyxClient::new()?);
-    let license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
+    let _license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
     // Admin tokens (other than the master api key) come from the local
     // `admin_tokens` table; HMAC plugin secrets come from local config.
     // No remote validators in the api-key-only model.
     let token_validator: Option<Arc<dyn crate::integrations::TokenValidator>> = None;
     let hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>> = None;
 
-    let license = match crate::license::License::load(&api_key, license_verifier.as_ref()).await {
+    let license = match crate::license::License::load(Some(&api_key)).await {
         Ok(lic) => {
             tracing::info!(
                 customer_id = %lic.customer_id,
@@ -533,25 +557,41 @@ async fn async_main() -> anyhow::Result<()> {
     quota.set_allow_overage(license.allow_overage);
     crate::quota::spawn_quota_flusher(quota.clone());
 
-    // Live licence state + periodic re-verifier.
-    //
-    // The background refresher re-validates the api key against keyx
-    // every REVERIFY_INTERVAL_SECS and flips a kill-switch on a
-    // confirmed rejection (revocation).
-    //
-    // `license_api_key` is the same value used for licence validation,
-    // also serving as the master admin bearer — one key, one input.
-    let license_api_key = api_key.clone();
-
-    tracing::info!("licence re-verifier in verified mode");
+    // Live licence state + periodic re-verifier. The startup verify
+    // above is hard-fail; this background loop catches mid-run
+    // cancellations within REVERIFY_INTERVAL_SECS instead of waiting
+    // for the offline cache to expire (7 days).
+    let lynxx_base_url = std::env::var("LYNXX_BASE_URL")
+        .or_else(|_| std::env::var("LYNXX_LICENSE_VERIFY_URL").map(|u| {
+            u.trim_end_matches("/v1/license/verify").to_string()
+        }))
+        .unwrap_or_else(|_| "https://api.lynxx.vexarr.com".to_string());
+    let lynxx_base_url = lynxx_base_url.trim_end_matches('/').to_string();
+    let license_api_key = std::env::var("LYNXX_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| config.license.api_key.clone());
+    let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
     let license_state = crate::license::LicenseState::new(
-        license_verifier.clone(),
-        api_key.clone(),
+        license_api_key.clone(),
+        license_verify_url,
         plan_tier,
         license.active_nodes,
         license.max_nodes,
     );
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
+
+    // Register this node with the billing API and start heartbeat.
+    if let Err(e) = crate::license::register_node(&license_api_key, &lynxx_base_url).await {
+        tracing::error!(error = %e, "node registration failed — gateway may not be tracked for billing");
+    }
+    crate::license::spawn_node_heartbeat(license_api_key.clone(), lynxx_base_url.clone());
+    crate::license::spawn_usage_reporter(
+        license_api_key.clone(),
+        lynxx_base_url.clone(),
+        quota.clone(),
+        license_state.clone(),
+    );
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
@@ -1302,6 +1342,8 @@ async fn async_main() -> anyhow::Result<()> {
         let proxy_serve = axum::serve(proxy_listener, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     }
+
+    crate::license::deregister_node(&license_api_key, &lynxx_base_url).await;
 
     if let Some(h) = acme_http_handle {
         h.abort();
