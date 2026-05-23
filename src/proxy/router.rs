@@ -547,6 +547,11 @@ pub struct RouteTable {
     /// Caches full match results for (host, path, method) triples.
     /// Bypasses the entire matching pipeline on cache hit.
     route_result_cache: RouteResultCache,
+    /// Service-id → route-ids index: turns `match_route_for_service` from
+    /// O(N_routes) into O(N_routes_for_this_service). For a deployment with
+    /// 1000 routes spread across 100 services, this is ~10× fewer iterations
+    /// per request. Kept in sync via add / update / remove / load_from_repo.
+    routes_by_service: DashMap<Uuid, Vec<Uuid>, FastHasher>,
 
     // ── Runtime strategy toggles (lock-free) ──
 
@@ -580,6 +585,7 @@ impl RouteTable {
             regex_set_index: ArcSwap::from_pointee(RegexSetIndex::empty()),
             regex_match_cache: RegexResultCache::new(),
             route_result_cache: RouteResultCache::new(),
+            routes_by_service: DashMap::with_hasher(FastHasher::default()),
             path_strategy: AtomicU8::new(PathMatchStrategy::Trie as u8),
             use_regex_set: AtomicBool::new(true),
             use_route_cache: AtomicBool::new(true),
@@ -686,6 +692,42 @@ impl RouteTable {
         self.routes.get(id).map(|r| Arc::clone(r.value()))
     }
 
+    /// Walk every route once and reindex `service_id -> Vec<route_id>`.
+    /// Cheap to call on bulk reload; per-mutation paths use the
+    /// targeted `index_insert_route` / `index_remove_route` helpers
+    /// below instead of rebuilding from scratch.
+    fn rebuild_routes_by_service(&self) {
+        self.routes_by_service.clear();
+        for entry in self.routes.iter() {
+            self.routes_by_service
+                .entry(entry.value().service_id)
+                .or_default()
+                .push(entry.value().id);
+        }
+    }
+
+    /// Add `route_id` to the index under `service_id`. Idempotent —
+    /// safe to call from `add_route` even if (somehow) the route id
+    /// was already present.
+    fn index_insert_route(&self, service_id: Uuid, route_id: Uuid) {
+        let mut bucket = self.routes_by_service.entry(service_id).or_default();
+        if !bucket.contains(&route_id) {
+            bucket.push(route_id);
+        }
+    }
+
+    /// Remove `route_id` from the index under `service_id`. Drops
+    /// empty buckets so they don't accumulate after service deletions.
+    fn index_remove_route(&self, service_id: Uuid, route_id: Uuid) {
+        if let Some(mut bucket) = self.routes_by_service.get_mut(&service_id) {
+            bucket.retain(|id| *id != route_id);
+            if bucket.is_empty() {
+                drop(bucket);
+                self.routes_by_service.remove(&service_id);
+            }
+        }
+    }
+
     fn rebuild_host_index(&self) {
         self.host_index.clear();
         for entry in self.services.iter() {
@@ -773,6 +815,9 @@ impl RouteTable {
 
     /// Find the best matching route within a specific service. Dispatches
     /// to the configured path strategy (trie, radix tree, or scan).
+    ///
+    /// The scan path uses the `routes_by_service` index to walk only
+    /// routes registered for `service_id` — O(R/N) instead of O(R).
     pub fn match_route_for_service(
         &self,
         service_id: &Uuid,
@@ -788,19 +833,21 @@ impl RouteTable {
         }
     }
 
-    /// O(N) linear scan over all routes. Original algorithm — scans every
-    /// route and checks path/service/method for each.
+    /// Indexed scan: walks only the routes for `service_id` via the
+    /// `routes_by_service` index — O(R/N) instead of O(R).
     fn match_route_for_service_scan(
         &self,
         service_id: &Uuid,
         path: &str,
         method: &str,
     ) -> Option<Arc<Route>> {
-        for entry in self.routes.iter() {
-            let route = entry.value();
-            if &route.service_id != service_id {
-                continue;
-            }
+        let bucket = self.routes_by_service.get(service_id)?;
+        for route_id in bucket.iter() {
+            let route_ref = match self.routes.get(route_id) {
+                Some(r) => r,
+                None => continue,
+            };
+            let route = route_ref.value();
             if !self.path_matches(route, path) {
                 continue;
             }
@@ -868,6 +915,7 @@ impl RouteTable {
         self.rebuild_regex_cache();
         self.rebuild_route_indexes();
         self.rebuild_host_indexes();
+        self.rebuild_routes_by_service();
 
         Ok((services.len(), routes.len()))
     }
@@ -932,10 +980,12 @@ impl RouteTable {
 
     pub fn add_route(&self, route: Route) -> Uuid {
         let id = route.id;
+        let service_id = route.service_id;
         if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
             self.regex_cache.insert(id, Self::compile_cache_for(&route));
         }
         self.routes.insert(id, Arc::new(route));
+        self.index_insert_route(service_id, id);
         self.rebuild_route_indexes();
         id
     }
@@ -949,28 +999,41 @@ impl RouteTable {
     }
 
     pub fn update_route(&self, id: &Uuid, route: Route) -> bool {
-        if self.routes.contains_key(id) {
-            if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
-                self.regex_cache
-                    .insert(*id, Self::compile_cache_for(&route));
-            } else {
-                self.regex_cache.remove(id);
-            }
-            self.routes.insert(*id, Arc::new(route));
-            self.rebuild_route_indexes();
-            true
-        } else {
-            false
+        // Need the old service_id so we can move the route in the
+        // service index if `update` reparents it.
+        let old_service_id = self.routes.get(id).map(|r| r.value().service_id);
+        if old_service_id.is_none() {
+            return false;
         }
+        let old_service_id = old_service_id.unwrap();
+        let new_service_id = route.service_id;
+        if !route.path_regexes.is_empty() || route.path_rewrite_pattern.is_some() {
+            self.regex_cache
+                .insert(*id, Self::compile_cache_for(&route));
+        } else {
+            self.regex_cache.remove(id);
+        }
+        self.routes.insert(*id, Arc::new(route));
+        if old_service_id != new_service_id {
+            self.index_remove_route(old_service_id, *id);
+            self.index_insert_route(new_service_id, *id);
+        } else {
+            self.index_insert_route(new_service_id, *id);
+        }
+        self.rebuild_route_indexes();
+        true
     }
 
     pub fn remove_route(&self, id: &Uuid) -> bool {
-        let removed = self.routes.remove(id).is_some();
-        if removed {
-            self.regex_cache.remove(id);
-            self.rebuild_route_indexes();
+        match self.routes.remove(id) {
+            Some((_, route)) => {
+                self.regex_cache.remove(id);
+                self.index_remove_route(route.service_id, *id);
+                self.rebuild_route_indexes();
+                true
+            }
+            None => false,
         }
-        removed
     }
 
     pub fn match_route(
