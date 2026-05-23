@@ -748,8 +748,21 @@ fn verify_response_signature(
             // No signature header. In release builds, this is fatal —
             // the billing server should always sign. In debug builds,
             // tolerate it for local dev without the signing key.
-            if cfg!(debug_assertions) {
-                tracing::warn!("verify response has no signature (debug build — tolerating)");
+            //
+            // Release-build escape hatch for the bench rig: setting
+            // `LYNXX_INSECURE_SKIP_LICENSE_SIG=1` tolerates a missing
+            // signature even in release. This lets the gateway run
+            // against the local auth stub on the bench VM, which does
+            // not have access to the Ed25519 signing key. The env var
+            // name is deliberately ugly so nobody enables it in
+            // production by accident.
+            if cfg!(debug_assertions)
+                || env::var("LYNXX_INSECURE_SKIP_LICENSE_SIG").as_deref() == Ok("1")
+            {
+                tracing::warn!(
+                    "verify response has no signature (tolerating — debug build or \
+                     LYNXX_INSECURE_SKIP_LICENSE_SIG=1)"
+                );
                 Ok(())
             } else {
                 Err(LicenseError::Rejected(

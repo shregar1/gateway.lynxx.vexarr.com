@@ -54,7 +54,8 @@ EOF
 start_proxy() {
   echo_sub "start lynxx-gateway on :$PROXY_PORT (RUST_LOG=$LYNXX_RUST_LOG)"
   write_config
-  AUTH_URL="$AUTH_URL" LYNXX_API_KEY="$LYNXX_API_KEY" RUST_LOG="$LYNXX_RUST_LOG" \
+  AUTH_URL="$AUTH_URL" LYNXX_API_KEY="$LYNXX_API_KEY" \
+    LYNXX_ALLOW_DEV_KEY="$LYNXX_ALLOW_DEV_KEY" RUST_LOG="$LYNXX_RUST_LOG" \
     nohup "$SRC_DIR/target/release/lynxx-gateway" --config "$CONFIG_TOML" \
     >"$RESULTS_DIR/_lynxx.log" 2>&1 &
   wait_for_port "$PROXY_PORT" 30

@@ -97,6 +97,26 @@ pub fn is_directory_listing_enabled() -> bool {
     DIRECTORY_LISTING_ENABLED.load(Ordering::Relaxed)
 }
 
+/// DirectIO threshold in bytes. 0 = disabled (default), otherwise files
+/// at or above this size bypass the kernel page cache (like nginx `directio`).
+static DIRECTIO_THRESHOLD: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_directio_threshold(bytes: u64) {
+    DIRECTIO_THRESHOLD.store(bytes, Ordering::Relaxed);
+}
+
+pub fn directio_threshold() -> u64 {
+    DIRECTIO_THRESHOLD.load(Ordering::Relaxed)
+}
+
+/// Returns `true` when directio is enabled (threshold > 0) AND the file
+/// size is at or above the threshold — i.e. the file is large enough to
+/// warrant bypassing the page cache.
+pub fn should_use_directio(file_size: u64) -> bool {
+    let threshold = directio_threshold();
+    threshold > 0 && file_size >= threshold
+}
+
 // ---------------------------------------------------------------------------
 // MappedFile — Safe mmap wrapper (Unix)
 // ---------------------------------------------------------------------------
@@ -262,6 +282,54 @@ pub fn advise_sequential(_file: &std::fs::File) {}
 pub fn advise_willneed(_file: &std::fs::File, _offset: i64, _len: i64) {}
 #[cfg(not(target_os = "linux"))]
 pub fn advise_dontneed(_file: &std::fs::File, _offset: i64, _len: i64) {}
+
+// ---------------------------------------------------------------------------
+// DirectIO — bypass page cache for large files (NGINX-style `directio`)
+// ---------------------------------------------------------------------------
+
+/// Open a file with `O_DIRECT` to bypass the kernel page cache. Used for
+/// large files where caching would pollute the page cache and evict hotter
+/// data. Mirrors nginx's `directio` directive behaviour.
+///
+/// On non-Linux platforms `O_DIRECT` is not available, so this falls back
+/// to a normal `File::open`.
+#[cfg(target_os = "linux")]
+pub fn open_with_directio(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::FromRawFd;
+
+    let c_path = CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+
+    let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECT) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn open_with_directio(path: &Path) -> std::io::Result<std::fs::File> {
+    // O_DIRECT is Linux-specific; fall back to normal open.
+    std::fs::File::open(path)
+}
+
+/// Advise the kernel that the file data accessed via this FD should not be
+/// kept in the page cache (`POSIX_FADV_DONTNEED`). Complements `O_DIRECT`
+/// on Linux; no-op on other platforms.
+#[cfg(target_os = "linux")]
+pub fn advise_directio(fd: std::os::unix::io::RawFd, file_size: u64) {
+    unsafe {
+        libc::posix_fadvise(fd, 0, file_size as i64, libc::POSIX_FADV_DONTNEED);
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn advise_directio(_fd: i32, _file_size: u64) {
+    // posix_fadvise not available — no-op.
+}
 
 // ---------------------------------------------------------------------------
 // sendfile wrapper (Linux)
@@ -1258,5 +1326,71 @@ mod tests {
         let result = sendfile_transfer(0, 0, &mut 0i64, 0);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Unsupported);
+    }
+
+    // ── DirectIO ──
+
+    #[test]
+    fn directio_threshold_default_disabled() {
+        // DirectIO is disabled (threshold = 0) by default.
+        assert_eq!(DIRECTIO_THRESHOLD.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn directio_threshold_set_get() {
+        let original = directio_threshold();
+        set_directio_threshold(512 * 1024);
+        assert_eq!(directio_threshold(), 512 * 1024);
+        // Restore to avoid affecting other tests.
+        set_directio_threshold(original);
+    }
+
+    #[test]
+    fn should_use_directio_disabled() {
+        let original = directio_threshold();
+        set_directio_threshold(0);
+        // When threshold is 0 (disabled), always returns false regardless
+        // of file size.
+        assert!(!should_use_directio(0));
+        assert!(!should_use_directio(1));
+        assert!(!should_use_directio(u64::MAX));
+        set_directio_threshold(original);
+    }
+
+    #[test]
+    fn should_use_directio_below_threshold() {
+        let original = directio_threshold();
+        set_directio_threshold(1024);
+        assert!(!should_use_directio(0));
+        assert!(!should_use_directio(512));
+        assert!(!should_use_directio(1023));
+        set_directio_threshold(original);
+    }
+
+    #[test]
+    fn should_use_directio_above_threshold() {
+        let original = directio_threshold();
+        set_directio_threshold(1024);
+        assert!(should_use_directio(1025));
+        assert!(should_use_directio(2048));
+        assert!(should_use_directio(u64::MAX));
+        set_directio_threshold(original);
+    }
+
+    #[test]
+    fn should_use_directio_at_threshold() {
+        let original = directio_threshold();
+        set_directio_threshold(1024);
+        assert!(should_use_directio(1024));
+        set_directio_threshold(original);
+    }
+
+    #[test]
+    fn open_with_directio_regular_file() {
+        let (_f, path) = temp_file(b"directio open test data");
+        let file = open_with_directio(&path);
+        // On all platforms this should succeed — Linux uses O_DIRECT,
+        // non-Linux falls back to normal File::open.
+        assert!(file.is_ok());
     }
 }

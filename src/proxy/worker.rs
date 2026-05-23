@@ -30,7 +30,7 @@
 //!   on one core.
 
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Worker model
@@ -75,6 +75,112 @@ pub fn set_cpu_pinning(enabled: bool) {
 
 pub fn is_cpu_pinning_enabled() -> bool {
     CPU_PINNING_ENABLED.load(Ordering::Relaxed)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RLIMIT_NOFILE — file descriptor limits (NGINX-style worker_rlimit_nofile)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/// Global rlimit_nofile setting. 0 = don't change (default).
+static RLIMIT_NOFILE: AtomicU64 = AtomicU64::new(0);
+
+pub fn set_rlimit_nofile(n: u64) {
+    RLIMIT_NOFILE.store(n, Ordering::Relaxed);
+}
+
+pub fn rlimit_nofile() -> u64 {
+    RLIMIT_NOFILE.load(Ordering::Relaxed)
+}
+
+/// Errors that can occur when adjusting the RLIMIT_NOFILE.
+#[derive(Debug)]
+pub enum RlimitError {
+    /// `getrlimit(2)` failed.
+    GetFailed(std::io::Error),
+    /// `setrlimit(2)` failed.
+    SetFailed(std::io::Error),
+    /// Requested limit exceeds the hard limit.
+    ExceedsHardLimit { requested: u64, hard_limit: u64 },
+}
+
+impl std::fmt::Display for RlimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GetFailed(e) => write!(f, "getrlimit failed: {}", e),
+            Self::SetFailed(e) => write!(f, "setrlimit failed: {}", e),
+            Self::ExceedsHardLimit { requested, hard_limit } => {
+                write!(
+                    f,
+                    "requested nofile limit {} exceeds hard limit {}",
+                    requested, hard_limit
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for RlimitError {}
+
+/// Raise the soft RLIMIT_NOFILE to `target`, capped at the hard limit.
+///
+/// Returns the actual new soft limit on success.
+#[cfg(unix)]
+pub fn raise_nofile_limit(target: u64) -> Result<u64, RlimitError> {
+    let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+
+    // Get current limits.
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+    if rc != 0 {
+        return Err(RlimitError::GetFailed(std::io::Error::last_os_error()));
+    }
+
+    let hard = rlim.rlim_max as u64;
+    let actual = std::cmp::min(target, hard);
+
+    rlim.rlim_cur = actual as libc::rlim_t;
+
+    let rc = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) };
+    if rc != 0 {
+        return Err(RlimitError::SetFailed(std::io::Error::last_os_error()));
+    }
+
+    Ok(actual)
+}
+
+#[cfg(not(unix))]
+pub fn raise_nofile_limit(target: u64) -> Result<u64, RlimitError> {
+    Ok(target)
+}
+
+/// Get the current `(soft, hard)` RLIMIT_NOFILE.
+#[cfg(unix)]
+pub fn get_nofile_limit() -> Result<(u64, u64), std::io::Error> {
+    let mut rlim: libc::rlimit = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((rlim.rlim_cur as u64, rlim.rlim_max as u64))
+}
+
+#[cfg(not(unix))]
+pub fn get_nofile_limit() -> Result<(u64, u64), std::io::Error> {
+    Ok((0, 0))
+}
+
+/// Calculate a recommended RLIMIT_NOFILE based on worker count and
+/// max connections per worker.
+///
+/// Formula: `worker_count * max_connections_per_worker * 2 + 1024`
+///   - ×2 accounts for upstream + downstream file descriptors
+///   - +1024 for listen sockets, logs, and other overhead
+///   - Capped at 1,048,576 (1M)
+pub fn auto_nofile_limit(worker_count: usize, max_connections_per_worker: u32) -> u64 {
+    let raw = (worker_count as u64)
+        .saturating_mul(max_connections_per_worker as u64)
+        .saturating_mul(2)
+        .saturating_add(1024);
+    std::cmp::min(raw, 1_048_576)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,6 +295,8 @@ pub struct WorkerConfig {
     pub max_connections: u32,
     /// Buffer pool size for this worker (bytes).
     pub buffer_pool_size: usize,
+    /// RLIMIT_NOFILE override for this worker. 0 = don't change.
+    pub rlimit_nofile: u64,
 }
 
 impl WorkerConfig {
@@ -198,6 +306,7 @@ impl WorkerConfig {
             core_id: None,
             max_connections: 10_000,
             buffer_pool_size: 64 * 1024 * 1024, // 64 MB
+            rlimit_nofile: 0,
         }
     }
 
@@ -208,6 +317,7 @@ impl WorkerConfig {
             core_id: Some(core_id),
             max_connections: 10_000,
             buffer_pool_size: 64 * 1024 * 1024,
+            rlimit_nofile: 0,
         }
     }
 }
@@ -494,5 +604,62 @@ mod tests {
     #[test]
     fn available_cores_positive() {
         assert!(available_cores() > 0);
+    }
+
+    // ── RLIMIT_NOFILE ──
+
+    #[test]
+    fn rlimit_nofile_default_zero() {
+        // The global default must be 0 (don't change).
+        // Note: other tests may have mutated it, so set first.
+        set_rlimit_nofile(0);
+        assert_eq!(rlimit_nofile(), 0);
+    }
+
+    #[test]
+    fn rlimit_nofile_set_get() {
+        set_rlimit_nofile(65_536);
+        assert_eq!(rlimit_nofile(), 65_536);
+        // Cleanup.
+        set_rlimit_nofile(0);
+    }
+
+    #[test]
+    fn auto_nofile_limit_calculation() {
+        // 4 workers × 10_000 conns × 2 + 1024 = 81_024
+        assert_eq!(auto_nofile_limit(4, 10_000), 81_024);
+    }
+
+    #[test]
+    fn auto_nofile_limit_caps_at_1m() {
+        // Huge values should cap at 1_048_576.
+        let result = auto_nofile_limit(1000, 100_000);
+        assert_eq!(result, 1_048_576);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn get_nofile_limit_returns_positive() {
+        let (soft, hard) = get_nofile_limit().unwrap();
+        assert!(soft > 0, "soft limit should be > 0, got {}", soft);
+        assert!(hard > 0, "hard limit should be > 0, got {}", hard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raise_nofile_limit_succeeds() {
+        // Raising to the current soft limit is always safe.
+        let (soft, _hard) = get_nofile_limit().unwrap();
+        let actual = raise_nofile_limit(soft).unwrap();
+        assert_eq!(actual, soft);
+    }
+
+    #[test]
+    fn worker_config_includes_rlimit() {
+        let config = WorkerConfig::new(0);
+        assert_eq!(config.rlimit_nofile, 0);
+
+        let pinned = WorkerConfig::pinned(1, 0);
+        assert_eq!(pinned.rlimit_nofile, 0);
     }
 }
