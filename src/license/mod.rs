@@ -274,6 +274,38 @@ impl LicenseState {
         self.inner.node_counts.read().expect("node lock poisoned").1
     }
 
+    /// Always `"verified"` — api-key-only mode has no unverified path.
+    /// Kept on the status endpoint for backwards compatibility with
+    /// dashboards that still read the field.
+    pub fn mode(&self) -> &'static str {
+        "verified"
+    }
+
+    /// Forward an arbitrary customer api key to the licence backend for
+    /// validation. The node dashboard's sign-in flow uses this so it
+    /// never has to talk to the licence server directly.
+    pub async fn validate_key(
+        &self,
+        api_key: &str,
+    ) -> Result<crate::integrations::abstraction::LicenseInfo, crate::integrations::abstraction::VerifierError> {
+        use crate::integrations::abstraction::{LicenseInfo, VerifierError};
+        match verify_online(api_key, &self.inner.verify_url).await {
+            Ok(resp) => Ok(LicenseInfo {
+                customer_urn: resp.customer_urn,
+                tier: resp.tier,
+                expires_at: resp.expires_at,
+                max_nodes: resp.max_nodes,
+                active_nodes: resp.active_nodes,
+                monthly_call_limit: resp.monthly_call_limit,
+                allow_overage: resp.allow_overage,
+            }),
+            Err(LicenseError::Rejected(msg)) => Err(VerifierError::Rejected(msg)),
+            Err(LicenseError::Offline(msg)) => Err(VerifierError::Transport(msg)),
+            Err(LicenseError::Malformed(msg)) => Err(VerifierError::Malformed(msg)),
+            Err(other) => Err(VerifierError::Transport(other.to_string())),
+        }
+    }
+
     fn update_node_counts(&self, active: u32, max: Option<u32>) {
         let mut nc = self.inner.node_counts.write().expect("node lock poisoned");
         *nc = (active, max);

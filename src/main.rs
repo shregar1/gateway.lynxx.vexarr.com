@@ -414,14 +414,14 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let keyx_client = Arc::new(crate::integrations::keyx::KeyxClient::new()?);
-    let license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
+    let _license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
     // Admin tokens (other than the master api key) come from the local
     // `admin_tokens` table; HMAC plugin secrets come from local config.
     // No remote validators in the api-key-only model.
     let token_validator: Option<Arc<dyn crate::integrations::TokenValidator>> = None;
     let hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>> = None;
 
-    let license = match crate::license::License::load(&api_key, license_verifier.as_ref()).await {
+    let license = match crate::license::License::load(Some(&api_key)).await {
         Ok(lic) => {
             tracing::info!(
                 customer_id = %lic.customer_id,

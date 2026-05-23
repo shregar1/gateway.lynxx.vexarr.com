@@ -70,7 +70,7 @@ pub async fn service_docs(
     }
 
     Ok(Json(ServiceDocs {
-        service_name: svc.name,
+        service_name: svc.name.to_string(),
         base_url,
         endpoints,
     }))
