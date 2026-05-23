@@ -36,6 +36,7 @@ use std::env;
 use std::path::PathBuf;
 use std::time::Duration as StdDuration;
 
+use crate::integrations::abstraction::{LicenseInfo, VerifierError};
 use crate::quota::PlanTier;
 
 const DEFAULT_LYNXX_BASE_URL: &str = "https://api.lynxx.vexarr.com";
@@ -311,7 +312,7 @@ impl LicenseState {
         *nc = (active, max);
     }
 
-    fn flip_inactive(&self, reason: &str) {
+    pub(crate) fn flip_inactive(&self, reason: &str) {
         self.inner
             .active
             .store(false, std::sync::atomic::Ordering::Relaxed);

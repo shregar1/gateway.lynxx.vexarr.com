@@ -25,11 +25,49 @@ impl LogWriter {
         let _ = self.tx.try_send(entry);
     }
 
-    /// Cached-timestamp variant for the proxy hot path. The handler captures
-    /// `Utc::now()` once per request at entry and threads it through every
-    /// per-request consumer (health registry, quota tracker, log writer)
-    /// to eliminate redundant `clock_gettime` syscalls. See `proxy_handler`.
-    #[allow(clippy::too_many_arguments)]
+    pub fn log(
+        &self,
+        method: &str,
+        path: &str,
+        client_ip: &str,
+        service_id: Option<Uuid>,
+        route_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        status: Option<u16>,
+        duration_ms: i64,
+        level: &str,
+        message: &str,
+    ) {
+        let nil = Uuid::nil();
+        let route_id_val = route_id.filter(|id| *id != nil);
+        let now = Utc::now();
+        self.send(LogEntry {
+            id: Uuid::new_v4(),
+            urn: Uuid::new_v4().to_string(),
+            ts: now,
+            level: level.to_string(),
+            message: message.to_string(),
+            service_id,
+            route_id: route_id_val,
+            project_id,
+            method: Some(method.to_string()),
+            path: Some(path.to_string()),
+            status: status.map(|s| s as i32),
+            duration_ms: Some(duration_ms),
+            client_ip: if client_ip.is_empty() {
+                None
+            } else {
+                Some(client_ip.to_string())
+            },
+            metadata: None,
+            created_at: now,
+            updated_at: now,
+        });
+    }
+
+    /// Like [`log`], but uses a caller-supplied timestamp instead of
+    /// `Utc::now()`. The handler hot path caches `Utc::now()` once per
+    /// request and passes it here so we avoid a second syscall.
     pub fn log_at(
         &self,
         now: DateTime<Utc>,
@@ -68,37 +106,6 @@ impl LogWriter {
             created_at: now,
             updated_at: now,
         });
-    }
-
-    /// Convenience: calls `log_at(Utc::now(), ...)`. The proxy hot path
-    /// uses `log_at` directly with the per-request cached timestamp.
-    #[allow(clippy::too_many_arguments)]
-    pub fn log(
-        &self,
-        method: &str,
-        path: &str,
-        client_ip: &str,
-        service_id: Option<Uuid>,
-        route_id: Option<Uuid>,
-        project_id: Option<Uuid>,
-        status: Option<u16>,
-        duration_ms: i64,
-        level: &str,
-        message: &str,
-    ) {
-        self.log_at(
-            Utc::now(),
-            method,
-            path,
-            client_ip,
-            service_id,
-            route_id,
-            project_id,
-            status,
-            duration_ms,
-            level,
-            message,
-        );
     }
 }
 
