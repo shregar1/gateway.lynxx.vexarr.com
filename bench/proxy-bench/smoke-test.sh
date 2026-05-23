@@ -22,9 +22,8 @@ note() { echo "[$(date +%H:%M:%S)] $*"; }
 
 note "Starting Postgres + upstream on SUT"
 $SSH_SUT 'cd ~/bench && sg docker -c "docker compose up -d postgres" >/dev/null'
-$SSH_SUT 'pkill -f lynxx-mock-upstream 2>/dev/null; \
-          nohup ~/bench/lynxx-mock-upstream --port 19090 > ~/bench/upstream.log 2>&1 & \
-          disown; sleep 1' || true
+$SSH_SUT "nohup ~/bench/lynxx-mock-upstream --port 19090 > ~/bench/upstream.log 2>&1 &"
+sleep 2
 
 note "Waiting for Postgres to accept connections"
 PG_OK=0

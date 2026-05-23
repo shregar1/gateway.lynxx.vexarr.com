@@ -48,8 +48,8 @@ to_us () {
   python3 - "$1" <<'PY'
 import sys
 v = sys.argv[1].strip()
-units = {"s":1_000_000, "ms":1_000, "µs":1, "us":1}
-for u, mul in units.items():
+units = [("ms", 1000), ("us", 1), ("µs", 1), ("s", 1000000)]
+for u, mul in units:
     if v.endswith(u):
         print(int(float(v[:-len(u)]) * mul)); break
 else:

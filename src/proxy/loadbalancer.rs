@@ -3,22 +3,43 @@
 //! strategies. Targets are runtime-tracked for in-flight count and health.
 
 use crate::models::{Target, TargetLifecycle};
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use std::collections::hash_map::DefaultHasher;
+use ahash::AHasher;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 pub const STICKY_COOKIE_NAME: &str = "_lynxx_upstream";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LbStrategy {
+    /// Virtual-time FWRR (default). O(log N) pick, O(N) memory regardless of
+    /// weights, incremental weight updates. Inspired by HAProxy's FWRR.
     RoundRobin,
+    /// Pre-expanded ring: O(1) pick but memory ∝ sum-of-weights and full
+    /// rebuild on any weight change. Better when N is small and weights are
+    /// low.
+    RoundRobinRing,
     LeastConn,
+    /// Explicit opt-in to O(N) linear scan for least-connections. The default
+    /// `LeastConn` uses a BTreeMap-indexed O(log N) pick inspired by HAProxy's
+    /// FWLC algorithm. Use this when you need the simpler scan (e.g. debugging
+    /// or when N is tiny and the Mutex overhead isn't worth it).
+    LeastConnScan,
     IpHash,
     CookieSticky,
+    /// Ketama-style virtual-node ring with O(log V) lookup via BTreeMap.
+    /// Each target gets `150 * weight` virtual nodes on the ring, so higher
+    /// weight targets capture proportionally more of the hash space. Inspired
+    /// by HAProxy's eb32-tree consistent hashing.
     ConsistentHash,
+    /// Explicit opt-in to O(N) rendezvous/HRW hashing for consistent-hash
+    /// routing. The default `ConsistentHash` uses a virtual-node ring. Use
+    /// this when N is tiny or you need exact HRW semantics.
+    ConsistentHashHrw,
     Random,
     /// Power-of-2 random choices: pick 2 random healthy targets, forward to
     /// the one with fewer in-flight requests. Gives near-optimal spread
@@ -48,10 +69,13 @@ pub enum LbStrategy {
 impl LbStrategy {
     pub fn from_str(s: &str) -> Self {
         match s {
+            "round-robin-ring" | "round_robin_ring" => LbStrategy::RoundRobinRing,
             "least-conn" | "least_conn" | "leastconn" => LbStrategy::LeastConn,
+            "least-conn-scan" | "least_conn_scan" => LbStrategy::LeastConnScan,
             "ip-hash" | "ip_hash" | "iphash" => LbStrategy::IpHash,
             "cookie" | "cookie-sticky" | "sticky" => LbStrategy::CookieSticky,
             "consistent-hash" | "consistent_hash" | "consistenthash" => LbStrategy::ConsistentHash,
+            "consistent-hash-hrw" | "consistent_hash_hrw" => LbStrategy::ConsistentHashHrw,
             "random" => LbStrategy::Random,
             "random-choose" | "random_choose" | "p2c" => LbStrategy::RandomChoose,
             "first" | "failover" | "primary" => LbStrategy::First,
@@ -79,10 +103,297 @@ pub struct RequestContext<'a> {
 }
 
 fn hrw_hash(key: &str, target_id: &Uuid) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = AHasher::default();
     key.hash(&mut hasher);
     target_id.hash(&mut hasher);
     hasher.finish()
+}
+
+// ---------------------------------------------------------------------------
+// Indexed least-connections (HAProxy FWLC-inspired)
+// ---------------------------------------------------------------------------
+
+struct LcIndexInner {
+    /// BTreeMap keyed by `(score, target_index)`. The BTree keeps entries
+    /// sorted so finding the minimum is a walk to the first key — O(log N)
+    /// for remove + reinsert vs the old O(N) linear scan.
+    tree: BTreeMap<(u64, usize), ()>,
+    /// `scores[idx]` = the key currently in `tree` for target `idx`.
+    /// Maintained under the same Mutex so the two never diverge.
+    scores: Vec<u64>,
+}
+
+/// Sorted index of targets by connection score. Inspired by HAProxy's FWLC
+/// which uses an eb32 tree + per-proxy rwlock. We use a BTreeMap + Mutex;
+/// the critical section is ~100 ns (a BTree remove + insert) so throughput
+/// through the lock exceeds 5 M ops/s — well above typical proxy RPS.
+pub(crate) struct LcIndex {
+    inner: Mutex<LcIndexInner>,
+}
+
+impl std::fmt::Debug for LcIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LcIndex").finish_non_exhaustive()
+    }
+}
+
+impl LcIndex {
+    fn new(num_targets: usize) -> Self {
+        let mut tree = BTreeMap::new();
+        let mut scores = Vec::with_capacity(num_targets);
+        for idx in 0..num_targets {
+            tree.insert((0u64, idx), ());
+            scores.push(0u64);
+        }
+        Self {
+            inner: Mutex::new(LcIndexInner { tree, scores }),
+        }
+    }
+
+    /// O(log N) pick: find the first routable target in ascending score order,
+    /// remove its entry and reinsert at `score + 1`.
+    fn pick(&self, targets: &[Arc<TargetState>]) -> Option<usize> {
+        let mut inner = self.inner.lock().unwrap();
+        let entry = inner
+            .tree
+            .iter()
+            .find(|&(&(_, idx), _)| targets.get(idx).map_or(false, |t| t.is_routable()))
+            .map(|(&key, _)| key);
+        let (score, idx) = entry?;
+        inner.tree.remove(&(score, idx));
+        let new_score = score + 1;
+        inner.tree.insert((new_score, idx), ());
+        inner.scores[idx] = new_score;
+        Some(idx)
+    }
+
+    /// Increment the score for `idx` (used by subset / excluding picks that
+    /// bypass the tree's own `pick` but still need to keep scores in sync).
+    fn increment(&self, idx: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        if idx >= inner.scores.len() {
+            return;
+        }
+        let old = inner.scores[idx];
+        inner.tree.remove(&(old, idx));
+        let new = old + 1;
+        inner.tree.insert((new, idx), ());
+        inner.scores[idx] = new;
+    }
+
+    /// Decrement the score for `idx` (called from `InFlightGuard::drop`).
+    fn release(&self, idx: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        if idx >= inner.scores.len() {
+            return;
+        }
+        let old = inner.scores[idx];
+        inner.tree.remove(&(old, idx));
+        let new = old.saturating_sub(1);
+        inner.tree.insert((new, idx), ());
+        inner.scores[idx] = new;
+    }
+
+    /// Rebuild tree scores from the actual `in_flight` atomics.
+    #[cfg(test)]
+    fn sync_from_atomics(&self, targets: &[Arc<TargetState>]) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.tree.clear();
+        for (idx, t) in targets.iter().enumerate() {
+            let count = t.in_flight.load(Ordering::Relaxed);
+            if idx < inner.scores.len() {
+                inner.scores[idx] = count;
+            }
+            inner.tree.insert((count, idx), ());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fast Weighted Round Robin (HAProxy FWRR-inspired)
+// ---------------------------------------------------------------------------
+
+/// Precision multiplier for virtual-time stride computation.
+/// `stride = FWRR_SCALE / weight` — higher scale → finer granularity for
+/// weight ratios at the cost of faster vtime growth. 2^20 (~1M) gives
+/// sub-0.1% error for weights up to 10 000 and overflows after ~17 trillion
+/// picks at weight-1 (centuries at 100k RPS).
+const FWRR_SCALE: u64 = 1 << 20;
+
+struct FwrrInner {
+    tree: BTreeMap<(u64, usize), ()>,
+    vtimes: Vec<u64>,
+    weights: Vec<u32>,
+}
+
+/// Virtual-time fair-queuing scheduler for weighted round-robin. Each target
+/// maintains a virtual timestamp that advances by `FWRR_SCALE / weight` on
+/// every pick. Targets with higher weight advance slower and therefore get
+/// picked more often.
+///
+/// Compared to the pre-expanded ring:
+///   * Memory: O(N) regardless of weights (ring is O(Σ weights))
+///   * Weight change: O(log N) incremental (ring requires full rebuild)
+///   * Pick: O(log N) via BTree (ring is O(1))
+pub(crate) struct FwrrIndex {
+    inner: Mutex<FwrrInner>,
+}
+
+impl std::fmt::Debug for FwrrIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FwrrIndex").finish_non_exhaustive()
+    }
+}
+
+impl FwrrIndex {
+    fn new(targets: &[Arc<TargetState>]) -> Self {
+        let mut tree = BTreeMap::new();
+        let mut vtimes = Vec::with_capacity(targets.len());
+        let mut weights = Vec::with_capacity(targets.len());
+        for (idx, t) in targets.iter().enumerate() {
+            tree.insert((0u64, idx), ());
+            vtimes.push(0u64);
+            weights.push(t.target.weight.max(1));
+        }
+        Self {
+            inner: Mutex::new(FwrrInner {
+                tree,
+                vtimes,
+                weights,
+            }),
+        }
+    }
+
+    /// O(log N) pick: find the first routable target with the lowest virtual
+    /// time, advance it by its stride, and reinsert.
+    fn pick(&self, targets: &[Arc<TargetState>]) -> Option<usize> {
+        let mut inner = self.inner.lock().unwrap();
+        let entry = inner
+            .tree
+            .iter()
+            .find(|&(&(_, idx), _)| targets.get(idx).map_or(false, |t| t.is_routable()))
+            .map(|(&key, _)| key);
+        let (vtime, idx) = entry?;
+        inner.tree.remove(&(vtime, idx));
+        let stride = FWRR_SCALE / inner.weights[idx].max(1) as u64;
+        let new_vtime = vtime + stride;
+        inner.tree.insert((new_vtime, idx), ());
+        inner.vtimes[idx] = new_vtime;
+        // Compact when vtimes grow large to prevent eventual overflow.
+        Self::maybe_compact(&mut inner);
+        Some(idx)
+    }
+
+    /// Advance a target's vtime without going through the tree-walk pick
+    /// (used by zone-aware subset picks to keep vtimes in sync).
+    fn advance(&self, idx: usize) {
+        let mut inner = self.inner.lock().unwrap();
+        if idx >= inner.vtimes.len() {
+            return;
+        }
+        let old = inner.vtimes[idx];
+        inner.tree.remove(&(old, idx));
+        let stride = FWRR_SCALE / inner.weights[idx].max(1) as u64;
+        let new = old + stride;
+        inner.tree.insert((new, idx), ());
+        inner.vtimes[idx] = new;
+    }
+
+    /// O(log N) incremental weight update. Changes the stride for future
+    /// picks without rebuilding the entire tree.
+    fn update_weight(&self, idx: usize, new_weight: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if idx >= inner.weights.len() {
+            return;
+        }
+        let old_vtime = inner.vtimes[idx];
+        inner.tree.remove(&(old_vtime, idx));
+        inner.weights[idx] = new_weight.max(1);
+        inner.tree.insert((old_vtime, idx), ());
+    }
+
+    /// Subtract the global minimum vtime from every entry when values grow
+    /// too large. O(N) but fires at most once per ~2^52 picks.
+    fn maybe_compact(inner: &mut FwrrInner) {
+        let min_vtime = match inner.tree.keys().next() {
+            Some(&(v, _)) => v,
+            None => return,
+        };
+        if min_vtime < (1u64 << 52) {
+            return;
+        }
+        let entries: Vec<(u64, usize)> = inner.tree.keys().copied().collect();
+        inner.tree.clear();
+        for (vtime, idx) in entries {
+            let shifted = vtime - min_vtime;
+            inner.tree.insert((shifted, idx), ());
+            inner.vtimes[idx] = shifted;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Consistent-hash ring (ketama-style, HAProxy-inspired)
+// ---------------------------------------------------------------------------
+
+/// Virtual nodes per unit of weight. With 150 × weight-1, a 10-target pool
+/// creates 1 500 ring entries — O(log 1500) ≈ 11 comparisons per lookup vs
+/// O(10) hash+compare for HRW. The ring wins clearly above ~20 targets.
+const RING_VNODES_PER_UNIT: u32 = 150;
+
+struct ConsistentHashRing {
+    ring: BTreeMap<u64, usize>,
+}
+
+impl std::fmt::Debug for ConsistentHashRing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConsistentHashRing")
+            .field("vnodes", &self.ring.len())
+            .finish()
+    }
+}
+
+impl ConsistentHashRing {
+    fn new(targets: &[Arc<TargetState>]) -> Self {
+        let mut ring = BTreeMap::new();
+        for (idx, t) in targets.iter().enumerate() {
+            let vnodes = RING_VNODES_PER_UNIT * t.target.weight.max(1);
+            for v in 0..vnodes {
+                let hash = Self::node_hash(&t.target.id, v);
+                ring.insert(hash, idx);
+            }
+        }
+        Self { ring }
+    }
+
+    fn node_hash(target_id: &Uuid, vnode: u32) -> u64 {
+        let mut hasher = AHasher::default();
+        target_id.hash(&mut hasher);
+        vnode.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn key_hash(key: &str) -> u64 {
+        let mut hasher = AHasher::default();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// O(log V) lookup: hash the key, walk the ring clockwise from that
+    /// point until a routable target is found.
+    fn pick(&self, key: &str, targets: &[Arc<TargetState>]) -> Option<usize> {
+        if self.ring.is_empty() {
+            return None;
+        }
+        let hash = Self::key_hash(key);
+        let iter = self.ring.range(hash..).chain(self.ring.range(..hash));
+        for (_, &idx) in iter {
+            if targets.get(idx).map_or(false, |t| t.is_routable()) {
+                return Some(idx);
+            }
+        }
+        None
+    }
 }
 
 const LIFECYCLE_ACTIVE: u8 = 0;
@@ -114,10 +425,17 @@ pub struct TargetState {
     /// Exponentially weighted moving average of response time in microseconds.
     pub avg_response_us: AtomicU64,
     lifecycle: AtomicU8,
+    /// Position in the parent `ServiceLoadBalancer.targets` vec. Used by
+    /// `InFlightGuard::drop` to update the `LcIndex` tree on release.
+    lb_index: u32,
+    /// Back-reference to the LcIndex this target participates in. `Some`
+    /// only when the parent LB uses `LeastConn` (indexed mode). Held as
+    /// `Arc` so in-flight guards keep the index alive across LB rebuilds.
+    lc_index: Option<Arc<LcIndex>>,
 }
 
 impl TargetState {
-    fn new(target: Target) -> Self {
+    fn new(target: Target, lb_index: u32, lc_index: Option<Arc<LcIndex>>) -> Self {
         let lc = lifecycle_to_u8(target.state);
         Self {
             target,
@@ -125,6 +443,8 @@ impl TargetState {
             healthy: AtomicBool::new(true),
             avg_response_us: AtomicU64::new(0),
             lifecycle: AtomicU8::new(lc),
+            lb_index,
+            lc_index,
         }
     }
 
@@ -156,6 +476,23 @@ impl TargetState {
 }
 
 /// RAII guard that decrements `in_flight` on drop.
+///
+/// `in_flight` is read synchronously by `pick_least_conn`,
+/// `pick_random_choose` (P2C), `pick_least_time`, and the drain-completion
+/// poll in `ServiceLoadBalancer::find_and_drain`. All four need an
+/// up-to-date per-target count to behave correctly:
+///
+///   * The LB pick algorithms make a routing decision *now*, using the
+///     count from every worker — batching per-worker would let other
+///     workers' increments lag behind and skew the choice.
+///   * Drain completion waits for `in_flight == 0`; a stale per-worker
+///     batch would mask a non-zero pending count and the drain would
+///     hang.
+///
+/// So unlike the quota counter (which is consulted approximately and at
+/// human-comprehensible scale), the `in_flight` counter must stay
+/// strictly correct per-update. We pay one `fetch_add` on increment and
+/// one `fetch_sub` on drop per request.
 pub struct InFlightGuard {
     state: Arc<TargetState>,
 }
@@ -170,38 +507,82 @@ impl InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.state.in_flight.fetch_sub(1, Ordering::Relaxed);
+        if let Some(ref index) = self.state.lc_index {
+            index.release(self.state.lb_index as usize);
+        }
     }
 }
 
 pub struct ServiceLoadBalancer {
     strategy: LbStrategy,
     targets: Vec<Arc<TargetState>>,
-    /// Pre-expanded virtual ring for weighted RR. Each entry is an index into
-    /// `targets`. Built once on rebuild.
+    /// Pre-expanded virtual ring for weighted RR. Only populated when
+    /// `strategy == RoundRobinRing`.
     rr_ring: Vec<usize>,
+    /// Shared counter used by ring-mode RR, Random, and P2C.
     rr_counter: AtomicU64,
+    /// Sorted index for O(log N) least-connections picks. Present only when
+    /// `strategy == LeastConn` and `targets` is non-empty.
+    lc_index: Option<Arc<LcIndex>>,
+    /// Virtual-time FWRR scheduler. Present only when `strategy == RoundRobin`
+    /// and `targets` is non-empty.
+    fwrr_index: Option<Arc<FwrrIndex>>,
+    /// Ketama-style virtual-node ring for O(log V) consistent-hash lookups.
+    /// Present only when `strategy == ConsistentHash` and targets is non-empty.
+    hash_ring: Option<ConsistentHashRing>,
 }
 
 impl ServiceLoadBalancer {
     fn new(strategy: LbStrategy, targets: Vec<Target>) -> Self {
+        let n = targets.len();
+        let lc_index = if strategy == LbStrategy::LeastConn && n > 0 {
+            Some(Arc::new(LcIndex::new(n)))
+        } else {
+            None
+        };
+
         let states: Vec<Arc<TargetState>> = targets
             .into_iter()
-            .map(|t| Arc::new(TargetState::new(t)))
+            .enumerate()
+            .map(|(idx, t)| Arc::new(TargetState::new(t, idx as u32, lc_index.clone())))
             .collect();
 
-        let mut ring: Vec<usize> = Vec::new();
-        for (idx, s) in states.iter().enumerate() {
-            let w = s.target.weight.max(1) as usize;
-            for _ in 0..w {
-                ring.push(idx);
+        // Build pre-expanded ring only for the ring variant.
+        let rr_ring = if strategy == LbStrategy::RoundRobinRing {
+            let mut ring = Vec::new();
+            for (idx, s) in states.iter().enumerate() {
+                let w = s.target.weight.max(1) as usize;
+                for _ in 0..w {
+                    ring.push(idx);
+                }
             }
-        }
+            ring
+        } else {
+            Vec::new()
+        };
+
+        // Build FWRR index for the default round-robin variant.
+        let fwrr_index = if strategy == LbStrategy::RoundRobin && n > 0 {
+            Some(Arc::new(FwrrIndex::new(&states)))
+        } else {
+            None
+        };
+
+        // Build ketama-style hash ring for O(log V) consistent-hash lookups.
+        let hash_ring = if strategy == LbStrategy::ConsistentHash && n > 0 {
+            Some(ConsistentHashRing::new(&states))
+        } else {
+            None
+        };
 
         Self {
             strategy,
             targets: states,
-            rr_ring: ring,
+            rr_ring,
             rr_counter: AtomicU64::new(0),
+            lc_index,
+            fwrr_index,
+            hash_ring,
         }
     }
 
@@ -230,7 +611,9 @@ impl ServiceLoadBalancer {
             if matches!(
                 self.strategy,
                 LbStrategy::RoundRobin
+                    | LbStrategy::RoundRobinRing
                     | LbStrategy::LeastConn
+                    | LbStrategy::LeastConnScan
                     | LbStrategy::RandomChoose
                     | LbStrategy::First
                     | LbStrategy::LeastTime
@@ -243,8 +626,12 @@ impl ServiceLoadBalancer {
 
                 if !zone_targets.is_empty() {
                     return match self.strategy {
-                        LbStrategy::RoundRobin => self.pick_rr_from_subset(&zone_targets),
-                        LbStrategy::LeastConn => self.pick_least_conn_from_subset(&zone_targets),
+                        LbStrategy::RoundRobin | LbStrategy::RoundRobinRing => {
+                            self.pick_rr_from_subset(&zone_targets)
+                        }
+                        LbStrategy::LeastConn | LbStrategy::LeastConnScan => {
+                            self.pick_least_conn_from_subset(&zone_targets)
+                        }
                         LbStrategy::RandomChoose => {
                             self.pick_random_choose_from_subset(&zone_targets)
                         }
@@ -257,10 +644,11 @@ impl ServiceLoadBalancer {
         }
 
         match self.strategy {
-            LbStrategy::RoundRobin => self.pick_rr(),
-            LbStrategy::LeastConn => self.pick_least_conn(),
+            LbStrategy::RoundRobin | LbStrategy::RoundRobinRing => self.pick_rr(),
+            LbStrategy::LeastConn | LbStrategy::LeastConnScan => self.pick_least_conn(),
             LbStrategy::IpHash => self.pick_hrw(ctx.client_ip.unwrap_or("0.0.0.0")),
-            LbStrategy::ConsistentHash => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
+            LbStrategy::ConsistentHash => self.pick_hash_ring(ctx.uri_path.unwrap_or("/")),
+            LbStrategy::ConsistentHashHrw => self.pick_hrw(ctx.uri_path.unwrap_or("/")),
             LbStrategy::CookieSticky => self.pick_cookie_sticky(ctx.sticky_cookie),
             LbStrategy::Random => self.pick_random(),
             LbStrategy::RandomChoose => self.pick_random_choose(),
@@ -277,7 +665,12 @@ impl ServiceLoadBalancer {
 
     fn pick_rr_from_subset(&self, subset: &[&Arc<TargetState>]) -> Option<Arc<TargetState>> {
         let i = self.rr_counter.fetch_add(1, Ordering::Relaxed) as usize;
-        Some((*subset[i % subset.len()]).clone())
+        let target = (*subset[i % subset.len()]).clone();
+        // Keep FWRR vtimes in sync when present.
+        if let Some(ref fwrr) = self.fwrr_index {
+            fwrr.advance(target.lb_index as usize);
+        }
+        Some(target)
     }
 
     fn pick_least_conn_from_subset(
@@ -293,10 +686,33 @@ impl ServiceLoadBalancer {
                 best = Some(s);
             }
         }
-        best.cloned()
+        let target = best.cloned()?;
+        // Keep the indexed tree in sync when present.
+        if let Some(ref index) = self.lc_index {
+            index.increment(target.lb_index as usize);
+        }
+        Some(target)
     }
 
+    /// Dispatch to FWRR virtual-time scheduler or pre-expanded ring.
     fn pick_rr(&self) -> Option<Arc<TargetState>> {
+        match &self.fwrr_index {
+            Some(fwrr) => self.pick_rr_fwrr(fwrr),
+            None => self.pick_rr_ring(),
+        }
+    }
+
+    /// O(log N) pick via FWRR virtual-time scheduling. The target with the
+    /// lowest virtual time is picked and its vtime advances by
+    /// `FWRR_SCALE / weight`, so higher-weight targets are picked more often.
+    fn pick_rr_fwrr(&self, fwrr: &FwrrIndex) -> Option<Arc<TargetState>> {
+        let idx = fwrr.pick(&self.targets)?;
+        Some(self.targets[idx].clone())
+    }
+
+    /// O(1) pick from the pre-expanded ring. Each target appears `weight`
+    /// times; an atomic counter cycles through. Fast but memory ∝ Σ weights.
+    fn pick_rr_ring(&self) -> Option<Arc<TargetState>> {
         if self.rr_ring.is_empty() {
             return None;
         }
@@ -312,7 +728,24 @@ impl ServiceLoadBalancer {
         None
     }
 
+    /// Dispatch to indexed O(log N) pick or classic O(N) scan.
     fn pick_least_conn(&self) -> Option<Arc<TargetState>> {
+        match &self.lc_index {
+            Some(index) => self.pick_least_conn_indexed(index),
+            None => self.pick_least_conn_scan(),
+        }
+    }
+
+    /// O(log N) pick via the sorted BTreeMap index. Finds the first routable
+    /// target in ascending score order, then removes and reinserts at score+1.
+    fn pick_least_conn_indexed(&self, index: &LcIndex) -> Option<Arc<TargetState>> {
+        let idx = index.pick(&self.targets)?;
+        Some(self.targets[idx].clone())
+    }
+
+    /// Classic O(N) linear scan — reads every target's `in_flight` atomic and
+    /// picks the minimum. No locking, no auxiliary state.
+    fn pick_least_conn_scan(&self) -> Option<Arc<TargetState>> {
         let mut best: Option<&Arc<TargetState>> = None;
         let mut best_count = u64::MAX;
         for s in &self.targets {
@@ -345,6 +778,13 @@ impl ServiceLoadBalancer {
             }
         }
         best.cloned()
+    }
+
+    /// O(log V) pick via the ketama-style consistent-hash ring.
+    fn pick_hash_ring(&self, key: &str) -> Option<Arc<TargetState>> {
+        let ring = self.hash_ring.as_ref()?;
+        let idx = ring.pick(key, &self.targets)?;
+        Some(self.targets[idx].clone())
     }
 
     /// Cookie sticky: honour an existing affinity cookie when the pinned
@@ -459,11 +899,33 @@ impl ServiceLoadBalancer {
     fn pick_first(&self) -> Option<Arc<TargetState>> {
         self.targets.iter().find(|s| s.is_routable()).cloned()
     }
+
+    /// Rebuild the LcIndex tree from the actual `in_flight` atomics.
+    #[cfg(test)]
+    fn sync_lc_index(&self) {
+        if let Some(ref index) = self.lc_index {
+            index.sync_from_atomics(&self.targets);
+        }
+    }
 }
 
 /// Registry of per-service load balancers.
+///
+/// Reads (the per-request `pick`) outnumber writes (rebuild on config change,
+/// health flip) by ~6 orders of magnitude at steady state. We use `ArcSwap`
+/// instead of `RwLock` so the hot path becomes a single atomic load + `Arc`
+/// clone — no read-side lock acquisition, no cache-line ping-pong across
+/// cores at 100k RPS.
+///
+/// Per-target runtime state (`healthy`, `lifecycle`, `in_flight`,
+/// `avg_response_us`) is already stored in atomics on `Arc<TargetState>`
+/// inside `ServiceLoadBalancer`, so `mark_target_health` and
+/// `set_target_lifecycle` keep mutating in place via `load()` rather than
+/// RCU-replacing the whole `ServiceLoadBalancer` (which would also reset the
+/// `rr_counter`). RCU-style replacement only fires on `rebuild_for_service`,
+/// which is the only mutator that changes target topology.
 pub struct LoadBalancerRegistry {
-    inner: DashMap<Uuid, Arc<RwLock<ServiceLoadBalancer>>>,
+    inner: DashMap<Uuid, Arc<ArcSwap<ServiceLoadBalancer>>>,
 }
 
 impl LoadBalancerRegistry {
@@ -480,7 +942,16 @@ impl LoadBalancerRegistry {
         targets: Vec<Target>,
     ) {
         let lb = ServiceLoadBalancer::new(strategy, targets);
-        self.inner.insert(service_id, Arc::new(RwLock::new(lb)));
+        // Swap in-place when an `ArcSwap` already exists for this service so
+        // any reader currently holding an `Arc<ArcSwap<_>>` clone picks up
+        // the new targets on its next `load()`. Otherwise insert a fresh
+        // `ArcSwap` for first-time registration.
+        if let Some(existing) = self.inner.get(&service_id) {
+            existing.store(Arc::new(lb));
+        } else {
+            self.inner
+                .insert(service_id, Arc::new(ArcSwap::from_pointee(lb)));
+        }
     }
 
     pub fn pick(
@@ -489,9 +960,8 @@ impl LoadBalancerRegistry {
         local_zone: Option<&str>,
         ctx: &RequestContext,
     ) -> Option<Arc<TargetState>> {
-        let entry = self.inner.get(service_id)?;
-        let guard = entry.read().ok()?;
-        guard.pick(local_zone, ctx)
+        let lb = self.inner.get(service_id)?.load_full();
+        lb.pick(local_zone, ctx)
     }
 
     /// Pick any routable target not in `exclude`, using least-connections as
@@ -503,20 +973,23 @@ impl LoadBalancerRegistry {
         exclude: &[Uuid],
         _local_zone: Option<&str>,
     ) -> Option<Arc<TargetState>> {
-        let entry = self.inner.get(service_id)?;
-        let guard = entry.read().ok()?;
-        guard
+        let lb = self.inner.get(service_id)?.load_full();
+        let target = lb
             .targets()
             .iter()
             .filter(|s| s.is_routable() && !exclude.contains(&s.target.id))
             .min_by_key(|s| s.in_flight.load(Ordering::Relaxed))
-            .cloned()
+            .cloned()?;
+        // Keep the indexed tree in sync when present.
+        if let Some(ref index) = lb.lc_index {
+            index.increment(target.lb_index as usize);
+        }
+        Some(target)
     }
 
     pub fn strategy_for(&self, service_id: &Uuid) -> Option<LbStrategy> {
-        let entry = self.inner.get(service_id)?;
-        let guard = entry.read().ok()?;
-        Some(guard.strategy())
+        let lb = self.inner.get(service_id)?.load_full();
+        Some(lb.strategy())
     }
 
     pub fn remove_service(&self, service_id: &Uuid) {
@@ -525,12 +998,11 @@ impl LoadBalancerRegistry {
 
     pub fn mark_target_health(&self, service_id: &Uuid, target_id: &Uuid, healthy: bool) {
         if let Some(entry) = self.inner.get(service_id) {
-            if let Ok(guard) = entry.read() {
-                for s in guard.targets() {
-                    if s.target.id == *target_id {
-                        s.healthy.store(healthy, Ordering::Relaxed);
-                        break;
-                    }
+            let lb = entry.load();
+            for s in lb.targets() {
+                if s.target.id == *target_id {
+                    s.healthy.store(healthy, Ordering::Relaxed);
+                    break;
                 }
             }
         }
@@ -538,12 +1010,11 @@ impl LoadBalancerRegistry {
 
     pub fn set_target_lifecycle(&self, service_id: &Uuid, target_id: &Uuid, lc: TargetLifecycle) {
         if let Some(entry) = self.inner.get(service_id) {
-            if let Ok(guard) = entry.read() {
-                for s in guard.targets() {
-                    if s.target.id == *target_id {
-                        s.set_lifecycle(lc);
-                        break;
-                    }
+            let lb = entry.load();
+            for s in lb.targets() {
+                if s.target.id == *target_id {
+                    s.set_lifecycle(lc);
+                    break;
                 }
             }
         }
@@ -561,15 +1032,12 @@ impl LoadBalancerRegistry {
         timeout_ms: u64,
     ) -> Option<Arc<TargetState>> {
         let ts = {
-            let entry = self.inner.get(service_id)?;
-            let guard = entry.read().ok()?;
-            guard
-                .targets()
+            let lb = self.inner.get(service_id)?.load_full();
+            lb.targets()
                 .iter()
                 .find(|s| s.target.id == *target_id)
-                .cloned()
+                .cloned()?
         };
-        let ts = ts?;
         ts.set_lifecycle(TargetLifecycle::Draining);
         let target_arc = ts.clone();
         tokio::spawn(async move {
@@ -598,12 +1066,31 @@ impl LoadBalancerRegistry {
         Some(ts)
     }
 
+    /// Incrementally update a single target's weight without rebuilding the
+    /// entire LB. Only effective when the service uses FWRR (`RoundRobin`);
+    /// ring-mode services ignore this and require `rebuild_for_service`.
+    pub fn update_target_weight(
+        &self,
+        service_id: &Uuid,
+        target_id: &Uuid,
+        new_weight: u32,
+    ) {
+        if let Some(entry) = self.inner.get(service_id) {
+            let lb = entry.load();
+            if let Some(ref fwrr) = lb.fwrr_index {
+                for s in lb.targets() {
+                    if s.target.id == *target_id {
+                        fwrr.update_weight(s.lb_index as usize, new_weight);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     pub fn has_healthy_active_target(&self, service_id: &Uuid) -> bool {
         match self.inner.get(service_id) {
-            Some(entry) => match entry.read() {
-                Ok(g) => g.targets().iter().any(|s| s.is_routable()),
-                Err(_) => false,
-            },
+            Some(entry) => entry.load().targets().iter().any(|s| s.is_routable()),
             None => false,
         }
     }
@@ -611,10 +1098,7 @@ impl LoadBalancerRegistry {
     /// Snapshot of all targets for a service (including runtime state).
     pub fn snapshot(&self, service_id: &Uuid) -> Vec<Arc<TargetState>> {
         match self.inner.get(service_id) {
-            Some(entry) => match entry.read() {
-                Ok(g) => g.targets().to_vec(),
-                Err(_) => Vec::new(),
-            },
+            Some(entry) => entry.load().targets().to_vec(),
             None => Vec::new(),
         }
     }
@@ -674,12 +1158,12 @@ mod tests {
         RequestContext::default()
     }
 
-    // ── RoundRobin ──
+    // ── RoundRobin (FWRR — default) ──
 
     #[test]
-    fn rr_cycles_through_all_targets() {
+    fn fwrr_cycles_through_all_targets() {
         let targets = make_targets(3);
-        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets.clone());
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
         let ctx = default_ctx();
         let mut seen = std::collections::HashSet::new();
         for _ in 0..6 {
@@ -690,28 +1174,25 @@ mod tests {
     }
 
     #[test]
-    fn weighted_rr_respects_weights() {
+    fn fwrr_respects_weights() {
         let targets = make_weighted_targets(&[3, 1]);
         let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
         let ctx = default_ctx();
         let mut counts = std::collections::HashMap::new();
-        // 4 slots in the ring: [0,0,0,1]
-        for _ in 0..8 {
+        for _ in 0..40 {
             let t = lb.pick(None, &ctx).unwrap();
             *counts.entry(t.target.url.clone()).or_insert(0) += 1;
         }
-        // host-0 should get 3x the traffic of host-1
-        assert!(
-            *counts.get("http://host-0:8080").unwrap_or(&0)
-                > *counts.get("http://host-1:8080").unwrap_or(&0)
-        );
+        let h0 = *counts.get("http://host-0:8080").unwrap_or(&0);
+        let h1 = *counts.get("http://host-1:8080").unwrap_or(&0);
+        // Weight 3:1 → ~30:10 distribution over 40 picks.
+        assert!(h0 > h1 * 2, "fwrr weight ratio wrong: h0={h0} h1={h1}");
     }
 
     #[test]
-    fn rr_skips_unhealthy() {
+    fn fwrr_skips_unhealthy() {
         let targets = make_targets(3);
-        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets.clone());
-        // Mark target 0 unhealthy.
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
         lb.targets[0].healthy.store(false, Ordering::Relaxed);
         let ctx = default_ctx();
         for _ in 0..10 {
@@ -721,7 +1202,7 @@ mod tests {
     }
 
     #[test]
-    fn rr_returns_none_when_all_unhealthy() {
+    fn fwrr_returns_none_when_all_unhealthy() {
         let targets = make_targets(2);
         let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
         for ts in &lb.targets {
@@ -730,19 +1211,193 @@ mod tests {
         assert!(lb.pick(None, &default_ctx()).is_none());
     }
 
-    // ── LeastConn ──
+    #[test]
+    fn fwrr_extreme_weights_bounded_memory() {
+        // Weight 1000 vs 1: ring would allocate 1001 entries, FWRR uses 2.
+        let targets = make_weighted_targets(&[1000, 1]);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
+        assert!(lb.rr_ring.is_empty(), "FWRR should not build a ring");
+        assert!(lb.fwrr_index.is_some());
+        let ctx = default_ctx();
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..1001 {
+            let t = lb.pick(None, &ctx).unwrap();
+            *counts.entry(t.target.url.clone()).or_insert(0) += 1;
+        }
+        let h0 = *counts.get("http://host-0:8080").unwrap_or(&0);
+        let h1 = *counts.get("http://host-1:8080").unwrap_or(&0);
+        assert!(h0 > 900, "weight-1000 target should dominate: h0={h0}");
+        assert!(h1 >= 1, "weight-1 target should get at least 1 pick: h1={h1}");
+    }
 
     #[test]
-    fn least_conn_picks_lowest_inflight() {
+    fn fwrr_incremental_weight_update() {
+        let targets = make_weighted_targets(&[1, 1]);
+        let svc_id = Uuid::new_v4();
+        let reg = LoadBalancerRegistry::new();
+        reg.rebuild_for_service(svc_id, LbStrategy::RoundRobin, targets.clone());
+        // Before weight change: 50/50 split.
+        let ctx = default_ctx();
+        let mut h0 = 0;
+        for _ in 0..20 {
+            if reg.pick(&svc_id, None, &ctx).unwrap().target.url.as_ref() == "http://host-0:8080" {
+                h0 += 1;
+            }
+        }
+        assert!((8..=12).contains(&h0), "before weight change: h0={h0}/20");
+        // Change weight of target 0 to 9 → should get ~90% of traffic.
+        reg.update_target_weight(&svc_id, &targets[0].id, 9);
+        let mut h0 = 0;
+        for _ in 0..100 {
+            if reg.pick(&svc_id, None, &ctx).unwrap().target.url.as_ref() == "http://host-0:8080" {
+                h0 += 1;
+            }
+        }
+        assert!(h0 > 75, "after weight change to 9:1, h0={h0}/100");
+    }
+
+    // ── RoundRobin (ring mode) ──
+
+    #[test]
+    fn ring_cycles_through_all_targets() {
         let targets = make_targets(3);
-        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConn, targets);
-        // Bump in-flight on targets 0 and 1.
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobinRing, targets);
+        let ctx = default_ctx();
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..6 {
+            let t = lb.pick(None, &ctx).unwrap();
+            seen.insert(t.target.url.clone());
+        }
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn ring_respects_weights() {
+        let targets = make_weighted_targets(&[3, 1]);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobinRing, targets);
+        let ctx = default_ctx();
+        let mut counts = std::collections::HashMap::new();
+        // 4 slots in the ring: [0,0,0,1]
+        for _ in 0..8 {
+            let t = lb.pick(None, &ctx).unwrap();
+            *counts.entry(t.target.url.clone()).or_insert(0) += 1;
+        }
+        assert!(
+            *counts.get("http://host-0:8080").unwrap_or(&0)
+                > *counts.get("http://host-1:8080").unwrap_or(&0)
+        );
+    }
+
+    #[test]
+    fn ring_skips_unhealthy() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobinRing, targets);
+        lb.targets[0].healthy.store(false, Ordering::Relaxed);
+        let ctx = default_ctx();
+        for _ in 0..10 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_ne!(&*t.target.url, "http://host-0:8080");
+        }
+    }
+
+    #[test]
+    fn ring_returns_none_when_all_unhealthy() {
+        let targets = make_targets(2);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobinRing, targets);
+        for ts in &lb.targets {
+            ts.healthy.store(false, Ordering::Relaxed);
+        }
+        assert!(lb.pick(None, &default_ctx()).is_none());
+    }
+
+    // ── LeastConn (scan mode) ──
+
+    #[test]
+    fn least_conn_scan_picks_lowest_inflight() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConnScan, targets);
         lb.targets[0].in_flight.store(10, Ordering::Relaxed);
         lb.targets[1].in_flight.store(5, Ordering::Relaxed);
         lb.targets[2].in_flight.store(0, Ordering::Relaxed);
         let ctx = default_ctx();
         let picked = lb.pick(None, &ctx).unwrap();
         assert_eq!(&*picked.target.url, "http://host-2:8080");
+    }
+
+    // ── LeastConn (indexed mode — default) ──
+
+    #[test]
+    fn least_conn_indexed_picks_lowest_inflight() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConn, targets);
+        lb.targets[0].in_flight.store(10, Ordering::Relaxed);
+        lb.targets[1].in_flight.store(5, Ordering::Relaxed);
+        lb.targets[2].in_flight.store(0, Ordering::Relaxed);
+        lb.sync_lc_index();
+        let ctx = default_ctx();
+        let picked = lb.pick(None, &ctx).unwrap();
+        assert_eq!(&*picked.target.url, "http://host-2:8080");
+    }
+
+    #[test]
+    fn least_conn_indexed_distributes_evenly() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConn, targets);
+        let ctx = default_ctx();
+        // All start at 0 — tree breaks ties by index, so picks cycle 0,1,2,0,1,2...
+        let mut counts = [0u32; 3];
+        let mut guards = Vec::new();
+        for _ in 0..9 {
+            let t = lb.pick(None, &ctx).unwrap();
+            let idx = t.target.url.strip_prefix("http://host-").unwrap()
+                .strip_suffix(":8080").unwrap()
+                .parse::<usize>().unwrap();
+            counts[idx] += 1;
+            guards.push(InFlightGuard::new(t));
+        }
+        // Each target should have exactly 3 picks.
+        assert_eq!(counts, [3, 3, 3]);
+    }
+
+    #[test]
+    fn least_conn_indexed_release_rebalances() {
+        let targets = make_targets(2);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConn, targets);
+        let ctx = default_ctx();
+        // Pick target 0, hold the guard.
+        let t0 = lb.pick(None, &ctx).unwrap();
+        assert_eq!(&*t0.target.url, "http://host-0:8080");
+        let guard0 = InFlightGuard::new(t0);
+        // Pick again — target 1 now has lower score.
+        let t1 = lb.pick(None, &ctx).unwrap();
+        assert_eq!(&*t1.target.url, "http://host-1:8080");
+        let _guard1 = InFlightGuard::new(t1);
+        // Release target 0 — it should become preferred again.
+        drop(guard0);
+        let t = lb.pick(None, &ctx).unwrap();
+        assert_eq!(&*t.target.url, "http://host-0:8080");
+    }
+
+    #[test]
+    fn least_conn_indexed_skips_unhealthy() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConn, targets);
+        lb.targets[0].healthy.store(false, Ordering::Relaxed);
+        let ctx = default_ctx();
+        for _ in 0..6 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_ne!(&*t.target.url, "http://host-0:8080");
+        }
+    }
+
+    #[test]
+    fn least_conn_indexed_returns_none_when_all_unhealthy() {
+        let targets = make_targets(2);
+        let lb = ServiceLoadBalancer::new(LbStrategy::LeastConn, targets);
+        for ts in &lb.targets {
+            ts.healthy.store(false, Ordering::Relaxed);
+        }
+        assert!(lb.pick(None, &default_ctx()).is_none());
     }
 
     // ── RandomChoose (P2C) ──
@@ -928,6 +1583,22 @@ mod tests {
         assert_eq!(LbStrategy::from_str("least-time"), LbStrategy::LeastTime);
         assert_eq!(LbStrategy::from_str("least_time"), LbStrategy::LeastTime);
         assert_eq!(LbStrategy::from_str("leasttime"), LbStrategy::LeastTime);
+        assert_eq!(
+            LbStrategy::from_str("least-conn-scan"),
+            LbStrategy::LeastConnScan
+        );
+        assert_eq!(
+            LbStrategy::from_str("least_conn_scan"),
+            LbStrategy::LeastConnScan
+        );
+        assert_eq!(
+            LbStrategy::from_str("round-robin-ring"),
+            LbStrategy::RoundRobinRing
+        );
+        assert_eq!(
+            LbStrategy::from_str("round_robin_ring"),
+            LbStrategy::RoundRobinRing
+        );
         assert_eq!(
             LbStrategy::from_str("unknown-thing"),
             LbStrategy::RoundRobin
@@ -1204,6 +1875,130 @@ mod tests {
             ts.set_lifecycle(TargetLifecycle::Draining);
         }
         assert!(lb.pick(None, &default_ctx()).is_none());
+    }
+
+    // ── ConsistentHash (ring — default) ──
+
+    #[test]
+    fn consistent_hash_ring_consistent() {
+        let targets = make_targets(5);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHash, targets);
+        let ctx = RequestContext {
+            uri_path: Some("/api/v1/users"),
+            ..Default::default()
+        };
+        let first = lb.pick(None, &ctx).unwrap();
+        for _ in 0..20 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.id, first.target.id, "ring not consistent");
+        }
+    }
+
+    #[test]
+    fn consistent_hash_ring_spreads() {
+        let targets = make_targets(4);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHash, targets);
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..40 {
+            let path = format!("/path/{i}");
+            let ctx = RequestContext {
+                uri_path: Some(&path),
+                ..Default::default()
+            };
+            let t = lb.pick(None, &ctx).unwrap();
+            seen.insert(t.target.url.clone());
+        }
+        assert!(seen.len() > 1, "ring didn't spread: {:?}", seen);
+    }
+
+    #[test]
+    fn consistent_hash_ring_skips_unhealthy() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHash, targets);
+        let ctx = RequestContext {
+            uri_path: Some("/test"),
+            ..Default::default()
+        };
+        let original = lb.pick(None, &ctx).unwrap();
+        original.healthy.store(false, Ordering::Relaxed);
+        let fallback = lb.pick(None, &ctx).unwrap();
+        assert_ne!(fallback.target.id, original.target.id);
+    }
+
+    #[test]
+    fn consistent_hash_ring_respects_weights() {
+        let targets = make_weighted_targets(&[3, 1]);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHash, targets);
+        let mut counts = std::collections::HashMap::new();
+        for i in 0..400 {
+            let path = format!("/key/{i}");
+            let ctx = RequestContext {
+                uri_path: Some(&path),
+                ..Default::default()
+            };
+            let t = lb.pick(None, &ctx).unwrap();
+            *counts.entry(t.target.url.clone()).or_insert(0) += 1;
+        }
+        let h0 = *counts.get("http://host-0:8080").unwrap_or(&0);
+        let h1 = *counts.get("http://host-1:8080").unwrap_or(&0);
+        assert!(h0 > h1, "weight-3 target should get more: h0={h0} h1={h1}");
+    }
+
+    #[test]
+    fn consistent_hash_ring_empty() {
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHash, Vec::new());
+        let ctx = RequestContext {
+            uri_path: Some("/test"),
+            ..Default::default()
+        };
+        assert!(lb.pick(None, &ctx).is_none());
+    }
+
+    #[test]
+    fn consistent_hash_ring_all_unhealthy() {
+        let targets = make_targets(3);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHash, targets);
+        for t in &lb.targets {
+            t.healthy.store(false, Ordering::Relaxed);
+        }
+        let ctx = RequestContext {
+            uri_path: Some("/test"),
+            ..Default::default()
+        };
+        assert!(lb.pick(None, &ctx).is_none());
+    }
+
+    // ── ConsistentHashHrw (legacy) ──
+
+    #[test]
+    fn consistent_hash_hrw_consistent() {
+        let targets = make_targets(5);
+        let lb = ServiceLoadBalancer::new(LbStrategy::ConsistentHashHrw, targets);
+        let ctx = RequestContext {
+            uri_path: Some("/api/v1/users"),
+            ..Default::default()
+        };
+        let first = lb.pick(None, &ctx).unwrap();
+        for _ in 0..20 {
+            let t = lb.pick(None, &ctx).unwrap();
+            assert_eq!(t.target.id, first.target.id, "HRW not consistent");
+        }
+    }
+
+    #[test]
+    fn strategy_parsing_consistent_hash_variants() {
+        assert_eq!(
+            LbStrategy::from_str("consistent-hash"),
+            LbStrategy::ConsistentHash
+        );
+        assert_eq!(
+            LbStrategy::from_str("consistent-hash-hrw"),
+            LbStrategy::ConsistentHashHrw
+        );
+        assert_eq!(
+            LbStrategy::from_str("consistent_hash_hrw"),
+            LbStrategy::ConsistentHashHrw
+        );
     }
 
     // ── pick_excluding ──

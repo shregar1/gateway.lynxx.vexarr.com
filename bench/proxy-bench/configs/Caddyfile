@@ -1,0 +1,26 @@
+{
+	# Top-level options. Disable auto-HTTPS — we bench plain h1 to match
+	# how the others are configured (no TLS in the hot path).
+	auto_https off
+	# Lift Caddy's default request body buffer cap so high-conn loads
+	# don't bottleneck on the limiter. Defaults are conservative.
+	servers :28080 {
+		max_header_size 32KB
+	}
+	# Quiet down — access logs would eat half the throughput at 50k+.
+	log {
+		output discard
+	}
+}
+
+:28080 {
+	reverse_proxy 127.0.0.1:19090 {
+		# HTTP/1.1 upstream with a big idle pool — same tuning as
+		# traefik's maxIdleConnsPerHost: 10000 fix.
+		transport http {
+			keepalive 60s
+			keepalive_idle_conns 10000
+			keepalive_idle_conns_per_host 10000
+		}
+	}
+}

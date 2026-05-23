@@ -224,7 +224,7 @@ async fn main() -> Result<()> {
     };
 
     let app = Router::new().fallback(any(handler)).with_state(state);
-    let addr: SocketAddr = ([127, 0, 0, 1], cli.port).into();
+    let addr: SocketAddr = ([0, 0, 0, 0], cli.port).into();
     tracing::info!(%addr, echo = cli.echo, "lynxx-mock-upstream listening");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

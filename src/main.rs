@@ -1,12 +1,18 @@
 #![allow(dead_code)]
 
-// `mimalloc` cuts the long tail on busy proxy workloads. The system
-// allocator on macOS in particular fragments under bursty alloc/free
-// patterns; switching to mimalloc shaves 20-40% off p99/p99.9 in our
-// bench rig and compiles cleanly on aarch64-apple-darwin.
+// `jemalloc` (via `tikv-jemallocator`) cuts the *tail* on busy proxy
+// workloads. We were previously on mimalloc, which is excellent on
+// throughput but its periodic page-reclamation pass
+// (`_mi_page_free_collect`) shows up as 5-15 ms stalls on a tokio
+// worker. A symbolized `perf record` against lynxx at 100k RPS /
+// 4096 conns saw that stack at ~14% of CPU; the resulting p99 was
+// 15 ms versus jemalloc's low-single-digit ms at the same load.
+//
+// `background_threads` is on so jemalloc decommits asynchronously
+// instead of inline on free(), keeping the latency floor flat.
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 mod abstractions;
 mod admin;
@@ -559,6 +565,13 @@ async fn async_main() -> anyhow::Result<()> {
     let log_writer = crate::logs::LogWriter::new(repo.clone(), 4096);
     crate::logs::spawn_log_pruner(repo.clone(), 30);
 
+    // Active health is effectively disabled when the interval is ≥1 hour
+    // — at that cadence the per-request passive emission isn't being
+    // consumed by anyone with useful freshness, so we can skip it entirely
+    // on the hot path. The flag is sticky for the lifetime of the process;
+    // we'd need to rewire on a runtime reload to flip it back on.
+    let passive_record_disabled = config.gateway.health_check_interval_ms >= 3_600_000;
+
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
         plugins: plugin_exec.clone(),
@@ -575,6 +588,8 @@ async fn async_main() -> anyhow::Result<()> {
         deploy_registry: Some(deploy_registry.clone()),
         local_zone: None,
         minimal_telemetry: config.gateway.minimal_telemetry,
+        stream_response_body: config.gateway.stream_response_body,
+        passive_record_disabled,
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
@@ -692,7 +707,14 @@ async fn async_main() -> anyhow::Result<()> {
             .fallback(proxy_handler)
             .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
             .layer(tower_http::trace::TraceLayer::new_for_http())
-            .with_state(proxy_state);
+            // Wrap in `Arc` so axum's per-request `State` extractor clones
+            // exactly one atomic refcount instead of cloning every one of
+            // ProxyState's ~8 internal `Arc<...>` fields. The symbolized
+            // perf record at 100k RPS / 4096 conns showed `drop_in_place
+            // <ProxyState>` and its child `drop_in_place<Client>` totalling
+            // ~14% of CPU samples — pure cache-line ping-pong from
+            // per-request fan-out clones of state-resident `Arc`s.
+            .with_state(std::sync::Arc::new(proxy_state));
 
         // Mount the install endpoints. Their routes take precedence over the
         // proxy fallback because merge() resolves explicit routes before the

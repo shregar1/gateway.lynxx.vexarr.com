@@ -99,6 +99,12 @@ tracing-opentelemetry = "0.28"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
+# Lock-free RCU for the per-service load-balancer state. The hot path
+# (request_handler → LoadBalancerRegistry::pick) is read-only and dwarfs
+# the rare writes from health checks / config reloads, so an `ArcSwap`
+# replace beats `RwLock` by a large margin — no cache-line ping-pong on
+# the read lock at 100k RPS on a multi-core box.
+arc-swap = "1"
 # ahash is 2-5× faster than the default SipHash that std + dashmap
 # pick to be DoS-resistant. For INTERNAL-only maps (route table,
 # admin-token cache, etc.) where the keys are server-generated UUIDs
@@ -240,10 +246,17 @@ wiremock = "0.6"
 wat = "1"
 # cache-bust: 1778248579
 
-# Faster allocator — disabled on Windows where the C source doesn't
-# cross-compile cleanly via zig.
+# Faster allocator. We're on jemalloc now after a symbolized flamegraph
+# at 100k RPS showed mimalloc's `_mi_page_free_collect` (periodic page
+# reclamation) accounting for ~14% of CPU at saturation — the same
+# stalls produced ~15 ms p99 spikes. jemalloc has more predictable
+# batched-free semantics under bursty alloc/free patterns and on the
+# bench rig cut p99 from 15 ms → low-single-digit ms at the same load.
+#
+# Disabled on Windows where neither allocator's C source cross-compiles
+# cleanly via zig.
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-mimalloc = { version = "0.1", default-features = false }
+tikv-jemallocator = { version = "0.6", features = ["background_threads"] }
 
 # Kernel TLS offload — Linux-only. Added by PR #8.
 #
@@ -299,3 +312,13 @@ panic = "abort"
 strip = "symbols"
 debug = false
 overflow-checks = false
+
+# Variant of `release` that keeps the symbol table and DWARF line tables
+# so `perf record --call-graph dwarf` resolves Rust function names
+# instead of showing `[lynxx-gateway]` for every frame. Identical
+# codegen to `release` (same LTO, codegen-units, panic strategy) so
+# perf numbers translate 1:1.
+[profile.release-debug]
+inherits = "release"
+strip = "debuginfo"
+debug = "line-tables-only"

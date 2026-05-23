@@ -9,7 +9,7 @@ source .ips
 
 SSH_PRIVKEY="${SSH_PUBKEY%.pub}"
 SSH="ssh -i ${SSH_PRIVKEY/#\~/$HOME} -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null"
-RSYNC="rsync -az -e \"$SSH\" --exclude target --exclude .git --exclude node_modules --exclude dashboard-dist"
+RSYNC="rsync -az -e \"$SSH\" --exclude target --exclude .git --exclude node_modules"
 
 REPO_ABS=$(cd "$LOCAL_REPO" && pwd)
 echo "==> Source repo: $REPO_ABS"
@@ -21,17 +21,21 @@ echo "==> [SUT] stage proxy-bench configs"
 eval $RSYNC ./docker-compose.yml ./configs "$ADMIN_USER@$SUT_IP:~/bench/"
 
 echo "==> [SUT] build lynxx-gateway:bench image (this is the slow step — ~15 min cold)"
-$SSH "$ADMIN_USER@$SUT_IP" 'set -ex
+$SSH "$ADMIN_USER@$SUT_IP" "set -ex
   cd ~/lynxx-src
-  sg docker -c "DOCKER_BUILDKIT=1 docker build --target gateway -t lynxx-gateway:bench ."
-'
+  HASH=\$(git rev-parse --short=8 HEAD 2>/dev/null || echo 'bench')
+  sg docker -c \"DOCKER_BUILDKIT=1 docker build --target gateway -t lynxx-gateway:bench \\
+    --build-arg LYNXX_BUILD_HASH=\$HASH \\
+    --build-arg AUTH_URL=http://127.0.0.1:9100 .\"
+"
 
 echo "==> [SUT] build native lynxx-mock-upstream (used as the shared upstream on host:19090)"
 $SSH "$ADMIN_USER@$SUT_IP" 'set -ex
   source $HOME/.cargo/env 2>/dev/null || curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
   source $HOME/.cargo/env
   cd ~/lynxx-src
-  cargo build --release -p lynxx-bench --bin lynxx-mock-upstream
+  RUSTFLAGS="--cfg tokio_unstable" AUTH_URL=http://127.0.0.1:9100 LYNXX_BUILD_HASH=bench \
+    cargo build --release -p lynxx-bench --bin lynxx-mock-upstream
   cp target/release/lynxx-mock-upstream ~/bench/
 '
 
@@ -56,7 +60,7 @@ echo "==> [CLIENT] build lynxx-bench"
 $SSH "$ADMIN_USER@$CLIENT_IP" 'set -ex
   source $HOME/.cargo/env
   cd ~/lynxx-src
-  cargo build --release -p lynxx-bench --bin lynxx-bench
+  RUSTFLAGS="--cfg tokio_unstable" cargo build --release -p lynxx-bench --bin lynxx-bench
   cp target/release/lynxx-bench ~/bench/
 '
 

@@ -1,0 +1,39 @@
+{
+  "proxy": "traefik",
+  "seq": 3,
+  "status": "ladder_cut",
+  "started_at": "2026-05-22T04:24:53Z",
+  "finished_at": "2026-05-22T04:25:18Z",
+  "ladder_cut_at_rps": 50000,
+  "config": {
+    "rps_levels": [50000],
+    "duration_secs": 15,
+    "warmup_secs": 3,
+    "connections": 4096,
+    "p99_explode_ms": 100,
+    "err_explode_rate": 0.01
+  },
+  "host": {
+    "hostname": "instance-20260520-171612",
+    "vcpu": 8,
+    "kernel": "6.1.0-47-cloud-amd64",
+    "os": "Debian GNU/Linux 12 (bookworm)"
+  },
+  "levels": [
+    {
+      "target_rps": 50000,
+      "achieved_rps": 35668,
+      "duration_secs": 22.6,
+      "requests": 806235,
+      "errors": 0,
+      "p50_ms": 21.04,
+      "p95_ms": 162.56,
+      "p99_ms": 224.00,
+      "p99_9_ms": 335.87,
+      "min_ms": 0.0820,
+      "max_ms": null,
+      "exploded": true,
+      "raw_file": "traefik-50000.txt"
+    }
+  ]
+}
