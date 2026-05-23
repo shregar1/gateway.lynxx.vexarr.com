@@ -46,3 +46,5 @@ pub mod mirror;
 pub mod socket_opts;
 pub mod thread_group;
 pub mod worker;
+pub mod cluster;
+pub mod predictive_scaling;
