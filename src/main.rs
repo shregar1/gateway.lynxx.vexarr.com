@@ -1,18 +1,15 @@
 #![allow(dead_code)]
 
-// `jemalloc` (via `tikv-jemallocator`) cuts the *tail* on busy proxy
-// workloads. We were previously on mimalloc, which is excellent on
-// throughput but its periodic page-reclamation pass
-// (`_mi_page_free_collect`) shows up as 5-15 ms stalls on a tokio
-// worker. A symbolized `perf record` against lynxx at 100k RPS /
-// 4096 conns saw that stack at ~14% of CPU; the resulting p99 was
-// 15 ms versus jemalloc's low-single-digit ms at the same load.
-//
-// `background_threads` is on so jemalloc decommits asynchronously
-// instead of inline on free(), keeping the latency floor flat.
+// `mimalloc` is the allocator on the proxy hot path. We tried switching
+// to jemalloc with `background_threads` expecting smoother tail
+// behavior; in practice on the 8-core bench rig (8 tokio workers +
+// 1-2 jemalloc background threads = oversubscribed) p99 went from
+// 15 ms to ~185 ms at saturation and throughput dropped from 76k → 65k
+// RPS. mimalloc's inline page-reclamation pass is the lesser evil
+// here. See the journal entry on commit 45bd5cb for the test numbers.
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
-static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod abstractions;
 mod admin;
