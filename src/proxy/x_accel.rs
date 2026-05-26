@@ -195,7 +195,17 @@ pub fn validate_redirect_path(path: &str) -> bool {
 /// When the global toggle is disabled (`is_x_accel_enabled() == false`),
 /// this always returns `NoRedirect` without inspecting headers.
 pub fn check_x_accel(headers: &[(String, String)]) -> XAccelResult {
-    if !is_x_accel_enabled() {
+    check_x_accel_with_enabled(headers, is_x_accel_enabled())
+}
+
+/// Like [`check_x_accel`], but takes an explicit `enabled` flag instead
+/// of reading the global toggle. Used in tests to avoid racing on the
+/// shared `X_ACCEL_ENABLED` AtomicBool.
+pub fn check_x_accel_with_enabled(
+    headers: &[(String, String)],
+    enabled: bool,
+) -> XAccelResult {
+    if !enabled {
         return XAccelResult::NoRedirect;
     }
 
@@ -330,76 +340,67 @@ pub fn x_accel_metrics() -> &'static XAccelMetrics {
 mod tests {
     use super::*;
 
-    /// Helper: enable X-Accel for the duration of a test closure.
-    /// Restores the previous state afterwards so tests don't leak.
-    fn with_x_accel_enabled<F: FnOnce()>(f: F) {
-        let prev = is_x_accel_enabled();
-        set_x_accel_enabled(true);
-        f();
-        set_x_accel_enabled(prev);
-    }
-
     // ── check_x_accel: no redirect header → NoRedirect ──
 
     #[test]
     fn check_no_redirect_header() {
-        with_x_accel_enabled(|| {
-            let headers = vec![
-                ("content-type".to_string(), "text/html".to_string()),
-                ("x-custom".to_string(), "value".to_string()),
-            ];
-            assert_eq!(check_x_accel(&headers), XAccelResult::NoRedirect);
-        });
+        // Use the per-call override to avoid toggling the global AtomicBool,
+        // which races with other parallel tests (same pattern as mirror.rs,
+        // cookie_rewrite.rs, slow_start.rs).
+        let headers = vec![
+            ("content-type".to_string(), "text/html".to_string()),
+            ("x-custom".to_string(), "value".to_string()),
+        ];
+        assert_eq!(
+            check_x_accel_with_enabled(&headers, true),
+            XAccelResult::NoRedirect,
+        );
     }
 
     // ── check_x_accel: redirect → Redirect with path ──
 
     #[test]
     fn check_redirect_basic() {
-        with_x_accel_enabled(|| {
-            let headers = vec![(
-                "X-Accel-Redirect".to_string(),
-                "/internal/file.txt".to_string(),
-            )];
-            match check_x_accel(&headers) {
-                XAccelResult::Redirect(directive) => {
-                    assert_eq!(directive.redirect_path, "/internal/file.txt");
-                    assert_eq!(directive.expires, None);
-                    assert_eq!(directive.limit_rate, None);
-                    assert_eq!(directive.buffering, None);
-                    assert_eq!(directive.charset, None);
-                }
-                XAccelResult::NoRedirect => panic!("expected Redirect"),
+        let headers = vec![(
+            "X-Accel-Redirect".to_string(),
+            "/internal/file.txt".to_string(),
+        )];
+        match check_x_accel_with_enabled(&headers, true) {
+            XAccelResult::Redirect(directive) => {
+                assert_eq!(directive.redirect_path, "/internal/file.txt");
+                assert_eq!(directive.expires, None);
+                assert_eq!(directive.limit_rate, None);
+                assert_eq!(directive.buffering, None);
+                assert_eq!(directive.charset, None);
             }
-        });
+            XAccelResult::NoRedirect => panic!("expected Redirect"),
+        }
     }
 
     // ── check_x_accel: all X-Accel-* headers ──
 
     #[test]
     fn check_redirect_all_headers() {
-        with_x_accel_enabled(|| {
-            let headers = vec![
-                (
-                    "X-Accel-Redirect".to_string(),
-                    "/protected/data.bin".to_string(),
-                ),
-                ("X-Accel-Expires".to_string(), "3600".to_string()),
-                ("X-Accel-Limit-Rate".to_string(), "1048576".to_string()),
-                ("X-Accel-Buffering".to_string(), "no".to_string()),
-                ("X-Accel-Charset".to_string(), "utf-8".to_string()),
-            ];
-            match check_x_accel(&headers) {
-                XAccelResult::Redirect(d) => {
-                    assert_eq!(d.redirect_path, "/protected/data.bin");
-                    assert_eq!(d.expires, Some(Duration::from_secs(3600)));
-                    assert_eq!(d.limit_rate, Some(1_048_576));
-                    assert_eq!(d.buffering, Some(false));
-                    assert_eq!(d.charset, Some("utf-8".to_string()));
-                }
-                XAccelResult::NoRedirect => panic!("expected Redirect"),
+        let headers = vec![
+            (
+                "X-Accel-Redirect".to_string(),
+                "/protected/data.bin".to_string(),
+            ),
+            ("X-Accel-Expires".to_string(), "3600".to_string()),
+            ("X-Accel-Limit-Rate".to_string(), "1048576".to_string()),
+            ("X-Accel-Buffering".to_string(), "no".to_string()),
+            ("X-Accel-Charset".to_string(), "utf-8".to_string()),
+        ];
+        match check_x_accel_with_enabled(&headers, true) {
+            XAccelResult::Redirect(d) => {
+                assert_eq!(d.redirect_path, "/protected/data.bin");
+                assert_eq!(d.expires, Some(Duration::from_secs(3600)));
+                assert_eq!(d.limit_rate, Some(1_048_576));
+                assert_eq!(d.buffering, Some(false));
+                assert_eq!(d.charset, Some("utf-8".to_string()));
             }
-        });
+            XAccelResult::NoRedirect => panic!("expected Redirect"),
+        }
     }
 
     // ── parse_expires: seconds ──
@@ -538,30 +539,21 @@ mod tests {
 
     #[test]
     fn global_toggle() {
-        // Test the getter/setter roundtrip without prolonged disabled
-        // windows that race with other tests sharing the global static.
-        let prev = is_x_accel_enabled();
-
-        // Verify toggle mechanics.
-        set_x_accel_enabled(true);
-        assert!(is_x_accel_enabled());
-
-        // Briefly disable, check the flag, re-enable immediately.
-        set_x_accel_enabled(false);
-        let was_disabled = !is_x_accel_enabled();
-        set_x_accel_enabled(true); // restore fast
-        assert!(was_disabled, "toggle to false didn't stick");
-
-        // With enabled, check_x_accel should detect redirects.
+        // Verify the enabled/disabled contract via check_x_accel_with_enabled
+        // without touching the global AtomicBool — avoids racing parallel tests.
         let headers = vec![("X-Accel-Redirect".to_string(), "/internal/file".to_string())];
-        match check_x_accel(&headers) {
+
+        match check_x_accel_with_enabled(&headers, true) {
             XAccelResult::Redirect(d) => {
                 assert_eq!(d.redirect_path, "/internal/file");
             }
             XAccelResult::NoRedirect => panic!("expected Redirect when enabled"),
         }
 
-        set_x_accel_enabled(prev);
+        assert_eq!(
+            check_x_accel_with_enabled(&headers, false),
+            XAccelResult::NoRedirect,
+        );
     }
 
     // ── metrics counting ──
@@ -590,19 +582,17 @@ mod tests {
 
     #[test]
     fn redirect_path_with_query_string() {
-        with_x_accel_enabled(|| {
-            let headers = vec![(
-                "X-Accel-Redirect".to_string(),
-                "/internal/file?token=abc123&page=2".to_string(),
-            )];
-            match check_x_accel(&headers) {
-                XAccelResult::Redirect(d) => {
-                    assert_eq!(d.redirect_path, "/internal/file?token=abc123&page=2");
-                }
-                XAccelResult::NoRedirect => {
-                    panic!("expected Redirect with query string")
-                }
+        let headers = vec![(
+            "X-Accel-Redirect".to_string(),
+            "/internal/file?token=abc123&page=2".to_string(),
+        )];
+        match check_x_accel_with_enabled(&headers, true) {
+            XAccelResult::Redirect(d) => {
+                assert_eq!(d.redirect_path, "/internal/file?token=abc123&page=2");
             }
-        });
+            XAccelResult::NoRedirect => {
+                panic!("expected Redirect with query string")
+            }
+        }
     }
 }
