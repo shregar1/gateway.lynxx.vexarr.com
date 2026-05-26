@@ -15,7 +15,7 @@ use crate::proxy::websocket::handle_websocket;
 use crate::quota::QuotaTracker;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderName, Request, Response, Uri};
+use axum::http::{HeaderName, HeaderValue, Request, Response, Uri};
 use chrono::{DateTime, Utc};
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
@@ -211,6 +211,76 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     // `HeaderName` equality is an interned-string byte compare — much
     // cheaper than re-parsing each entry via `from_bytes` per call.
     HOP_BY_HOP.iter().any(|h| h == name)
+}
+
+/// Install the outbound keepalive headers we want every upstream
+/// request to carry. Inserts (replacing any prior value) `Connection:
+/// keep-alive` plus a `Keep-Alive: timeout=75, max=1000000` advisory
+/// matching the nginx default. Call AFTER `strip_hop_by_hop` so the
+/// client's inbound `Connection`/`Keep-Alive` (which is per-hop) is
+/// removed before we put ours back.
+///
+/// `Connection: keep-alive` is the default behaviour on HTTP/1.1 so
+/// strictly speaking it's redundant, but several upstreams (and
+/// intermediaries that re-examine the header) misbehave when it's
+/// absent — nginx and kong both explicitly set it on every forwarded
+/// request, and we match that here.
+///
+/// The `Keep-Alive: timeout=75, max=1000000` line lets the upstream
+/// know we intend to keep the conn around for a long time; some HTTP/1.1
+/// servers tear connections down aggressively without it, which forces
+/// a fresh TCP handshake on the next request and shows up as p99.9 tail.
+#[inline]
+fn install_outbound_keepalive(headers: &mut axum::http::HeaderMap) {
+    // `HeaderName::from_static` + `HeaderValue::from_static` are both
+    // const, so these are zero-cost beyond the actual map insert.
+    static CONNECTION_KEEP_ALIVE: HeaderValue = HeaderValue::from_static("keep-alive");
+    static KEEP_ALIVE_HINT: HeaderValue =
+        HeaderValue::from_static("timeout=75, max=1000000");
+    headers.insert(
+        HeaderName::from_static("connection"),
+        CONNECTION_KEEP_ALIVE.clone(),
+    );
+    headers.insert(
+        HeaderName::from_static("keep-alive"),
+        KEEP_ALIVE_HINT.clone(),
+    );
+}
+
+/// Resolve the outbound HTTP version for an upstream request based on
+/// the service's `force_http_version` knob. Default is HTTP/1.1 — the
+/// hyper-util H1 idle pool is meaningfully bigger than its H2 stream
+/// pool, and most plain-HTTP upstreams expect H1 from a forward proxy.
+///
+/// Recognised values (case-insensitive): `"1.1"`, `"http/1.1"`, `"h1"`
+/// → HTTP/1.1; `"2"`, `"2.0"`, `"http/2"`, `"h2"` → HTTP/2; `"auto"`
+/// → leave whatever the `axum::extract::Request` carries (the
+/// connector will negotiate via ALPN on https://).
+#[inline]
+fn resolve_outbound_http_version(
+    svc: &crate::models::Service,
+    inbound: axum::http::Version,
+) -> axum::http::Version {
+    match svc
+        .force_http_version
+        .as_deref()
+        .map(|s| s.trim())
+        .unwrap_or("1.1")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "1.1" | "http/1.1" | "h1" | "1" => axum::http::Version::HTTP_11,
+        "2" | "2.0" | "http/2" | "h2" => axum::http::Version::HTTP_2,
+        "auto" => inbound,
+        other => {
+            tracing::debug!(
+                service = %svc.name,
+                value = other,
+                "force_http_version: unrecognised value, defaulting to HTTP/1.1"
+            );
+            axum::http::Version::HTTP_11
+        }
+    }
 }
 
 /// Strip hop-by-hop headers in a single pass over the map.
@@ -980,6 +1050,7 @@ pub async fn proxy_handler(
                 .remove(crate::plugins::proxy_cache::CACHE_KEY_HEADER);
             parts.headers.remove("x-lynxx-recorder-id");
             strip_hop_by_hop(&mut parts.headers);
+            install_outbound_keepalive(&mut parts.headers);
 
             // Feature 110: passHostHeader for unix socket upstreams.
             if service.pass_host_header.unwrap_or(false) {
@@ -988,6 +1059,10 @@ pub async fn proxy_handler(
                 }
             }
 
+            // Unix-socket upstreams always speak HTTP/1.1 — there's no
+            // ALPN over a Unix domain socket and no h2c by default. The
+            // `force_http_version` knob still has effect for *standard*
+            // TCP upstreams in the main branch below.
             parts.version = axum::http::Version::HTTP_11;
 
             let unix_req = Request::from_parts(parts, body);
@@ -1189,6 +1264,7 @@ pub async fn proxy_handler(
         parts.headers.remove("x-lynxx-recorder-id");
     }
     strip_hop_by_hop(&mut parts.headers);
+    install_outbound_keepalive(&mut parts.headers);
 
     // Feature 110: passHostHeader — re-insert the original client Host
     // header when the service opts in. `original_host_hv` is only
@@ -1198,10 +1274,12 @@ pub async fn proxy_handler(
         parts.headers.insert(axum::http::header::HOST, hv);
     }
 
-    // Force HTTP/1.1 over the wire — the connector negotiates h2 via ALPN
-    // for https. For http:// we use HTTP/1.1 which is what most
-    // upstreams expect from a forward proxy.
-    parts.version = axum::http::Version::HTTP_11;
+    // Outbound HTTP version is controlled per-service via
+    // `service.force_http_version` ("1.1" / "2" / "auto"). Default is
+    // HTTP/1.1 — hyper-util's H1 idle pool is meaningfully bigger than
+    // its H2 stream pool for plaintext upstreams, which is exactly the
+    // pool-floor knob this branch is tuning around.
+    parts.version = resolve_outbound_http_version(&service, parts.version);
 
     // Per-service client lookup. For plain HTTP and for HTTPS services that
     // don't customise TLS (the common case) this resolves to the shared

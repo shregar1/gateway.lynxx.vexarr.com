@@ -125,6 +125,15 @@ pub struct Service {
     /// upstream URI. Useful for upstreams that perform virtual-host routing.
     #[serde(default)]
     pub pass_host_header: Option<bool>,
+    /// Force the HTTP version used on the outbound (upstream-facing)
+    /// request. Accepts `"1.1"`, `"2"`, or `"auto"`. Default is `"1.1"` —
+    /// hyper-util's H1 idle pool is meaningfully bigger than its H2
+    /// stream pool for plaintext upstreams. Set to `"2"` to insist on
+    /// h2 (cleartext h2c won't negotiate via ALPN; for h2 you need
+    /// `https://` upstream). `"auto"` falls back to whatever the
+    /// connector negotiates via ALPN.
+    #[serde(default)]
+    pub force_http_version: Option<String>,
     #[serde(default)]
     pub drain_timeout_ms: Option<u64>,
     #[serde(default)]
@@ -435,6 +444,7 @@ impl Service {
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            force_http_version: None,
             drain_timeout_ms: None,
             project_id: None,
             domain: String::new(),

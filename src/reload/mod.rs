@@ -216,6 +216,7 @@ async fn diff_services(
                         stream_timeout_ms: cur.stream_timeout_ms,
                         stream_close_delay_ms: cur.stream_close_delay_ms,
                         pass_host_header: cur.pass_host_header,
+                        force_http_version: cur.force_http_version.clone(),
                         drain_timeout_ms: None,
                         project_id: cur.project_id,
                         domain: cur.domain.clone(),
