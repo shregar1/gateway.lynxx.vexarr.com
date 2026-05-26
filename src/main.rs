@@ -633,13 +633,46 @@ async fn async_main() -> anyhow::Result<()> {
     // previously-idle services don't pay a TCP+TLS handshake on the next
     // real request — one of the bigger contributors to the p99.9 long
     // tail. Disabled when `prewarm_interval_secs == 0`.
+    //
+    // The shared `PrewarmState` lets both paths (the startup burst-warm
+    // below and the periodic top-up here) bump the same per-service
+    // idle-conn counters.
+    let prewarm_state = crate::proxy::prewarm::PrewarmState::new();
     let _prewarm_handle = crate::proxy::prewarm::spawn_prewarmer(
         route_table.clone(),
         client_pool.clone(),
         health.clone(),
+        prewarm_state.clone(),
         config.gateway.prewarm_interval_secs,
         config.gateway.prewarm_concurrency,
+        config.gateway.pool_idle_floor_per_host,
     );
+
+    // Startup burst-warm: fill the upstream idle pool to the configured
+    // floor BEFORE we start accepting client traffic. Without this the
+    // first ~`pool_idle_floor` real requests after a fresh start each
+    // pay a TCP+TLS handshake — exactly the gap to nginx that this work
+    // is closing. 5s overall cap; whichever conns came back are in the
+    // pool, the rest the periodic prewarmer will pick up on the next
+    // tick.
+    if config.gateway.pool_idle_floor_per_host.is_some()
+        || route_table
+            .list_services()
+            .iter()
+            .any(|s| s.pool_idle_floor.is_some())
+    {
+        crate::proxy::prewarm::burst_warm(
+            &route_table,
+            &client_pool,
+            &health,
+            &prewarm_state,
+            config.gateway.pool_idle_floor_per_host,
+            config.gateway.prewarm_concurrency,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+    }
 
     // ---------- ACME / cert manager ----------
     // Derive wildcard domains from route hosts so the ACME config doesn't
