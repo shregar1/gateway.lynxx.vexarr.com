@@ -1,0 +1,285 @@
+[package]
+name = "algorithms"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+nginx-algo = { path = "/Users/shreyansh/Downloads/nginx-master/nginx-algo" }
+
+[lib]
+name = "algorithms"
+path = "src/lib.rs"
+
+# ── hash (6) ──
+[[bench]]
+name = "hash_key"
+path = "benches/hash/hash_key.rs"
+harness = false
+
+[[bench]]
+name = "hash_key_lc"
+path = "benches/hash/hash_key_lc.rs"
+harness = false
+
+[[bench]]
+name = "hash_murmur2"
+path = "benches/hash/murmur2.rs"
+harness = false
+
+[[bench]]
+name = "hash_crc32_short"
+path = "benches/hash/crc32_short.rs"
+harness = false
+
+[[bench]]
+name = "hash_crc32_long"
+path = "benches/hash/crc32_long.rs"
+harness = false
+
+[[bench]]
+name = "hash_crc32_long_table"
+path = "benches/hash/crc32_long_table.rs"
+harness = false
+
+[[bench]]
+name = "hash_crc32_short_nibble"
+path = "benches/hash/crc32_short_nibble.rs"
+harness = false
+
+# ── encode (5) ──
+[[bench]]
+name = "encode_base64_encode"
+path = "benches/encode/base64_encode.rs"
+harness = false
+
+[[bench]]
+name = "encode_base64_decode"
+path = "benches/encode/base64_decode.rs"
+harness = false
+
+[[bench]]
+name = "encode_hex_dump"
+path = "benches/encode/hex_dump.rs"
+harness = false
+
+[[bench]]
+name = "encode_hextoi"
+path = "benches/encode/hextoi.rs"
+harness = false
+
+[[bench]]
+name = "encode_escape_uri"
+path = "benches/encode/escape_uri.rs"
+harness = false
+
+[[bench]]
+name = "encode_unescape_uri"
+path = "benches/encode/unescape_uri.rs"
+harness = false
+
+# ── codec (7) ──
+[[bench]]
+name = "codec_huff_encode"
+path = "benches/codec/huff_encode.rs"
+harness = false
+
+[[bench]]
+name = "codec_huff_decode"
+path = "benches/codec/huff_decode.rs"
+harness = false
+
+[[bench]]
+name = "codec_h2_frame"
+path = "benches/codec/h2_frame.rs"
+harness = false
+
+[[bench]]
+name = "codec_h3_varint_encode"
+path = "benches/codec/h3_varint_encode.rs"
+harness = false
+
+[[bench]]
+name = "codec_h3_varint_decode"
+path = "benches/codec/h3_varint_decode.rs"
+harness = false
+
+[[bench]]
+name = "codec_chunked_parse_line"
+path = "benches/codec/chunked_parse_line.rs"
+harness = false
+
+[[bench]]
+name = "codec_chunked_parse_fsm"
+path = "benches/codec/chunked_parse_fsm.rs"
+harness = false
+
+[[bench]]
+name = "codec_chunked_header"
+path = "benches/codec/chunked_header.rs"
+harness = false
+
+# ── parse (5) ──
+[[bench]]
+name = "parse_atoi"
+path = "benches/parse/atoi.rs"
+harness = false
+
+[[bench]]
+name = "parse_atosz"
+path = "benches/parse/atosz.rs"
+harness = false
+
+[[bench]]
+name = "parse_size"
+path = "benches/parse/parse_size.rs"
+harness = false
+
+[[bench]]
+name = "parse_time"
+path = "benches/parse/parse_time.rs"
+harness = false
+
+[[bench]]
+name = "parse_conf_scan"
+path = "benches/parse/conf_scan.rs"
+harness = false
+
+# ── string (4) ──
+[[bench]]
+name = "string_strnstr"
+path = "benches/string/strnstr.rs"
+harness = false
+
+[[bench]]
+name = "string_sub_filter"
+path = "benches/string/sub_filter.rs"
+harness = false
+
+[[bench]]
+name = "string_sort_fast"
+path = "benches/string/sort_fast.rs"
+harness = false
+
+[[bench]]
+name = "string_sort_legacy"
+path = "benches/string/sort_legacy.rs"
+harness = false
+
+# ── inet (7) ──
+[[bench]]
+name = "inet_addr_v4"
+path = "benches/inet/inet_addr_v4.rs"
+harness = false
+
+[[bench]]
+name = "inet_addr_v6"
+path = "benches/inet/inet6_addr.rs"
+harness = false
+
+[[bench]]
+name = "inet_ip_hash"
+path = "benches/inet/ip_hash.rs"
+harness = false
+
+[[bench]]
+name = "inet_proxy_v1"
+path = "benches/inet/proxy_v1.rs"
+harness = false
+
+[[bench]]
+name = "inet_proxy_v2"
+path = "benches/inet/proxy_v2.rs"
+harness = false
+
+[[bench]]
+name = "inet_limit_req_excess"
+path = "benches/inet/limit_req_excess.rs"
+harness = false
+
+[[bench]]
+name = "inet_limit_req_allows"
+path = "benches/inet/limit_req_allows.rs"
+harness = false
+
+[[bench]]
+name = "inet_split_clients"
+path = "benches/inet/split_clients.rs"
+harness = false
+
+# ── goals: hashing ──
+[[bench]]
+name = "hashing_siphash"
+path = "benches/hashing/siphash.rs"
+harness = false
+
+[[bench]]
+name = "hashing_snowflake"
+path = "benches/hashing/snowflake.rs"
+harness = false
+
+# ── goals: fingerprint ──
+[[bench]]
+name = "fingerprint_ja4"
+path = "benches/fingerprint/ja4.rs"
+harness = false
+
+# ── goals: http_codec ──
+[[bench]]
+name = "http_codec_range_slicer"
+path = "benches/http_codec_goals/range_slicer.rs"
+harness = false
+
+# ── goals: rate_limit ──
+[[bench]]
+name = "rate_limit_histogram"
+path = "benches/rate_limit/histogram.rs"
+harness = false
+
+[[bench]]
+name = "rate_limit_ip_reputation"
+path = "benches/rate_limit/ip_reputation.rs"
+harness = false
+
+# ── goals: resilience ──
+[[bench]]
+name = "resilience_cache_promote"
+path = "benches/resilience/cache_promote.rs"
+harness = false
+
+# ── optimized: comparison benchmarks ──
+[[bench]]
+name = "opt_crc32_vs"
+path = "benches/optimized/crc32_vs.rs"
+harness = false
+
+[[bench]]
+name = "opt_unescape_uri_vs"
+path = "benches/optimized/unescape_uri_vs.rs"
+harness = false
+
+[[bench]]
+name = "opt_escape_uri_vs"
+path = "benches/optimized/escape_uri_vs.rs"
+harness = false
+
+[[bench]]
+name = "opt_base64_decode_vs"
+path = "benches/optimized/base64_decode_vs.rs"
+harness = false
+
+[[bench]]
+name = "opt_ja4_vs"
+path = "benches/optimized/ja4_vs.rs"
+harness = false
+
+[[bench]]
+name = "opt_huff_decode_vs"
+path = "benches/optimized/huff_decode_vs.rs"
+harness = false
+
+# NOTE: [profile.bench] is at the WORKSPACE ROOT Cargo.toml
+# (profiles in member crates are ignored by cargo)

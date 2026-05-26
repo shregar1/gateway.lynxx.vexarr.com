@@ -1,0 +1,278 @@
+group,group_id,algorithm,origin,bench_target,scenario,time_ns_median,time_ns_low,time_ns_high,throughput_median,throughput_unit,tier,complexity,hot_path,startup_fit,internal_fit,maang_fit,optimization_priority,impl_status,notes
+hashing,1,ngx_hash_key,nginx,hash_key,16B,3.01,3.01,3.02,4.94,GiB/s,moderate,O(n) byte-at-a-time,yes,good,good,moderate,low,benchmarked,DJB hash — simple additive per-byte
+hashing,1,ngx_hash_key,nginx,hash_key,64B,17.44,17.05,17.75,3.42,GiB/s,moderate,O(n) byte-at-a-time,yes,good,good,moderate,low,benchmarked,
+hashing,1,ngx_hash_key,nginx,hash_key,256B,124.27,104.01,147.66,1.92,GiB/s,moderate,O(n) byte-at-a-time,yes,good,moderate,poor,medium,benchmarked,throughput drops at larger payloads
+hashing,1,ngx_hash_key,nginx,hash_key,1024B,484.88,480.07,490.22,1.97,GiB/s,moderate,O(n) byte-at-a-time,yes,good,moderate,poor,medium,benchmarked,
+hashing,1,ngx_hash_key,nginx,hash_key,4096B,2212.60,2147.70,2280.50,1.72,GiB/s,moderate,O(n) byte-at-a-time,yes,good,moderate,poor,medium,benchmarked,
+hashing,1,ngx_hash_key_lc,nginx,hash_key_lc,16B,4.19,4.18,4.21,3.55,GiB/s,moderate,O(n) byte-at-a-time + tolower,yes,good,good,moderate,low,benchmarked,case-insensitive variant
+hashing,1,ngx_hash_key_lc,nginx,hash_key_lc,64B,32.34,30.96,33.86,1.84,GiB/s,moderate,O(n) byte-at-a-time + tolower,yes,good,moderate,poor,medium,benchmarked,
+hashing,1,ngx_hash_key_lc,nginx,hash_key_lc,256B,102.49,102.15,102.85,2.33,GiB/s,moderate,O(n) byte-at-a-time + tolower,yes,good,moderate,poor,medium,benchmarked,
+hashing,1,ngx_hash_key_lc,nginx,hash_key_lc,1024B,533.27,528.84,538.34,1.79,GiB/s,moderate,O(n) byte-at-a-time + tolower,yes,good,moderate,poor,medium,benchmarked,
+hashing,1,ngx_hash_key_lc,nginx,hash_key_lc,4096B,2155.90,2146.40,2164.40,1.78,GiB/s,moderate,O(n) byte-at-a-time + tolower,yes,good,moderate,poor,medium,benchmarked,
+hashing,1,ngx_murmur_hash2,nginx,hash_murmur2,16B,2.40,2.38,2.43,6.20,GiB/s,fast,O(n/4) 32-bit blocks,yes,excellent,excellent,good,low,benchmarked,best all-rounder — fastest at small keys
+hashing,1,ngx_murmur_hash2,nginx,hash_murmur2,64B,9.64,9.60,9.69,6.18,GiB/s,fast,O(n/4) 32-bit blocks,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,ngx_murmur_hash2,nginx,hash_murmur2,256B,50.47,50.30,50.65,4.72,GiB/s,fast,O(n/4) 32-bit blocks,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,ngx_murmur_hash2,nginx,hash_murmur2,1024B,296.37,291.12,301.93,3.22,GiB/s,fast,O(n/4) 32-bit blocks,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,ngx_murmur_hash2,nginx,hash_murmur2,4096B,1301.50,1296.10,1307.30,2.93,GiB/s,fast,O(n/4) 32-bit blocks,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,SipHasher::hash (siphash24),ATS,hashing_siphash,16B,25.19,24.26,26.48,605.71,MiB/s,moderate,O(n/8) 64-bit blocks + finalize,yes,good,good,good,low,benchmarked,DoS-resistant keyed hash
+hashing,1,SipHasher::hash (siphash24),ATS,hashing_siphash,64B,42.69,42.06,43.44,1.40,GiB/s,moderate,O(n/8) 64-bit blocks + finalize,yes,good,good,good,low,benchmarked,
+hashing,1,SipHasher::hash (siphash24),ATS,hashing_siphash,256B,138.97,137.81,140.15,1.72,GiB/s,moderate,O(n/8) 64-bit blocks + finalize,yes,good,good,moderate,low,benchmarked,
+hashing,1,SipHasher::hash (siphash24),ATS,hashing_siphash,1024B,579.57,572.07,587.42,1.65,GiB/s,moderate,O(n/8) 64-bit blocks + finalize,yes,good,good,moderate,medium,benchmarked,
+hashing,1,SipHasher::hash (siphash24),ATS,hashing_siphash,4096B,2231.20,2216.90,2246.50,1.71,GiB/s,moderate,O(n/8) 64-bit blocks + finalize,yes,good,good,moderate,medium,benchmarked,
+hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,16B,15.26,15.04,15.46,999.70,MiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,good,good,good,low,benchmarked,faster variant — fewer rounds
+hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,64B,44.85,37.30,54.35,1.33,GiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,good,good,good,low,benchmarked,high variance
+hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,256B,86.49,85.88,87.10,2.76,GiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,1024B,311.45,308.78,314.42,3.06,GiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,4096B,1473.80,1305.40,1733.20,2.59,GiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,excellent,excellent,good,low,benchmarked,
+hashing,1,SnowflakeGenerator::generate,ATS,hashing_snowflake,single_id,976.73,975.27,978.28,,n/a,moderate,O(1) atomic + clock,yes,good,good,moderate,medium,benchmarked,~1M IDs/sec — clock-bottlenecked
+hashing,1,wt6_hash,HAProxy,,,,,,,,,planned,O(n) dual-state rotation,,,,,,not_implemented,Willy Tarreau dual-state hash
+hashing,1,sdbm_hash,HAProxy,,,,,,,,,planned,O(n) shift-add,,,,,,not_implemented,SDBM hash
+hashing,1,crc32c_hash,HAProxy,,,,,,,,,planned,O(n) Castagnoli table,,,,,,not_implemented,CRC32c Castagnoli (RFC 4960)
+hashing,1,xxhash,HAProxy,,,,,,,,,planned,O(n) state-of-art,,,,,,not_implemented,XXH32 + XXH64
+checksum,2,ngx_crc32_short,nginx,hash_crc32_short,16B,3.47,3.16,3.75,4.30,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,uses crc32fast — SIMD intrinsics
+checksum,2,ngx_crc32_short,nginx,hash_crc32_short,64B,4.34,4.29,4.39,13.74,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
+checksum,2,ngx_crc32_short,nginx,hash_crc32_short,256B,24.36,24.27,24.46,9.79,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
+checksum,2,ngx_crc32_short,nginx,hash_crc32_short,1024B,132.01,130.48,134.02,7.22,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
+checksum,2,ngx_crc32_short,nginx,hash_crc32_short,4096B,473.63,471.58,475.99,8.05,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,dominant at large payloads
+checksum,2,ngx_crc32_long,nginx,hash_crc32_long,16B,3.47,2.95,4.08,4.29,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
+checksum,2,ngx_crc32_long,nginx,hash_crc32_long,64B,4.00,3.97,4.03,14.89,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,fastest single measurement at 64B
+checksum,2,ngx_crc32_long,nginx,hash_crc32_long,256B,25.74,25.64,25.85,9.26,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
+checksum,2,ngx_crc32_long,nginx,hash_crc32_long,1024B,166.34,157.60,176.09,5.73,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
+checksum,2,ngx_crc32_long,nginx,hash_crc32_long,4096B,816.75,810.65,823.39,4.67,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,good,low,benchmarked,
+checksum,2,ngx_crc32_long_table,nginx,hash_crc32_long_table,16B,38.31,34.80,42.14,0.36,GiB/s,slow,O(n) software table lookup,no,poor,poor,poor,high,benchmarked,software fallback — 10x slower
+checksum,2,ngx_crc32_long_table,nginx,hash_crc32_long_table,64B,188.22,186.12,190.37,0.32,GiB/s,slow,O(n) software table lookup,no,poor,poor,poor,high,benchmarked,
+checksum,2,ngx_crc32_long_table,nginx,hash_crc32_long_table,256B,958.68,951.19,967.43,0.25,GiB/s,slow,O(n) software table lookup,no,poor,poor,poor,high,benchmarked,
+checksum,2,ngx_crc32_long_table,nginx,hash_crc32_long_table,1024B,3458.90,3440.30,3479.20,0.28,GiB/s,slow,O(n) software table lookup,no,poor,poor,poor,high,benchmarked,
+checksum,2,ngx_crc32_long_table,nginx,hash_crc32_long_table,4096B,13535.00,13408.00,13661.00,0.29,GiB/s,slow,O(n) software table lookup,no,poor,poor,poor,high,benchmarked,replace with murmur2 fallback
+checksum,2,ngx_crc32_short_nibble,nginx,hash_crc32_short_nibble,16B,28.52,28.33,28.74,0.52,GiB/s,slow,O(2n) nibble-at-a-time,no,poor,poor,poor,high,benchmarked,slowest checksum — 2 lookups/byte
+checksum,2,ngx_crc32_short_nibble,nginx,hash_crc32_short_nibble,64B,224.29,223.61,225.43,0.27,GiB/s,slow,O(2n) nibble-at-a-time,no,poor,poor,poor,high,benchmarked,
+checksum,2,ngx_crc32_short_nibble,nginx,hash_crc32_short_nibble,256B,1189.50,1178.90,1203.50,0.20,GiB/s,slow,O(2n) nibble-at-a-time,no,poor,poor,poor,high,benchmarked,
+checksum,2,ngx_crc32_short_nibble,nginx,hash_crc32_short_nibble,1024B,4969.60,4928.80,5012.60,0.19,GiB/s,slow,O(2n) nibble-at-a-time,no,poor,poor,poor,high,benchmarked,
+checksum,2,ngx_crc32_short_nibble,nginx,hash_crc32_short_nibble,4096B,22706.00,22182.00,23224.00,0.17,GiB/s,slow,O(2n) nibble-at-a-time,no,poor,poor,poor,high,benchmarked,eliminate from hot paths
+encoding,3,ngx_encode_base64,nginx,encode_base64_encode,16B,14.11,13.34,14.81,1.06,GiB/s,fast,O(n) table lookup,yes,excellent,excellent,good,low,benchmarked,
+encoding,3,ngx_encode_base64,nginx,encode_base64_encode,64B,70.36,66.32,75.12,867.47,MiB/s,fast,O(n) table lookup,yes,excellent,excellent,good,low,benchmarked,
+encoding,3,ngx_encode_base64,nginx,encode_base64_encode,256B,255.20,245.35,267.00,956.67,MiB/s,fast,O(n) table lookup,yes,excellent,excellent,good,low,benchmarked,
+encoding,3,ngx_encode_base64,nginx,encode_base64_encode,1024B,960.66,920.34,1013.10,1016.60,MiB/s,fast,O(n) table lookup,yes,excellent,excellent,good,low,benchmarked,
+encoding,3,ngx_encode_base64,nginx,encode_base64_encode,4096B,3123.90,2876.50,3396.50,1.22,GiB/s,fast,O(n) table lookup,yes,excellent,excellent,good,low,benchmarked,
+encoding,3,ngx_decode_base64,nginx,encode_base64_decode,16B,46.26,45.02,47.63,494.77,MiB/s,moderate,O(n) table + validation,yes,good,good,moderate,medium,benchmarked,3x slower than encode
+encoding,3,ngx_decode_base64,nginx,encode_base64_decode,64B,257.33,231.00,291.47,326.13,MiB/s,moderate,O(n) table + validation,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_decode_base64,nginx,encode_base64_decode,256B,727.83,700.06,756.12,450.74,MiB/s,moderate,O(n) table + validation,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_decode_base64,nginx,encode_base64_decode,1024B,4010.40,3522.70,4665.40,325.31,MiB/s,moderate,O(n) table + validation,yes,good,moderate,poor,medium,benchmarked,
+encoding,3,ngx_decode_base64,nginx,encode_base64_decode,4096B,14083.00,12957.00,15356.00,370.02,MiB/s,moderate,O(n) table + validation,yes,good,moderate,poor,high,benchmarked,optimize — hot in JWT/TLS
+encoding,3,ngx_hex_dump,nginx,encode_hex_dump,16B,47.23,42.56,52.37,323.06,MiB/s,moderate,O(n) byte-to-2char,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_hex_dump,nginx,encode_hex_dump,64B,105.97,98.03,114.32,575.98,MiB/s,moderate,O(n) byte-to-2char,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_hex_dump,nginx,encode_hex_dump,256B,613.49,493.00,783.61,397.95,MiB/s,moderate,O(n) byte-to-2char,yes,good,good,moderate,medium,benchmarked,high variance
+encoding,3,ngx_hex_dump,nginx,encode_hex_dump,1024B,2132.70,1997.10,2284.00,457.91,MiB/s,moderate,O(n) byte-to-2char,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_hex_dump,nginx,encode_hex_dump,4096B,6496.00,5905.40,7142.80,601.33,MiB/s,moderate,O(n) byte-to-2char,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_hextoi,nginx,encode_hextoi,small (2B),6.18,5.67,6.72,,n/a,fast,O(n) char-by-char,no,excellent,excellent,excellent,none,benchmarked,
+encoding,3,ngx_hextoi,nginx,encode_hextoi,medium (6B),18.23,16.80,19.86,,n/a,fast,O(n) char-by-char,no,excellent,excellent,excellent,none,benchmarked,
+encoding,3,ngx_hextoi,nginx,encode_hextoi,large (8B),10.36,8.78,12.43,,n/a,fast,O(n) char-by-char,no,excellent,excellent,excellent,none,benchmarked,
+encoding,3,ngx_escape_uri,nginx,encode_escape_uri,16B,34.74,31.46,38.40,439.18,MiB/s,moderate,O(n) branch per byte,yes,good,good,moderate,medium,benchmarked,percent-encoding
+encoding,3,ngx_escape_uri,nginx,encode_escape_uri,64B,118.65,111.34,127.43,514.42,MiB/s,moderate,O(n) branch per byte,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_escape_uri,nginx,encode_escape_uri,256B,321.66,309.22,335.64,759.00,MiB/s,moderate,O(n) branch per byte,yes,good,good,moderate,medium,benchmarked,
+encoding,3,ngx_escape_uri,nginx,encode_escape_uri,1024B,1624.10,1426.80,1870.80,601.28,MiB/s,moderate,O(n) branch per byte,yes,good,moderate,poor,medium,benchmarked,
+encoding,3,ngx_escape_uri,nginx,encode_escape_uri,4096B,15231.00,12345.00,18971.00,256.46,MiB/s,moderate,O(n) branch per byte,yes,moderate,poor,poor,high,benchmarked,high variance — optimize candidate
+encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,16B,118.46,108.58,130.07,386.44,MiB/s,slow,O(n) branch + hex decode,yes,moderate,moderate,poor,high,benchmarked,3x slower than escape
+encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,64B,418.76,405.50,434.67,391.71,MiB/s,slow,O(n) branch + hex decode,yes,moderate,moderate,poor,high,benchmarked,
+encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,256B,1094.60,1047.80,1155.00,453.04,MiB/s,slow,O(n) branch + hex decode,yes,moderate,moderate,poor,high,benchmarked,
+encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,1024B,5136.10,4540.60,5887.50,386.22,MiB/s,slow,O(n) branch + hex decode,yes,moderate,poor,poor,high,benchmarked,
+encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,4096B,17861.00,16899.00,19103.00,444.23,MiB/s,slow,O(n) branch + hex decode,yes,moderate,poor,poor,high,benchmarked,top optimization target in encoding
+encoding,3,escape_html,nginx,,,,,,,,,,planned,O(n) entity replace,,,,,,not_implemented,HTML entity escaping
+encoding,3,escape_json,nginx,,,,,,,,,,planned,O(n) escape,,,,,,not_implemented,JSON string escaping
+encoding,3,slz_compress,HAProxy,,,,,,,,,,planned,O(n) static Huffman,,,,,,not_implemented,stateless DEFLATE/GZIP
+encoding,3,uri_normalize,HAProxy,,,,,,,,,,planned,O(n) RFC 3986,,,,,,not_implemented,dot resolve + slash merge
+encoding,3,accept_encoding,Traefik,,,,,,,,,,planned,O(k) q-value sort,,,,,,not_implemented,RFC 9110 negotiation
+encoding,3,etag_encode,Caddy,,,,,,,,,,planned,O(1) suffix ops,,,,,,not_implemented,ETag modification
+encoding,3,path_trim,Caddy,,,,,,,,,,planned,O(n) escape-aware,,,,,,not_implemented,
+encoding,3,golomb_set,H2O,,,,,,,,,,planned,O(n) bit coding,,,,,,not_implemented,Golomb-Rice coded sets
+encoding,3,vary_encode,Varnish,,,,,,,,,,planned,O(k log k) sorted,,,,,,not_implemented,compact binary Vary key
+http_codec,4,ngx_http_huff_encode,nginx,codec_huff_encode,short (12B),20.41,19.65,21.39,560.59,MiB/s,fast,O(n) table + bit packing,yes,good,good,moderate,medium,benchmarked,HPACK Huffman encode
+http_codec,4,ngx_http_huff_encode,nginx,codec_huff_encode,medium (30B),53.90,47.74,61.17,548.55,MiB/s,fast,O(n) table + bit packing,yes,good,good,moderate,medium,benchmarked,
+http_codec,4,ngx_http_huff_encode,nginx,codec_huff_encode,long (66B),60.59,58.87,62.50,1.01,GiB/s,fast,O(n) table + bit packing,yes,excellent,excellent,good,low,benchmarked,
+http_codec,4,ngx_http_huff_decode,nginx,codec_huff_decode,short (9B),42.59,36.65,50.01,201.51,MiB/s,moderate,O(n) state machine,yes,moderate,moderate,poor,high,benchmarked,decode 2-3x slower than encode
+http_codec,4,ngx_http_huff_decode,nginx,codec_huff_decode,medium (22B),140.44,129.89,152.16,149.40,MiB/s,moderate,O(n) state machine,yes,moderate,moderate,poor,high,benchmarked,
+http_codec,4,ngx_http_huff_decode,nginx,codec_huff_decode,long (50B),498.61,432.77,559.43,95.63,MiB/s,slow,O(n) state machine,yes,poor,poor,poor,high,benchmarked,top codec optimization candidate
+http_codec,4,huff_decode_branchless (optimized stream),lynxx,opt_huff_decode_vs,short_12B,9.87,9.34,10.54,,n/a,fast,O(n) branchless byte-table 8× unroll,yes,excellent,excellent,excellent,none,optimized,1.51× faster than original byte_stream
+http_codec,4,huff_decode_branchless (optimized stream),lynxx,opt_huff_decode_vs,medium_30B,54.20,53.15,55.59,,n/a,fast,O(n) branchless byte-table 8× unroll,yes,excellent,excellent,good,none,optimized,1.14× faster than original byte_stream
+http_codec,4,huff_decode_branchless (optimized stream),lynxx,opt_huff_decode_vs,header_51B,102.00,100.27,103.75,,n/a,fast,O(n) branchless byte-table 8× unroll,yes,good,good,good,none,optimized,~parity with original byte_stream
+http_codec,4,huff_decode_branchless (optimized stream),lynxx,opt_huff_decode_vs,long_66B,173.93,145.29,213.38,,n/a,fast,O(n) branchless byte-table 8× unroll,yes,good,good,good,none,optimized,1.34× faster than original byte_stream
+http_codec,4,huff_decode_branchless (optimized stream),lynxx,opt_huff_decode_vs,user_agent_120B,244.92,244.64,245.16,,n/a,fast,O(n) branchless byte-table 8× unroll,yes,good,good,good,none,optimized,1.07× faster than original byte_stream
+http_codec,4,huff_decode_branchless (optimized stream),lynxx,opt_huff_decode_vs,url_200B,436.04,430.13,442.31,,n/a,fast,O(n) branchless byte-table 8× unroll,yes,good,good,moderate,none,optimized,~parity with original byte_stream
+http_codec,4,huff_decode_hybrid_last (optimized last),lynxx,opt_huff_decode_vs,short_12B,9.91,9.77,10.09,,n/a,fast,O(n) hybrid byte+nibble last,yes,excellent,excellent,excellent,none,optimized,2.93× faster than original nibble_last
+http_codec,4,huff_decode_hybrid_last (optimized last),lynxx,opt_huff_decode_vs,medium_30B,58.15,55.83,60.48,,n/a,fast,O(n) hybrid byte+nibble last,yes,excellent,excellent,good,none,optimized,1.67× faster than original nibble_last
+http_codec,4,huff_decode_hybrid_last (optimized last),lynxx,opt_huff_decode_vs,header_51B,117.61,115.80,119.57,,n/a,fast,O(n) hybrid byte+nibble last,yes,good,good,good,none,optimized,1.60× faster than original nibble_last
+http_codec,4,huff_decode_hybrid_last (optimized last),lynxx,opt_huff_decode_vs,long_66B,175.35,171.52,179.24,,n/a,fast,O(n) hybrid byte+nibble last,yes,good,good,good,none,optimized,1.50× faster than original nibble_last
+http_codec,4,huff_decode_hybrid_last (optimized last),lynxx,opt_huff_decode_vs,user_agent_120B,242.00,240.20,243.79,,n/a,fast,O(n) hybrid byte+nibble last,yes,good,good,good,none,optimized,1.91× faster than original nibble_last
+http_codec,4,huff_decode_hybrid_last (optimized last),lynxx,opt_huff_decode_vs,url_200B,390.78,385.02,396.57,,n/a,fast,O(n) hybrid byte+nibble last,yes,good,good,good,none,optimized,1.85× faster than original nibble_last
+http_codec,4,ngx_http_v2_parse_frame_header,nginx,codec_h2_frame,9B frame,1.70,1.51,1.93,,n/a,fast,O(1) fixed parse,yes,excellent,excellent,excellent,none,benchmarked,sub-2ns
+http_codec,4,ngx_http_v3_encode_varlen_int,nginx,codec_h3_varint_encode,1byte,1.35,1.22,1.52,,n/a,fast,O(1) branch,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_encode_varlen_int,nginx,codec_h3_varint_encode,2byte,1.42,1.25,1.62,,n/a,fast,O(1) branch,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_encode_varlen_int,nginx,codec_h3_varint_encode,4byte,1.21,1.11,1.33,,n/a,fast,O(1) branch,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_encode_varlen_int,nginx,codec_h3_varint_encode,8byte,1.22,1.12,1.34,,n/a,fast,O(1) branch,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_decode_varlen_int,nginx,codec_h3_varint_decode,1byte,7.92,7.42,8.47,,n/a,fast,O(1) branch + mask,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_decode_varlen_int,nginx,codec_h3_varint_decode,2byte,6.59,5.99,7.26,,n/a,fast,O(1) branch + mask,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_decode_varlen_int,nginx,codec_h3_varint_decode,4byte,5.98,5.49,6.55,,n/a,fast,O(1) branch + mask,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_v3_decode_varlen_int,nginx,codec_h3_varint_decode,8byte,6.22,5.61,6.88,,n/a,fast,O(1) branch + mask,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_chunked_parse_line,nginx,codec_chunked_parse_line,64B,13.13,10.20,17.01,290.56,MiB/s,fast,O(digits) hex scan,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_line,nginx,codec_chunked_parse_line,256B,13.02,11.68,14.66,366.30,MiB/s,fast,O(digits) hex scan,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_line,nginx,codec_chunked_parse_line,4096B,21.83,18.62,25.59,262.09,MiB/s,fast,O(digits) hex scan,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_line,nginx,codec_chunked_parse_line,65536B,18.74,16.44,21.17,356.28,MiB/s,fast,O(digits) hex scan,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_stream_fsm,nginx,codec_chunked_parse_fsm,64B,9.33,8.43,10.39,409.08,MiB/s,fast,O(digits) state machine,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_stream_fsm,nginx,codec_chunked_parse_fsm,256B,12.56,11.51,13.75,379.57,MiB/s,fast,O(digits) state machine,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_stream_fsm,nginx,codec_chunked_parse_fsm,4096B,13.57,12.68,14.65,421.67,MiB/s,fast,O(digits) state machine,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_parse_stream_fsm,nginx,codec_chunked_parse_fsm,65536B,20.81,19.14,22.81,320.80,MiB/s,fast,O(digits) state machine,yes,good,good,good,low,benchmarked,
+http_codec,4,ngx_http_chunked_header,nginx,codec_chunked_header,64B,2.65,2.55,2.79,,n/a,fast,O(1) format,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_chunked_header,nginx,codec_chunked_header,256B,3.98,3.72,4.33,,n/a,fast,O(1) format,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_chunked_header,nginx,codec_chunked_header,4096B,4.14,4.07,4.23,,n/a,fast,O(1) format,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ngx_http_chunked_header,nginx,codec_chunked_header,65536B,4.84,4.74,4.96,,n/a,fast,O(1) format,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,single_block,35.46,34.56,36.39,,n/a,fast,O(blocks) decompose,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,two_blocks,36.89,35.98,37.93,,n/a,fast,O(blocks) decompose,yes,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,ten_blocks,88.66,84.74,93.66,,n/a,fast,O(blocks) decompose,yes,excellent,excellent,good,low,benchmarked,
+http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,hundred_blocks,294.29,290.87,297.69,,n/a,moderate,O(blocks) decompose,yes,good,good,moderate,medium,benchmarked,
+http_codec,4,RangeSlicer::parse_content_range,ATS,http_codec_range_slicer,header_parse,60.88,60.17,61.61,,n/a,fast,O(n) string parse,no,excellent,excellent,excellent,none,benchmarked,
+http_codec,4,ws_mask,Caddy,,,,,,,,,,planned,O(n) XOR masking,,,,,,not_implemented,WebSocket frame masking
+http_codec,4,vary_key,Pingora,,,,,,,,,,planned,O(k log k) BTreeMap,,,,,,not_implemented,order-independent Vary key
+http_codec,4,replay_body,linkerd2-proxy,,,,,,,,,,planned,O(n) buffer,,,,,,not_implemented,retryable body replay
+http_codec,4,ttl_calc,Varnish,,,,,,,,,,planned,O(1) arithmetic,,,,,,not_implemented,RFC 7234 TTL calculator
+http_codec,4,h2_scheduler,H2O,,,,,,,,,,planned,O(log n) WFQ,,,,,,not_implemented,HTTP/2 dependency-tree scheduler
+http_codec,4,ext_priority,H2O,,,,,,,,,,planned,O(1) parse,,,,,,not_implemented,RFC 9218 Extensible Priorities
+networking,5,ngx_inet_addr,nginx,inet_addr_v4,loopback,13.86,12.43,15.45,,n/a,fast,O(n) dotted-decimal,no,excellent,excellent,excellent,none,benchmarked,
+networking,5,ngx_inet_addr,nginx,inet_addr_v4,private,14.25,14.15,14.37,,n/a,fast,O(n) dotted-decimal,no,excellent,excellent,excellent,none,benchmarked,
+networking,5,ngx_inet_addr,nginx,inet_addr_v4,public,17.64,16.40,19.10,,n/a,fast,O(n) dotted-decimal,no,excellent,excellent,excellent,none,benchmarked,
+networking,5,ngx_inet6_addr,nginx,inet_addr_v6,loopback (::1),13.11,12.13,14.20,,n/a,fast,O(n) colon-hex parse,no,excellent,excellent,excellent,none,benchmarked,
+networking,5,ngx_inet6_addr,nginx,inet_addr_v6,full (39B),87.88,76.74,100.38,,n/a,moderate,O(n) colon-hex parse,no,good,good,good,low,benchmarked,
+networking,5,ngx_inet6_addr,nginx,inet_addr_v6,compressed (24B),51.96,47.39,57.15,,n/a,fast,O(n) colon-hex parse,no,excellent,excellent,good,low,benchmarked,
+networking,5,ngx_proxy_protocol_v1_parse_inet,nginx,inet_proxy_v1,TCP4 header,51.93,45.89,59.26,,n/a,moderate,O(n) text parse,yes,good,good,moderate,medium,benchmarked,text-based — 50x slower than v2
+networking,5,ngx_proxy_protocol_v2_parse_inet,nginx,inet_proxy_v2,binary header,0.97,0.95,0.99,,n/a,fast,O(1) memcpy,yes,excellent,excellent,excellent,none,benchmarked,sub-nanosecond binary parse
+networking,5,sni_check,Traefik,,,,,,,,,,planned,O(n) compare,,,,,,not_implemented,domain fronting protection
+networking,5,cname_flatten,Traefik,,,,,,,,,,planned,O(chain) recursive,,,,,,not_implemented,CNAME chain resolution
+networking,5,domain_dedup,Traefik,,,,,,,,,,planned,O(n log n) sort,,,,,,not_implemented,ACME domain dedup
+networking,5,cert_selection,Caddy,,,,,,,,,,planned,O(n) multi-criteria,,,,,,not_implemented,certificate selection
+networking,5,sni_index,Caddy,,,,,,,,,,planned,O(1) hash lookup,,,,,,not_implemented,SNI-indexed policy fast path
+parsing,6,ngx_atoi,nginx,parse_atoi,small (2B),2.54,2.50,2.59,,n/a,fast,O(n) digit scan,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_atoi,nginx,parse_atoi,medium (6B),6.33,6.10,6.59,,n/a,fast,O(n) digit scan,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_atoi,nginx,parse_atoi,large (10B),11.00,10.47,11.67,,n/a,fast,O(n) digit scan,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_atoi,nginx,parse_atoi,negative (6B),1.80,1.64,1.97,,n/a,fast,O(1) early return,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_atosz,nginx,parse_atosz,small (2B),10.79,8.32,13.72,,n/a,moderate,O(n) + overflow check,no,good,good,good,low,benchmarked,4x slower than atoi
+parsing,6,ngx_atosz,nginx,parse_atosz,medium (6B),23.55,20.71,26.63,,n/a,moderate,O(n) + overflow check,no,good,good,good,low,benchmarked,
+parsing,6,ngx_atosz,nginx,parse_atosz,large (10B),47.75,42.71,53.08,,n/a,moderate,O(n) + overflow check,no,good,good,moderate,medium,benchmarked,
+parsing,6,ngx_atosz,nginx,parse_atosz,negative (6B),3.30,2.98,3.70,,n/a,fast,O(1) early return,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_size,nginx,parse_size,plain (4B),10.81,10.46,11.17,,n/a,fast,O(n) digit + suffix,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_size,nginx,parse_size,kilo (3B),5.92,5.24,6.79,,n/a,fast,O(n) digit + suffix,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_size,nginx,parse_size,mega (3B),5.37,4.75,6.02,,n/a,fast,O(n) digit + suffix,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_time,nginx,parse_time,seconds (3B),7.68,6.85,8.58,,n/a,fast,O(n) digit + unit,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_time,nginx,parse_time,minutes (3B),7.10,6.47,7.83,,n/a,fast,O(n) digit + unit,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_time,nginx,parse_time,hours (2B),6.84,6.11,7.71,,n/a,fast,O(n) digit + unit,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_parse_time,nginx,parse_time,plain_sec (4B),5.92,5.31,6.61,,n/a,fast,O(n) digit + unit,no,excellent,excellent,excellent,none,benchmarked,
+parsing,6,ngx_conf_scan_tokens,nginx,parse_conf_scan,simple (21B),194.93,172.91,222.89,102.74,MiB/s,moderate,O(n) tokenizer FSM,no,good,good,moderate,medium,benchmarked,config parsing
+parsing,6,ngx_conf_scan_tokens,nginx,parse_conf_scan,quoted (43B),552.65,513.78,599.27,77.65,MiB/s,moderate,O(n) tokenizer FSM,no,good,good,moderate,medium,benchmarked,
+parsing,6,ngx_conf_scan_tokens,nginx,parse_conf_scan,many_tokens (93B),914.84,864.42,974.23,96.95,MiB/s,moderate,O(n) tokenizer FSM,no,good,good,moderate,medium,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,found_end/64B,30.45,29.00,31.95,1.96,GiB/s,fast,O(n*m) naive search,yes,good,good,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,not_found/64B,35.25,32.10,38.75,1.69,GiB/s,fast,O(n*m) naive search,yes,good,good,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,found_end/256B,44.81,41.39,48.92,5.32,GiB/s,fast,O(n*m) naive search,yes,excellent,excellent,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,not_found/256B,50.72,45.08,56.97,4.70,GiB/s,fast,O(n*m) naive search,yes,excellent,excellent,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,found_end/1024B,136.70,121.03,155.29,6.98,GiB/s,fast,O(n*m) naive search,yes,excellent,excellent,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,not_found/1024B,191.21,173.28,211.15,4.99,GiB/s,fast,O(n*m) naive search,yes,excellent,excellent,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,found_end/4096B,525.18,478.24,579.81,7.26,GiB/s,fast,O(n*m) naive search,yes,excellent,excellent,good,low,benchmarked,
+string_ops,7,ngx_strnstr,nginx,string_strnstr,not_found/4096B,713.62,636.71,803.33,5.35,GiB/s,fast,O(n*m) naive search,yes,excellent,excellent,good,low,benchmarked,
+string_ops,7,ngx_http_sub_find,nginx,string_sub_filter,256B,10.87,10.62,11.16,21.93,GiB/s,fast,O(n) Boyer-Moore-ish,yes,excellent,excellent,excellent,none,benchmarked,SIMD-accelerated
+string_ops,7,ngx_http_sub_find,nginx,string_sub_filter,1024B,28.21,25.44,31.49,33.81,GiB/s,fast,O(n) Boyer-Moore-ish,yes,excellent,excellent,excellent,none,benchmarked,
+string_ops,7,ngx_http_sub_find,nginx,string_sub_filter,4096B,20.08,18.22,22.57,190.02,GiB/s,fast,O(n) Boyer-Moore-ish,yes,excellent,excellent,excellent,none,benchmarked,190 GiB/s — near memory bandwidth
+string_ops,7,ngx_sort,nginx,string_sort_fast,10 elements,210.46,168.44,263.43,,n/a,fast,O(n log n) optimized,yes,excellent,excellent,excellent,none,benchmarked,
+string_ops,7,ngx_sort,nginx,string_sort_fast,100 elements,324.80,281.46,368.80,,n/a,fast,O(n log n) optimized,yes,excellent,excellent,excellent,none,benchmarked,
+string_ops,7,ngx_sort,nginx,string_sort_fast,1000 elements,3628.60,3240.20,4047.50,,n/a,fast,O(n log n) optimized,yes,excellent,excellent,excellent,none,benchmarked,
+string_ops,7,ngx_sort_legacy,nginx,string_sort_legacy,10 elements,206.42,170.40,251.26,,n/a,fast,O(n^2) insertion,no,good,moderate,poor,medium,benchmarked,
+string_ops,7,ngx_sort_legacy,nginx,string_sort_legacy,100 elements,12418.00,10734.00,14514.00,,n/a,slow,O(n^2) insertion,no,poor,poor,poor,high,benchmarked,38x slower than sort_fast
+string_ops,7,ngx_sort_legacy,nginx,string_sort_legacy,1000 elements,1257500.00,1173200.00,1353000.00,,n/a,slow,O(n^2) insertion,no,poor,poor,poor,high,benchmarked,346x slower — never use n>50
+rate_limiting,8,ngx_limit_req_excess,nginx,inet_limit_req_excess,rate=100,0.84,0.82,0.87,,n/a,fast,O(1) arithmetic,yes,excellent,excellent,excellent,none,benchmarked,sub-ns leaky bucket math
+rate_limiting,8,ngx_limit_req_excess,nginx,inet_limit_req_excess,rate=1000,0.84,0.83,0.85,,n/a,fast,O(1) arithmetic,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,ngx_limit_req_excess,nginx,inet_limit_req_excess,rate=10000,0.78,0.77,0.80,,n/a,fast,O(1) arithmetic,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,ngx_limit_req_allows,nginx,inet_limit_req_allows,under_burst,0.96,0.95,0.96,,n/a,fast,O(1) comparison,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,ngx_limit_req_allows,nginx,inet_limit_req_allows,at_burst,0.98,0.97,1.01,,n/a,fast,O(1) comparison,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,ngx_limit_req_allows,nginx,inet_limit_req_allows,over_burst,0.88,0.87,0.88,,n/a,fast,O(1) comparison,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,Histogram::record,ATS,rate_limit_histogram,small (8/4),1.91,1.88,1.94,,n/a,fast,O(1) bucket insert,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,Histogram::record,ATS,rate_limit_histogram,medium (16/4),1.86,1.79,1.95,,n/a,fast,O(1) bucket insert,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,Histogram::record,ATS,rate_limit_histogram,large (20/6),1.54,1.53,1.56,,n/a,fast,O(1) bucket insert,yes,excellent,excellent,excellent,none,benchmarked,
+rate_limiting,8,Histogram::percentile,ATS,rate_limit_histogram,p99 (10K samples),137.44,133.30,142.63,,n/a,fast,O(buckets) scan,no,excellent,excellent,good,low,benchmarked,
+rate_limiting,8,IpReputation::record_hit,ATS,rate_limit_ip_reputation,256 IPs,1099.90,1085.40,1113.60,,n/a,moderate,O(tiers) sieve lookup,yes,good,good,moderate,medium,benchmarked,~1µs per hit — sieve overhead
+rate_limiting,8,IpReputation::reputation,ATS,rate_limit_ip_reputation,lookup,18.01,17.78,18.24,,n/a,fast,O(1) hash lookup,yes,excellent,excellent,excellent,none,benchmarked,18ns read-only query
+rate_limiting,8,freq_ctr,HAProxy,,,,,,,,,,planned,O(1) CAS atomic,,,,,,not_implemented,sliding-window frequency counter
+rate_limiting,8,atomic_token_bucket,Envoy,,,,,,,,,,planned,O(1) CAS atomic,,,,,,not_implemented,Folly-inspired token bucket
+rate_limiting,8,gradient_controller,Envoy,,,,,,,,,,planned,O(1) arithmetic,,,,,,not_implemented,adaptive concurrency limiter
+rate_limiting,8,admission_control,Envoy,,,,,,,,,,planned,O(1) probabilistic,,,,,,not_implemented,rolling success rate rejection
+upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,3 backends,2.42,2.15,2.75,,n/a,fast,O(retries) mod hash,yes,excellent,excellent,excellent,none,benchmarked,
+upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,10 backends,5.39,5.10,5.75,,n/a,fast,O(retries) mod hash,yes,excellent,excellent,excellent,none,benchmarked,
+upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,100 backends,58.09,55.67,61.29,,n/a,fast,O(retries) mod hash,yes,excellent,excellent,good,low,benchmarked,
+upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,500 backends,291.10,289.86,292.69,,n/a,moderate,O(retries) mod hash,yes,good,good,moderate,medium,benchmarked,linear in retry count
+upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,2 buckets,1.90,1.83,1.96,,n/a,fast,O(n) linear scan,yes,excellent,excellent,excellent,none,benchmarked,
+upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,5 buckets,1.74,1.73,1.75,,n/a,fast,O(n) linear scan,yes,excellent,excellent,excellent,none,benchmarked,
+upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,20 buckets,5.62,5.60,5.65,,n/a,fast,O(n) linear scan,yes,excellent,excellent,excellent,none,benchmarked,
+upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,100 buckets,24.15,23.97,24.34,,n/a,fast,O(n) linear scan,yes,excellent,excellent,good,low,benchmarked,consider binary search at 100+
+upstream_pick,9,fwlc,HAProxy,,,,,,,,,,planned,O(log n) BTreeMap,,,,,,not_implemented,Fast Weighted Least Connections
+upstream_pick,9,fwrr,HAProxy,,,,,,,,,,planned,O(1) 3-tree,,,,,,not_implemented,Fast Weighted Round Robin
+upstream_pick,9,fas,HAProxy,,,,,,,,,,planned,O(n) scan,,,,,,not_implemented,First Available Server
+upstream_pick,9,chash_bounded,HAProxy,,,,,,,,,,planned,O(1) ring,,,,,,not_implemented,Consistent Hash with Bounded Loads
+upstream_pick,9,maglev,Envoy,,,,,,,,,,planned,O(1) table lookup,,,,,,not_implemented,Maglev consistent hashing
+upstream_pick,9,edf,Envoy,,,,,,,,,,planned,O(log n) min-heap,,,,,,not_implemented,Earliest Deadline First
+upstream_pick,9,wrsq,Envoy,,,,,,,,,,planned,O(1) FIFO,,,,,,not_implemented,Weighted Random Selection Queue
+upstream_pick,9,slow_start,Envoy,,,,,,,,,,planned,O(1) ramp,,,,,,not_implemented,slow start weight ramp
+upstream_pick,9,locality_lb,Envoy,,,,,,,,,,planned,O(zones) weighted,,,,,,not_implemented,locality-weighted LB
+upstream_pick,9,priority_lb,Envoy,,,,,,,,,,planned,O(levels) failover,,,,,,not_implemented,priority-based distribution
+upstream_pick,9,peak_ewma,linkerd2-proxy,,,,,,,,,,planned,O(1) decay,,,,,,not_implemented,Peak EWMA latency-based LB
+upstream_pick,9,completion_tracker,linkerd2-proxy,,,,,,,,,,planned,O(1) signal,,,,,,not_implemented,load completion signaling
+crypto,10,apr1,nginx,,,,,,,,,,planned,O(n) iterated MD5,,,,,,not_implemented,Apache APR1 password hash
+crypto,10,plain_check,nginx,,,,,,,,,,planned,O(n) compare,,,,,,not_implemented,plaintext password check
+crypto,10,sha_ssha,nginx,,,,,,,,,,planned,O(n) SHA digest,,,,,,not_implemented,SHA/SSHA password hash
+text,11,ngx_utf8_decode,nginx,,,,,,,,,,planned,O(n) byte scan,,,,,,not_implemented,UTF-8 decode/validate (in nginx-algo)
+text,11,ngx_utf8_decode_scan,nginx,,,,,,,,,,planned,O(n) SIMD scan,,,,,,not_implemented,UTF-8 bulk validation (in nginx-algo)
+tree_algorithms,12,RadixTree32,nginx,,,,,,,,,,planned,O(depth) trie walk,,,,,,not_implemented,radix tree LPM (in nginx-algo)
+tree_algorithms,12,ngx_rbtree_timer_less,nginx,,,,,,,,,,planned,O(1) compare,,,,,,not_implemented,timer rbtree comparator (in nginx-algo)
+tree_algorithms,12,keyed_rbtree,nginx,,,,,,,,,,planned,O(log n) insert/find,,,,,,not_implemented,keyed red-black tree
+tree_algorithms,12,str_rbtree,nginx,,,,,,,,,,planned,O(log n * k) insert/find,,,,,,not_implemented,string-keyed red-black tree
+congestion,13,cubic,HAProxy,,,,,,,,,,planned,O(1) per ACK,,,,,,not_implemented,RFC 9438 CUBIC
+congestion,13,bbr_v3,HAProxy,,,,,,,,,,planned,O(1) per ACK,,,,,,not_implemented,BBRv3 model-based
+resilience,14,PromotionPolicy::should_promote,ATS,resilience_cache_promote,threshold=1,83.59,78.13,90.43,,n/a,fast,O(1) LRU hash lookup,yes,excellent,excellent,excellent,none,benchmarked,
+resilience,14,PromotionPolicy::should_promote,ATS,resilience_cache_promote,threshold=3,62.57,61.89,63.26,,n/a,fast,O(1) LRU hash lookup,yes,excellent,excellent,excellent,none,benchmarked,
+resilience,14,PromotionPolicy::should_promote,ATS,resilience_cache_promote,threshold=10,62.81,62.36,63.22,,n/a,fast,O(1) LRU hash lookup,yes,excellent,excellent,excellent,none,benchmarked,
+resilience,14,chance_promote,ATS,resilience_cache_promote,10pct,7.82,7.79,7.85,,n/a,fast,O(1) RNG,no,excellent,excellent,excellent,none,benchmarked,
+resilience,14,chance_promote,ATS,resilience_cache_promote,50pct,11.87,11.48,12.25,,n/a,fast,O(1) RNG,no,excellent,excellent,excellent,none,benchmarked,
+resilience,14,chance_promote,ATS,resilience_cache_promote,90pct,9.52,9.21,9.91,,n/a,fast,O(1) RNG,no,excellent,excellent,excellent,none,benchmarked,
+resilience,14,circuit_breaker,Traefik,,,,,,,,,,planned,O(1) state machine,,,,,,not_implemented,3-state circuit breaker
+resilience,14,backoff,Traefik,,,,,,,,,,planned,O(1) exponential,,,,,,not_implemented,bounded exponential backoff
+resilience,14,passive_health,Traefik,,,,,,,,,,planned,O(1) sliding window,,,,,,not_implemented,passive health checker
+resilience,14,retry_budget,Envoy,,,,,,,,,,planned,O(1) percentage,,,,,,not_implemented,dynamic retry budget
+resilience,14,stampede_lock,Pingora,,,,,,,,,,planned,O(1) permit/wait,,,,,,not_implemented,cache thundering-herd prevention
+resilience,14,failfast,linkerd2-proxy,,,,,,,,,,planned,O(1) gate,,,,,,not_implemented,readiness-based circuit breaker
+fix_protocol,15,fix_parse,HAProxy,,,,,,,,,,planned,O(n) tag-value,,,,,,not_implemented,FIX protocol parser
+mqtt,16,mqtt_parse,HAProxy,,,,,,,,,,planned,O(n) CONNECT parse,,,,,,not_implemented,MQTT v3.1/3.1.1/5.0
+jwt_pattern,17,jwt_tokenize,HAProxy,,,,,,,,,,planned,O(n) dot-split,,,,,,not_implemented,JWT tokenize + JWS verify
+jwt_pattern,17,pattern_matcher,HAProxy,,,,,,,,,,planned,O(patterns) multi-type,,,,,,not_implemented,14-type pattern matcher
+jwt_pattern,17,matcher_tree,Traefik,,,,,,,,,,planned,O(depth) boolean eval,,,,,,not_implemented,binary matcher tree
+jwt_pattern,17,ban_evaluator,Varnish,,,,,,,,,,planned,O(predicates) conjunction,,,,,,not_implemented,predicate-based cache invalidation
+fingerprint,18,Ja4Fingerprint::compute,ATS,fingerprint_ja4,minimal (3c/5e),3724.00,3654.40,3794.00,,n/a,moderate,O(c+e) sort + hash,yes,good,good,moderate,medium,benchmarked,JA4 TLS fingerprint
+fingerprint,18,Ja4Fingerprint::compute,ATS,fingerprint_ja4,typical (15c/20e),6514.10,6449.50,6586.80,,n/a,moderate,O(c+e) sort + hash,yes,good,good,moderate,medium,benchmarked,
+fingerprint,18,Ja4Fingerprint::compute,ATS,fingerprint_ja4,large (40c/50e),12137.00,12005.00,12281.00,,n/a,slow,O(c+e) sort + hash,yes,moderate,moderate,poor,high,benchmarked,12µs — optimize for MAANG TLS inspection
+fingerprint,18,os_fingerprint,HAProxy,,,,,,,,,,planned,O(n) TCP/IP passive,,,,,,not_implemented,TCP/IP passive OS fingerprinting
+,,,,,,,,,,,,,,,,,,,,
+,,,OPTIMIZED VARIANTS,,,,,,,,,,,,,,,,,,
+checksum,2,crc32_slice4 (optimized),lynxx,opt_crc32_vs,16B,4.90,4.85,4.94,3.04,GiB/s,fast,O(n/4) slicing-by-4,yes,excellent,excellent,excellent,none,optimized,2.9× faster than ngx_crc32_long_table
+checksum,2,crc32_slice4 (optimized),lynxx,opt_crc32_vs,64B,39.17,38.85,39.59,1.52,GiB/s,fast,O(n/4) slicing-by-4,yes,excellent,excellent,excellent,none,optimized,3.1× faster
+checksum,2,crc32_slice4 (optimized),lynxx,opt_crc32_vs,256B,257.42,255.07,259.96,0.93,GiB/s,fast,O(n/4) slicing-by-4,yes,excellent,excellent,good,none,optimized,3.2× faster
+checksum,2,crc32_slice4 (optimized),lynxx,opt_crc32_vs,1024B,1080.00,1078.40,1081.20,0.88,GiB/s,fast,O(n/4) slicing-by-4,yes,excellent,excellent,good,none,optimized,2.6× faster
+checksum,2,crc32_slice4 (optimized),lynxx,opt_crc32_vs,4096B,3348.00,3300.50,3399.30,1.14,GiB/s,fast,O(n/4) slicing-by-4,yes,excellent,excellent,good,none,optimized,3.9× faster than table
+encoding,3,decode_base64_fast (optimized),lynxx,opt_base64_decode_vs,16B,6.47,6.44,6.50,2.30,GiB/s,fast,O(n) single-pass fused,yes,excellent,excellent,excellent,none,optimized,2.4× faster than ngx_decode_base64
+encoding,3,decode_base64_fast (optimized),lynxx,opt_base64_decode_vs,64B,24.25,23.83,24.76,2.46,GiB/s,fast,O(n) single-pass fused,yes,excellent,excellent,excellent,none,optimized,2.5× faster
+encoding,3,decode_base64_fast (optimized),lynxx,opt_base64_decode_vs,256B,92.56,91.16,94.82,2.57,GiB/s,fast,O(n) single-pass fused,yes,excellent,excellent,excellent,none,optimized,2.7× faster
+encoding,3,decode_base64_fast (optimized),lynxx,opt_base64_decode_vs,1024B,395.73,357.35,461.01,2.41,GiB/s,fast,O(n) single-pass fused,yes,excellent,excellent,excellent,none,optimized,3.0× faster
+encoding,3,decode_base64_fast (optimized),lynxx,opt_base64_decode_vs,4096B,1345.00,1334.60,1356.90,2.84,GiB/s,fast,O(n) single-pass fused,yes,excellent,excellent,good,none,optimized,2.8× faster — replaces 2-pass decode
+encoding,3,unescape_uri_fast (optimized),lynxx,opt_unescape_uri_vs,64B_5pct,18.31,17.95,18.68,3.26,GiB/s,fast,O(n) SWAR + bulk memcpy,yes,excellent,excellent,excellent,none,optimized,1.9× faster than ngx_unescape_uri
+encoding,3,unescape_uri_fast (optimized),lynxx,opt_unescape_uri_vs,256B_5pct,34.28,33.83,34.81,6.95,GiB/s,fast,O(n) SWAR + bulk memcpy,yes,excellent,excellent,excellent,none,optimized,3.8× faster
+encoding,3,unescape_uri_fast (optimized),lynxx,opt_unescape_uri_vs,1024B_5pct,184.00,180.91,187.67,5.18,GiB/s,fast,O(n) SWAR + bulk memcpy,yes,excellent,excellent,excellent,none,optimized,3.1× faster
+encoding,3,unescape_uri_fast (optimized),lynxx,opt_unescape_uri_vs,4096B_5pct,630.09,626.38,634.40,6.05,GiB/s,fast,O(n) SWAR + bulk memcpy,yes,excellent,excellent,excellent,none,optimized,3.3× faster
+encoding,3,unescape_uri_fast (optimized),lynxx,opt_unescape_uri_vs,4096B_30pct,1857.00,1840.60,1874.90,2.05,GiB/s,fast,O(n) SWAR + bulk memcpy,yes,excellent,excellent,good,none,optimized,1.8× faster on mixed
+encoding,3,escape_uri_fast (optimized),lynxx,opt_escape_uri_vs,16B_safe,7.09,6.90,7.34,2.10,GiB/s,fast,O(n) SWAR bulk copy,yes,excellent,excellent,excellent,none,optimized,2.3× faster for safe paths
+encoding,3,escape_uri_fast (optimized),lynxx,opt_escape_uri_vs,256B_safe,95.76,94.49,97.30,2.49,GiB/s,fast,O(n) SWAR bulk copy,yes,excellent,excellent,excellent,none,optimized,1.2× faster
+encoding,3,escape_uri_fast (optimized),lynxx,opt_escape_uri_vs,4096B_mixed,3801.00,3648.50,3980.40,1.00,GiB/s,fast,O(n) SWAR hybrid,yes,excellent,excellent,good,none,optimized,3.5× faster on mixed at 4K
+fingerprint,18,ja4_compute_fast (optimized),lynxx,opt_ja4_vs,minimal (3c/5e),2041.00,1815.40,2319.90,,n/a,fast,O(c+e) zero-alloc stack,yes,excellent,excellent,good,none,optimized,2.0× faster than Ja4Fingerprint::compute
+fingerprint,18,ja4_compute_fast (optimized),lynxx,opt_ja4_vs,typical (15c/20e),3336.00,3206.10,3508.70,,n/a,fast,O(c+e) zero-alloc stack,yes,excellent,excellent,good,none,optimized,3.6× faster
+fingerprint,18,ja4_compute_fast (optimized),lynxx,opt_ja4_vs,large (40c/50e),6009.00,5853.30,6211.40,,n/a,fast,O(c+e) zero-alloc stack,yes,excellent,excellent,moderate,low,optimized,3.5× faster — stack arrays + direct hex format
