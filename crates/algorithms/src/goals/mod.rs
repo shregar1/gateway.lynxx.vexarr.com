@@ -4,3 +4,4 @@ pub mod hash;
 pub mod fingerprint;
 pub mod resilience;
 pub mod optimized;
+pub mod encode;

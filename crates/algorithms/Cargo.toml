@@ -221,6 +221,26 @@ name = "hashing_snowflake"
 path = "benches/hashing/snowflake.rs"
 harness = false
 
+[[bench]]
+name = "hashing_wt6"
+path = "benches/hashing/wt6.rs"
+harness = false
+
+[[bench]]
+name = "hashing_sdbm"
+path = "benches/hashing/sdbm.rs"
+harness = false
+
+[[bench]]
+name = "hashing_crc32c"
+path = "benches/hashing/crc32c.rs"
+harness = false
+
+[[bench]]
+name = "hashing_xxhash"
+path = "benches/hashing/xxhash.rs"
+harness = false
+
 # ── goals: fingerprint ──
 [[bench]]
 name = "fingerprint_ja4"
@@ -279,6 +299,170 @@ harness = false
 [[bench]]
 name = "opt_huff_decode_vs"
 path = "benches/optimized/huff_decode_vs.rs"
+harness = false
+
+# ── goals: encoding (9) ──
+[[bench]]
+name = "encoding_escape_html"
+path = "benches/encoding/escape_html.rs"
+harness = false
+
+[[bench]]
+name = "encoding_escape_json"
+path = "benches/encoding/escape_json.rs"
+harness = false
+
+[[bench]]
+name = "encoding_slz_compress"
+path = "benches/encoding/slz_compress.rs"
+harness = false
+
+[[bench]]
+name = "encoding_uri_normalize"
+path = "benches/encoding/uri_normalize.rs"
+harness = false
+
+[[bench]]
+name = "encoding_accept_encoding"
+path = "benches/encoding/accept_encoding.rs"
+harness = false
+
+[[bench]]
+name = "encoding_etag_encode"
+path = "benches/encoding/etag_encode.rs"
+harness = false
+
+[[bench]]
+name = "encoding_path_trim"
+path = "benches/encoding/path_trim.rs"
+harness = false
+
+[[bench]]
+name = "encoding_golomb_set"
+path = "benches/encoding/golomb_set.rs"
+harness = false
+
+[[bench]]
+name = "encoding_vary_encode"
+path = "benches/encoding/vary_encode.rs"
+harness = false
+
+# ── goals: upstream_pick (12) ──
+[[bench]]
+name = "upstream_fwlc"
+path = "benches/upstream_pick/fwlc.rs"
+harness = false
+
+[[bench]]
+name = "upstream_fwrr"
+path = "benches/upstream_pick/fwrr.rs"
+harness = false
+
+[[bench]]
+name = "upstream_fas"
+path = "benches/upstream_pick/fas.rs"
+harness = false
+
+[[bench]]
+name = "upstream_chash_bounded"
+path = "benches/upstream_pick/chash_bounded.rs"
+harness = false
+
+[[bench]]
+name = "upstream_maglev"
+path = "benches/upstream_pick/maglev.rs"
+harness = false
+
+[[bench]]
+name = "upstream_edf"
+path = "benches/upstream_pick/edf.rs"
+harness = false
+
+[[bench]]
+name = "upstream_wrsq"
+path = "benches/upstream_pick/wrsq.rs"
+harness = false
+
+[[bench]]
+name = "upstream_slow_start"
+path = "benches/upstream_pick/slow_start.rs"
+harness = false
+
+[[bench]]
+name = "upstream_locality_lb"
+path = "benches/upstream_pick/locality_lb.rs"
+harness = false
+
+[[bench]]
+name = "upstream_priority_lb"
+path = "benches/upstream_pick/priority_lb.rs"
+harness = false
+
+[[bench]]
+name = "upstream_peak_ewma"
+path = "benches/upstream_pick/peak_ewma.rs"
+harness = false
+
+[[bench]]
+name = "upstream_completion_tracker"
+path = "benches/upstream_pick/completion_tracker.rs"
+harness = false
+
+# ── goals: http_codec (new) ──
+[[bench]]
+name = "http_codec_ws_mask"
+path = "benches/http_codec/ws_mask.rs"
+harness = false
+
+[[bench]]
+name = "http_codec_vary_key"
+path = "benches/http_codec/vary_key.rs"
+harness = false
+
+[[bench]]
+name = "http_codec_replay_body"
+path = "benches/http_codec/replay_body.rs"
+harness = false
+
+[[bench]]
+name = "http_codec_ttl_calc"
+path = "benches/http_codec/ttl_calc.rs"
+harness = false
+
+[[bench]]
+name = "http_codec_h2_scheduler"
+path = "benches/http_codec/h2_scheduler.rs"
+harness = false
+
+[[bench]]
+name = "http_codec_ext_priority"
+path = "benches/http_codec/ext_priority.rs"
+harness = false
+
+# ── goals: networking (5) ──
+[[bench]]
+name = "networking_sni_check"
+path = "benches/networking/sni_check.rs"
+harness = false
+
+[[bench]]
+name = "networking_cname_flatten"
+path = "benches/networking/cname_flatten.rs"
+harness = false
+
+[[bench]]
+name = "networking_domain_dedup"
+path = "benches/networking/domain_dedup.rs"
+harness = false
+
+[[bench]]
+name = "networking_cert_selection"
+path = "benches/networking/cert_selection.rs"
+harness = false
+
+[[bench]]
+name = "networking_sni_index"
+path = "benches/networking/sni_index.rs"
 harness = false
 
 # NOTE: [profile.bench] is at the WORKSPACE ROOT Cargo.toml
