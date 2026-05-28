@@ -2,7 +2,7 @@
 //! Group: inet | Algo: inet_addr_v4
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_inet_addr;
+use lynxx_algo::ngx_inet_addr;
 
 const ADDRS: &[(&str, &[u8])] = &[
     ("loopback", b"127.0.0.1"),

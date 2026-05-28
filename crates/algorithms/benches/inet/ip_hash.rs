@@ -2,7 +2,7 @@
 //! Group: inet | Algo: ip_hash
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_ip_hash_select;
+use lynxx_algo::ngx_ip_hash_select;
 
 const CLUSTER_SIZES: &[usize] = &[3, 10, 100, 500];
 

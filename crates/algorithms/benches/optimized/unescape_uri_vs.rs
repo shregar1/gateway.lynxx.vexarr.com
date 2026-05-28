@@ -2,7 +2,7 @@
 //! Compares: ngx_unescape_uri vs unescape_uri_fast
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::unescape_uri::ngx_unescape_uri;
+use lynxx_algo::unescape_uri::ngx_unescape_uri;
 use algorithms::goals::optimized::unescape_uri::unescape_uri_fast;
 
 fn make_input(size: usize, pct_encoded_ratio: f64) -> Vec<u8> {

@@ -2,7 +2,7 @@
 //! Group: codec | Algo: chunked_parse_line
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_http_chunked_parse_line;
+use lynxx_algo::ngx_http_chunked_parse_line;
 
 const CHUNK_SIZES: &[u64] = &[64, 256, 4096, 65536];
 

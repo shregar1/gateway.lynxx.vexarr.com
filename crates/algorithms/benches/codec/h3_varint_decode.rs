@@ -2,7 +2,7 @@
 //! Group: codec | Algo: h3_varint_decode
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::{ngx_http_v3_encode_varlen_int, ngx_http_v3_decode_varlen_int};
+use lynxx_algo::{ngx_http_v3_encode_varlen_int, ngx_http_v3_decode_varlen_int};
 
 const VALUES: &[(&str, u64)] = &[
     ("1byte", 37),

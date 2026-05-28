@@ -2,7 +2,7 @@
 //! Group: string | Algo: strnstr
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_strnstr;
+use lynxx_algo::ngx_strnstr;
 
 const SIZES: &[usize] = &[64, 256, 1024, 4096];
 

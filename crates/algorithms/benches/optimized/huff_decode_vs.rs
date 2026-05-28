@@ -11,8 +11,8 @@
 //! since modern prefetchers handle the 512KB byte table well.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::huff_encode::ngx_http_huff_encode;
-use nginx_algo::huff_decode::{ngx_http_huff_decode, HUFF_DECODE_BYTE, HUFF_DECODE_FLAT};
+use lynxx_algo::huff_encode::ngx_http_huff_encode;
+use lynxx_algo::huff_decode::{ngx_http_huff_decode, HUFF_DECODE_BYTE, HUFF_DECODE_FLAT};
 use algorithms::goals::optimized::huff_decode::huff_decode_fast;
 
 fn make_encoded(plain: &[u8]) -> Vec<u8> {

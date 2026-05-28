@@ -2,7 +2,7 @@
 //! Group: inet | Algo: limit_req_allows
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_limit_req_allows;
+use lynxx_algo::ngx_limit_req_allows;
 
 const SCENARIOS: &[(&str, i32, u32)] = &[
     ("under_burst", 50, 100),

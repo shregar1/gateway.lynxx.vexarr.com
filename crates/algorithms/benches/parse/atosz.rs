@@ -2,7 +2,7 @@
 //! Group: parse | Algo: atosz
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_atosz;
+use lynxx_algo::ngx_atosz;
 
 const INPUTS: &[(&str, &[u8])] = &[
     ("small", b"42"),

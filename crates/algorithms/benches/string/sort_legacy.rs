@@ -2,7 +2,7 @@
 //! Group: string | Algo: sort_legacy
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_sort_legacy;
+use lynxx_algo::ngx_sort_legacy;
 
 const SIZES: &[usize] = &[10, 100, 1000];
 

@@ -2,7 +2,7 @@
 //! Group: encode | Algo: unescape_uri
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::{ngx_escape_uri, ngx_unescape_uri};
+use lynxx_algo::{ngx_escape_uri, ngx_unescape_uri};
 
 const SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
 

@@ -10,6 +10,7 @@ pub struct FreqCounter {
     prev_count: u32,
     curr_count: u32,
     curr_start: u64,
+    initialized: bool,
 }
 
 impl FreqCounter {
@@ -19,6 +20,7 @@ impl FreqCounter {
             prev_count: 0,
             curr_count: 0,
             curr_start: 0,
+            initialized: false,
         }
     }
 
@@ -66,8 +68,9 @@ impl FreqCounter {
     }
 
     fn maybe_rotate(&mut self, now_ms: u64) {
-        if self.curr_start == 0 {
+        if !self.initialized {
             self.curr_start = now_ms;
+            self.initialized = true;
             return;
         }
 

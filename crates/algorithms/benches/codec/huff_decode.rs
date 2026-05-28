@@ -2,7 +2,7 @@
 //! Group: codec | Algo: huff_decode
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::{ngx_http_huff_encode, ngx_http_huff_decode};
+use lynxx_algo::{ngx_http_huff_encode, ngx_http_huff_decode};
 
 const HEADERS: &[(&str, &[u8])] = &[
     ("short", b"content-type"),

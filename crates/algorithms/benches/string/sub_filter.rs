@@ -2,7 +2,7 @@
 //! Group: string | Algo: sub_filter
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::{SubMatch, ngx_http_sub_init_tables, ngx_http_sub_find};
+use lynxx_algo::{SubMatch, ngx_http_sub_init_tables, ngx_http_sub_find};
 
 const SIZES: &[usize] = &[256, 1024, 4096];
 

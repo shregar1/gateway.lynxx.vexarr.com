@@ -2,7 +2,7 @@
 //! Compares: ngx_crc32_long_table, ngx_crc32_short_nibble vs crc32_slice4, crc32_slice8
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::crc32::{ngx_crc32_long_table, ngx_crc32_short_nibble};
+use lynxx_algo::crc32::{ngx_crc32_long_table, ngx_crc32_short_nibble};
 use algorithms::goals::optimized::crc32::{crc32_slice4, crc32_slice8};
 
 fn bench(c: &mut Criterion) {

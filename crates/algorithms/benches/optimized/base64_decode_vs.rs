@@ -2,7 +2,7 @@
 //! Compares: ngx_decode_base64 vs decode_base64_fast
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::base64::ngx_decode_base64;
+use lynxx_algo::base64::ngx_decode_base64;
 use algorithms::goals::optimized::base64_decode::decode_base64_fast;
 
 fn make_base64_input(decoded_size: usize) -> Vec<u8> {

@@ -2,7 +2,7 @@
 //! Group: codec | Algo: chunked_header
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_http_chunked_header;
+use lynxx_algo::ngx_http_chunked_header;
 
 const CHUNK_SIZES: &[u64] = &[64, 256, 4096, 65536];
 

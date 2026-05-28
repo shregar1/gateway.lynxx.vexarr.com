@@ -2,7 +2,7 @@
 //! Group: hash | Algo: crc32_long_table
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_crc32_long_table;
+use lynxx_algo::ngx_crc32_long_table;
 
 const SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
 

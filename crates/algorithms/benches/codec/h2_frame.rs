@@ -2,7 +2,7 @@
 //! Group: codec | Algo: h2_frame
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use nginx_algo::{ngx_http_v2_parse_frame_header, HttpV2FrameHeader};
+use lynxx_algo::{ngx_http_v2_parse_frame_header, HttpV2FrameHeader};
 
 fn bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("codec/h2_frame");

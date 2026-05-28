@@ -2,7 +2,7 @@
 //! Group: encode | Algo: hextoi
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_hextoi;
+use lynxx_algo::ngx_hextoi;
 
 const INPUTS: &[(&str, &[u8])] = &[
     ("small", b"FF"),

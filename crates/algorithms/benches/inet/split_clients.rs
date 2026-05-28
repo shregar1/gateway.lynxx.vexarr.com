@@ -2,7 +2,7 @@
 //! Group: inet | Algo: split_clients
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_split_clients_pick;
+use lynxx_algo::ngx_split_clients_pick;
 
 const BUCKET_COUNTS: &[usize] = &[2, 5, 20, 100];
 

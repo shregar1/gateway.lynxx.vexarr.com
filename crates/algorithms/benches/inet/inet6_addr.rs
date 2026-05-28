@@ -2,7 +2,7 @@
 //! Group: inet | Algo: inet6_addr
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_inet6_addr;
+use lynxx_algo::ngx_inet6_addr;
 
 const ADDRS: &[(&str, &[u8])] = &[
     ("loopback", b"::1"),

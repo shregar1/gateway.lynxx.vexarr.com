@@ -4,11 +4,17 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+[features]
+default = ["tier-starter"]
+tier-starter = []
+tier-growth = ["tier-starter"]
+tier-pro = ["tier-growth"]
+
 [dependencies]
+lynxx-algo = { path = "/Users/shreyansh/Downloads/nginx-master/nginx-algo" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
-nginx-algo = { path = "/Users/shreyansh/Downloads/nginx-master/nginx-algo" }
 
 [lib]
 name = "algorithms"
@@ -463,6 +469,130 @@ harness = false
 [[bench]]
 name = "networking_sni_index"
 path = "benches/networking/sni_index.rs"
+harness = false
+
+# ── goals: rate_limit (new) ──
+[[bench]]
+name = "rate_limit_admission_control"
+path = "benches/rate_limit/admission_control.rs"
+harness = false
+
+[[bench]]
+name = "rate_limit_atomic_token_bucket"
+path = "benches/rate_limit/atomic_token_bucket.rs"
+harness = false
+
+[[bench]]
+name = "rate_limit_freq_ctr"
+path = "benches/rate_limit/freq_ctr.rs"
+harness = false
+
+[[bench]]
+name = "rate_limit_gradient_controller"
+path = "benches/rate_limit/gradient_controller.rs"
+harness = false
+
+# ── goals: resilience (new) ──
+[[bench]]
+name = "resilience_backoff"
+path = "benches/resilience/backoff.rs"
+harness = false
+
+[[bench]]
+name = "resilience_circuit_breaker"
+path = "benches/resilience/circuit_breaker.rs"
+harness = false
+
+[[bench]]
+name = "resilience_failfast"
+path = "benches/resilience/failfast.rs"
+harness = false
+
+[[bench]]
+name = "resilience_passive_health"
+path = "benches/resilience/passive_health.rs"
+harness = false
+
+[[bench]]
+name = "resilience_retry_budget"
+path = "benches/resilience/retry_budget.rs"
+harness = false
+
+[[bench]]
+name = "resilience_stampede_lock"
+path = "benches/resilience/stampede_lock.rs"
+harness = false
+
+# ── goals: text ──
+[[bench]]
+name = "text_utf8_decode"
+path = "benches/text/utf8_decode.rs"
+harness = false
+
+# ── goals: tree ──
+[[bench]]
+name = "tree_radix_tree"
+path = "benches/tree/radix_tree.rs"
+harness = false
+
+[[bench]]
+name = "tree_rbtree"
+path = "benches/tree/rbtree.rs"
+harness = false
+
+[[bench]]
+name = "tree_str_rbtree"
+path = "benches/tree/str_rbtree.rs"
+harness = false
+
+[[bench]]
+name = "tree_timer_rbtree"
+path = "benches/tree/timer_rbtree.rs"
+harness = false
+
+# ── goals: pattern ──
+[[bench]]
+name = "pattern_jwt_tokenize"
+path = "benches/pattern/jwt_tokenize.rs"
+harness = false
+
+[[bench]]
+name = "pattern_matcher_tree"
+path = "benches/pattern/matcher_tree.rs"
+harness = false
+
+[[bench]]
+name = "pattern_pattern_matcher"
+path = "benches/pattern/pattern_matcher.rs"
+harness = false
+
+# ── goals: congestion ──
+[[bench]]
+name = "congestion_bbr"
+path = "benches/congestion/bbr.rs"
+harness = false
+
+[[bench]]
+name = "congestion_cubic"
+path = "benches/congestion/cubic.rs"
+harness = false
+
+# ── goals: mqtt ──
+[[bench]]
+name = "mqtt_mqtt_parse"
+path = "benches/mqtt/mqtt_parse.rs"
+harness = false
+
+# ── goals: fix_protocol ──
+[[bench]]
+name = "fix_protocol_fix_parse"
+path = "benches/fix_protocol/fix_parse.rs"
+harness = false
+
+# ── goals: fingerprint (os) ──
+[[bench]]
+name = "fingerprint_os_fingerprint"
+path = "benches/fingerprint/os_fingerprint.rs"
 harness = false
 
 # NOTE: [profile.bench] is at the WORKSPACE ROOT Cargo.toml

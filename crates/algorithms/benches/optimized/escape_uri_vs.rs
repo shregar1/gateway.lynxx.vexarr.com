@@ -2,7 +2,7 @@
 //! Compares: ngx_escape_uri vs escape_uri_fast
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::escape_uri::ngx_escape_uri;
+use lynxx_algo::escape_uri::ngx_escape_uri;
 use algorithms::goals::optimized::escape_uri::escape_uri_fast;
 
 fn make_input_safe(size: usize) -> Vec<u8> {

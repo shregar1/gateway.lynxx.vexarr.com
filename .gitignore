@@ -41,3 +41,6 @@ node.dashboard.lynxx.dev/dist/
 
 # Editor / tool backups
 *.bak
+
+# Local bench results (archived externally, see ~/Documents/vexarr/)
+bench-results/

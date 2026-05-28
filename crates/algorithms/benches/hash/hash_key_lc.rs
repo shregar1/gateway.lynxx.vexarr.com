@@ -2,7 +2,7 @@
 //! Group: hash | Algo: hash_key_lc
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_hash_key_lc;
+use lynxx_algo::ngx_hash_key_lc;
 
 const SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
 

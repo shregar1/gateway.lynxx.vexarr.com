@@ -2,7 +2,7 @@
 //! Group: parse | Algo: parse_size
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_parse_size;
+use lynxx_algo::ngx_parse_size;
 
 const INPUTS: &[(&str, &[u8])] = &[
     ("plain", b"4096"),

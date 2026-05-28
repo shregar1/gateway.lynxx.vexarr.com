@@ -2,7 +2,7 @@
 //! Group: inet | Algo: limit_req_excess
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_limit_req_excess;
+use lynxx_algo::ngx_limit_req_excess;
 
 const RATES: &[u32] = &[100, 1000, 10000];
 

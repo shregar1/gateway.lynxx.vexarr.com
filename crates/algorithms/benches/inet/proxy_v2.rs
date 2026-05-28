@@ -2,7 +2,7 @@
 //! Group: inet | Algo: proxy_v2
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use nginx_algo::{ngx_proxy_protocol_v2_parse_inet, ProxyV2Inet};
+use lynxx_algo::{ngx_proxy_protocol_v2_parse_inet, ProxyV2Inet};
 
 fn bench(c: &mut Criterion) {
     let mut g = c.benchmark_group("inet/proxy_v2");

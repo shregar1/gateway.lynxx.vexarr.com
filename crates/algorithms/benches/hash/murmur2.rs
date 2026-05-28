@@ -2,7 +2,7 @@
 //! Group: hash | Algo: murmur2
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_murmur_hash2;
+use lynxx_algo::ngx_murmur_hash2;
 
 const SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
 

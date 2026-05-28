@@ -2,7 +2,7 @@
 //! Group: parse | Algo: parse_time
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nginx_algo::ngx_parse_time;
+use lynxx_algo::ngx_parse_time;
 
 const INPUTS: &[(&str, &[u8], bool)] = &[
     ("seconds", b"30s", true),

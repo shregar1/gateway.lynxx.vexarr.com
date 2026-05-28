@@ -2,7 +2,7 @@
 //! Group: parse | Algo: conf_scan
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_conf_scan_tokens;
+use lynxx_algo::ngx_conf_scan_tokens;
 
 const INPUTS: &[(&str, &[u8])] = &[
     ("simple", b"server 127.0.0.1:8080"),

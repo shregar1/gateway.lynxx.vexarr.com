@@ -2,7 +2,7 @@
 //! Group: encode | Algo: base64_decode
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::{ngx_encode_base64, ngx_decode_base64};
+use lynxx_algo::{ngx_encode_base64, ngx_decode_base64};
 
 const SIZES: &[usize] = &[16, 64, 256, 1024, 4096];
 

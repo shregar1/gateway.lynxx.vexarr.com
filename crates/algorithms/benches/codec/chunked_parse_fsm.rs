@@ -2,7 +2,7 @@
 //! Group: codec | Algo: chunked_parse_fsm
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use nginx_algo::ngx_http_chunked_parse_stream_fsm;
+use lynxx_algo::ngx_http_chunked_parse_stream_fsm;
 
 const CHUNK_SIZES: &[u64] = &[64, 256, 4096, 65536];
 
