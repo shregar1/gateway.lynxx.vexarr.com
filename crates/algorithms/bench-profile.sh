@@ -7,7 +7,14 @@
 #   ./bench-profile.sh hash_key          # run a single bench target
 #   ./bench-profile.sh --flame hash_key  # bench + flamegraph for one target
 #   ./bench-profile.sh optimized         # run all optimized comparison benchmarks
+#   ./bench-profile.sh papers            # DAGOR, CoDel, P2C
+#   ./bench-profile.sh ats               # ATS-ported algorithm benches
+#   ./bench-profile.sh upstream_pick     # P2C + other upstream_pick targets
+#   ./bench-profile.sh structures        # lynxx_structures crate benches
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 FLAME=false
 if [[ "${1:-}" == "--flame" ]]; then
@@ -43,9 +50,24 @@ BENCH_TARGETS=(
     fingerprint_ja4
     # goals: http_codec (1)
     http_codec_range_slicer
-    # goals: rate_limit (2)
+    # goals: rate_limit (4)
     rate_limit_histogram rate_limit_ip_reputation
+    rate_limit_dagor rate_limit_codel
+    # goals: upstream_pick — papers (1)
+    upstream_p2c
     # goals: resilience (1)
+    resilience_cache_promote
+)
+
+PAPER_TARGETS=(
+    rate_limit_dagor rate_limit_codel upstream_p2c
+)
+
+ATS_TARGETS=(
+    hashing_siphash hashing_snowflake
+    fingerprint_ja4
+    http_codec_range_slicer
+    rate_limit_histogram rate_limit_ip_reputation
     resilience_cache_promote
 )
 
@@ -79,11 +101,21 @@ elif [[ "$FILTER" == "optimized" || "$FILTER" == "opt" ]]; then
     for t in "${OPT_TARGETS[@]}"; do
         run_bench "$t"
     done
+elif [[ "$FILTER" == "papers" ]]; then
+    for t in "${PAPER_TARGETS[@]}"; do
+        run_bench "$t"
+    done
+elif [[ "$FILTER" == "ats" ]]; then
+    for t in "${ATS_TARGETS[@]}"; do
+        run_bench "$t"
+    done
+elif [[ "$FILTER" == "structures" ]]; then
+    exec "$REPO_ROOT/crates/lynxx_structures/bench-profile.sh" "${@:2}"
 elif [[ "$FILTER" == hash || "$FILTER" == encode || "$FILTER" == codec || \
         "$FILTER" == parse || "$FILTER" == string || "$FILTER" == inet || \
         "$FILTER" == hashing || "$FILTER" == fingerprint || \
         "$FILTER" == rate_limit || "$FILTER" == resilience || \
-        "$FILTER" == http_codec ]]; then
+        "$FILTER" == http_codec || "$FILTER" == upstream_pick ]]; then
     for t in "${BENCH_TARGETS[@]}"; do
         if [[ "$t" == "${FILTER}_"* || "$t" == "${FILTER}" ]]; then
             run_bench "$t"

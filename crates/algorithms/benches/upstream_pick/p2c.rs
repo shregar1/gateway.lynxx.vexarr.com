@@ -5,7 +5,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use algorithms::goals::upstream_pick::p2c::P2cBalancer;
 
 fn bench(c: &mut Criterion) {
-    let mut g = c.benchmark_group("upstream_pick/p2c");
+    let mut g = c.benchmark_group("upstream_p2c");
 
     for n in [4usize, 16, 64] {
         g.bench_with_input(BenchmarkId::new("pick", n), &n, |b, &n| {

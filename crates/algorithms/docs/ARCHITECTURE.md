@@ -43,9 +43,11 @@ crates/
 
 3. **`lynxx_structures/`** — Caches, locks, buffers, heaps. No backbone layer; gateway or `algorithms` import types from `lynxx_structures::`.
 
-4. **`benches/`** — One criterion bench per algorithm, named `{domain}_{algo}` (e.g. `rate_limit_dagor`, `upstream_p2c`).
+4. **`benches/`** — One criterion bench per algorithm, named `{domain}_{algo}` (e.g. `rate_limit_dagor`, `upstream_p2c`). Run via `crates/algorithms/bench-profile.sh` (`papers`, `ats`, `optimized` filters).
 
 5. **`fuzz/`** — Separate workspace package `algorithms-fuzz` for parser/hash fuzzing.
+
+6. **`lynxx_structures/benches/`** — Criterion benches for ATS/paper caches and locks (`structures_*` targets). Run via `crates/lynxx_structures/bench-profile.sh` or `bench-profile.sh structures` from algorithms.
 
 ## Import patterns
 

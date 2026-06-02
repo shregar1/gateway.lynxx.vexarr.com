@@ -6,7 +6,7 @@ use algorithms::goals::rate_limit::codel::CoDel;
 use std::time::{Duration, Instant};
 
 fn bench(c: &mut Criterion) {
-    let mut g = c.benchmark_group("rate_limit/codel");
+    let mut g = c.benchmark_group("rate_limit_codel");
 
     g.bench_function("should_drop_accept", |b| {
         let mut codel = CoDel::new(Duration::from_millis(5), Duration::from_millis(100));

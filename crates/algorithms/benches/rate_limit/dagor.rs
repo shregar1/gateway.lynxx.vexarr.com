@@ -6,7 +6,7 @@ use algorithms::goals::rate_limit::dagor::{DagorController, RequestPriority};
 use std::time::Duration;
 
 fn bench(c: &mut Criterion) {
-    let mut g = c.benchmark_group("rate_limit/dagor");
+    let mut g = c.benchmark_group("rate_limit_dagor");
 
     g.bench_function("should_admit", |b| {
         let ctrl = DagorController::new(256, Duration::from_millis(5));

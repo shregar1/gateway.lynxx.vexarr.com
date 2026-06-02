@@ -7,4 +7,36 @@ publish = false
 [dependencies]
 
 [dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
+
+# ── ATS + paper structures (new) ──
+[[bench]]
+name = "structures_arc_cache"
+path = "benches/arc_cache.rs"
+harness = false
+
+[[bench]]
+name = "structures_wtinylfu"
+path = "benches/wtinylfu.rs"
+harness = false
+
+[[bench]]
+name = "structures_clfus_cache"
+path = "benches/clfus_cache.rs"
+harness = false
+
+[[bench]]
+name = "structures_bravo_lock"
+path = "benches/bravo_lock.rs"
+harness = false
+
+[[bench]]
+name = "structures_clock_cache"
+path = "benches/clock_cache.rs"
+harness = false
+
+[[bench]]
+name = "structures_write_buffer"
+path = "benches/write_buffer.rs"
+harness = false
