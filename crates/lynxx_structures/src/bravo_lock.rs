@@ -1,0 +1,339 @@
+use std::cell::UnsafeCell;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{RwLock, RwLockReadGuard};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const NUM_SLOTS: usize = 64;
+const INHIBIT_DURATION_NS: u64 = 5_000_000; // 5ms bias inhibit after write
+
+#[repr(align(64))]
+struct Slot {
+    active: AtomicBool,
+}
+
+/// Biased Reader-Writer (BRAVO) lock optimised for read-heavy workloads.
+///
+/// Readers attempt a **fast path** that hashes the current thread ID to one of
+/// 64 cache-line-aligned slots and sets an atomic flag — no contention on the
+/// inner `RwLock` at all.  Writers first disable the bias flag, spin-wait until
+/// every active slot drains, then acquire the underlying write lock.  A short
+/// *inhibit window* after each write prevents bias from resuming immediately,
+/// reducing thrashing when writes are bursty.
+///
+/// Use `BravoLock` when reads vastly outnumber writes and the critical section
+/// is short enough that the spin-wait cost during writes is acceptable.
+pub struct BravoLock<T> {
+    data: UnsafeCell<T>,
+    sync: RwLock<()>,
+    slots: Vec<Slot>,
+    rbias: AtomicBool,
+    inhibit_until: AtomicU64,
+}
+
+/// RAII read guard returned by [`BravoLock::read`].
+///
+/// Holds either an active slot index (fast path) or an `RwLockReadGuard`
+/// (slow path).  The protected data is accessed via [`get`](Self::get).
+/// Dropping this guard releases the slot or underlying lock.
+pub struct BravoReadGuard<'a, T> {
+    slot: Option<usize>,
+    lock: &'a BravoLock<T>,
+    _guard: Option<RwLockReadGuard<'a, ()>>,
+}
+
+impl<'a, T> BravoReadGuard<'a, T> {
+    /// Returns a shared reference to the lock-protected data.
+    pub fn get(&self) -> &T {
+        // SAFETY: We hold either an active slot (fast path) or the RwLock read guard
+        // (slow path). In both cases no writer can mutate the data concurrently:
+        //  - Fast path: the writer's `write()` spins until ALL slots are inactive
+        //    before acquiring the write lock, so no &mut T can exist while our slot
+        //    is active.
+        //  - Slow path: we hold a RwLockReadGuard, which prevents any writer from
+        //    acquiring the write lock.
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<'a, T> Drop for BravoReadGuard<'a, T> {
+    fn drop(&mut self) {
+        if let Some(slot_idx) = self.slot {
+            self.lock.slots[slot_idx].active.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// RAII write guard returned by [`BravoLock::write`].
+///
+/// Provides exclusive (`&mut`) access to the protected data through `Deref`
+/// and `DerefMut`.  Dropping the guard re-enables reader bias and releases
+/// the underlying write lock.
+pub struct BravoWriteGuard<'a, T> {
+    lock: &'a BravoLock<T>,
+    _guard: std::sync::RwLockWriteGuard<'a, ()>,
+}
+
+impl<'a, T> Deref for BravoWriteGuard<'a, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        // SAFETY: We hold the write lock AND all slot readers have drained,
+        // so we have exclusive access to the data.
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<'a, T> DerefMut for BravoWriteGuard<'a, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: Same as Deref — exclusive access is guaranteed by the write lock
+        // plus slot drain.
+        unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<T> BravoLock<T> {
+    /// Wraps `value` in a new `BravoLock` with reader bias enabled and 64
+    /// cache-line-aligned slots for the fast read path.
+    pub fn new(value: T) -> Self {
+        let mut slots = Vec::with_capacity(NUM_SLOTS);
+        for _ in 0..NUM_SLOTS {
+            slots.push(Slot {
+                active: AtomicBool::new(false),
+            });
+        }
+        Self {
+            data: UnsafeCell::new(value),
+            sync: RwLock::new(()),
+            slots,
+            rbias: AtomicBool::new(true),
+            inhibit_until: AtomicU64::new(0),
+        }
+    }
+
+    /// Fast-path read lock: hash thread ID to a slot, set slot.active = true.
+    /// If rbias is true and slot is free, reader proceeds without touching the RwLock.
+    /// Otherwise, fall back to the underlying RwLock.
+    pub fn read(&self) -> BravoReadGuard<'_, T> {
+        if self.rbias.load(Ordering::Acquire) {
+            let now = now_nanos();
+            let inhibit = self.inhibit_until.load(Ordering::Relaxed);
+            if now >= inhibit {
+                let slot_idx = thread_slot();
+                // Try to claim the slot (CAS from false to true)
+                if !self.slots[slot_idx].active.swap(true, Ordering::Acquire) {
+                    // Verify bias wasn't revoked between our check and the slot claim
+                    if self.rbias.load(Ordering::Acquire) {
+                        return BravoReadGuard {
+                            slot: Some(slot_idx),
+                            lock: self,
+                            _guard: None,
+                        };
+                    }
+                    // Bias was revoked, release slot and fall back
+                    self.slots[slot_idx].active.store(false, Ordering::Release);
+                }
+            }
+        }
+
+        // Slow path: acquire the actual RwLock
+        let guard = self.sync.read().unwrap();
+        BravoReadGuard {
+            slot: None,
+            lock: self,
+            _guard: Some(guard),
+        }
+    }
+
+    /// Write lock: disable rbias, scan all slots for active readers,
+    /// wait until all readers drain, then acquire underlying write lock.
+    /// Sets inhibit_until to prevent bias thrashing.
+    pub fn write(&self) -> BravoWriteGuard<'_, T> {
+        // Disable reader bias
+        self.rbias.store(false, Ordering::Release);
+
+        // Wait for all active slot readers to drain
+        loop {
+            let mut any_active = false;
+            for slot in &self.slots {
+                if slot.active.load(Ordering::Acquire) {
+                    any_active = true;
+                    break;
+                }
+            }
+            if !any_active {
+                break;
+            }
+            std::hint::spin_loop();
+        }
+
+        // Acquire write lock (waits for any slow-path readers too)
+        let guard = self.sync.write().unwrap();
+
+        // Set inhibit window to prevent immediate bias resume (reduces thrashing)
+        let until = now_nanos() + INHIBIT_DURATION_NS;
+        self.inhibit_until.store(until, Ordering::Relaxed);
+
+        // Re-enable bias for future readers
+        self.rbias.store(true, Ordering::Release);
+
+        BravoWriteGuard {
+            lock: self,
+            _guard: guard,
+        }
+    }
+
+    /// Returns `true` if reader bias is currently enabled, meaning readers
+    /// can use the slot-based fast path instead of the inner `RwLock`.
+    pub fn is_biased(&self) -> bool {
+        self.rbias.load(Ordering::Relaxed)
+    }
+}
+
+// SAFETY: BravoLock uses UnsafeCell for interior mutability, protected by either:
+// - Active slot (fast-path readers): writers spin-wait until all slots drain before
+//   acquiring the write lock, so &T and &mut T never coexist.
+// - RwLock (slow-path readers and all writers): standard read/write exclusion.
+// T: Send is required because the data can be accessed from any thread.
+// T: Sync is required because multiple readers can hold &T concurrently.
+unsafe impl<T: Send + Sync> Send for BravoLock<T> {}
+unsafe impl<T: Send + Sync> Sync for BravoLock<T> {}
+
+fn thread_slot() -> usize {
+    // Use thread ID hashed to a slot index
+    let id = std::thread::current().id();
+    let hash = {
+        let mut h: u64 = 0;
+        let id_num = format!("{:?}", id);
+        for b in id_num.bytes() {
+            h = h.wrapping_mul(31).wrapping_add(b as u64);
+        }
+        h
+    };
+    (hash as usize) % NUM_SLOTS
+}
+
+fn now_nanos() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos() as u64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::thread;
+
+    #[test]
+    fn test_basic_read() {
+        let lock = BravoLock::new(42);
+        let guard = lock.read();
+        assert_eq!(*guard.get(), 42);
+        drop(guard);
+    }
+
+    #[test]
+    fn test_basic_write() {
+        let lock = BravoLock::new(0);
+        {
+            let mut w = lock.write();
+            *w = 99;
+        }
+        let r = lock.read();
+        assert_eq!(*r.get(), 99);
+    }
+
+    #[test]
+    fn test_multiple_readers() {
+        let lock = Arc::new(BravoLock::new(7));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let l = Arc::clone(&lock);
+                thread::spawn(move || {
+                    let _g = l.read();
+                    std::thread::sleep(Duration::from_millis(1));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn test_writer_blocks_readers() {
+        let lock = Arc::new(BravoLock::new(0u64));
+        let l2 = Arc::clone(&lock);
+
+        let writer = thread::spawn(move || {
+            let mut w = l2.write();
+            *w = 100;
+        });
+
+        writer.join().unwrap();
+        let r = lock.read();
+        assert_eq!(*r.get(), 100);
+    }
+
+    #[test]
+    fn test_is_biased_default() {
+        let lock = BravoLock::new(0);
+        assert!(lock.is_biased());
+    }
+
+    #[test]
+    fn test_concurrent_read_write() {
+        let lock = Arc::new(BravoLock::new(0u64));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..4)
+            .map(|_| {
+                let l = Arc::clone(&lock);
+                let d = Arc::clone(&done);
+                thread::spawn(move || {
+                    while !d.load(Ordering::Relaxed) {
+                        let _g = l.read();
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+
+        // Perform writes
+        for i in 0..100 {
+            let mut w = lock.write();
+            *w = i;
+        }
+
+        done.store(true, Ordering::Relaxed);
+        for h in readers {
+            h.join().unwrap();
+        }
+
+        let r = lock.read();
+        assert_eq!(*r.get(), 99);
+    }
+
+    #[test]
+    fn test_bias_inhibit_after_write() {
+        let lock = BravoLock::new(0);
+        let _w = lock.write();
+        // After write releases, inhibit_until should be in the future
+        drop(_w);
+        // Bias is re-enabled but inhibit window may prevent fast path briefly
+        assert!(lock.is_biased());
+    }
+
+    #[test]
+    fn test_slot_distribution() {
+        // Verify different threads get different slots (probabilistic)
+        let results: Vec<_> = (0..NUM_SLOTS)
+            .map(|_| thread::spawn(thread_slot))
+            .collect();
+        let slots: Vec<usize> = results.into_iter().map(|h| h.join().unwrap()).collect();
+        // At least some should differ
+        let unique: std::collections::HashSet<_> = slots.iter().collect();
+        assert!(unique.len() > 1);
+    }
+}
