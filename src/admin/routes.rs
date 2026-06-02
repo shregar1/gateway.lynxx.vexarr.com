@@ -1005,6 +1005,7 @@ pub async fn create_plugin(
         &input.config,
         Some(state.repo.clone()),
         state.plugin_exec.context(),
+        state.plugin_exec.algorithm_tier(),
     )?;
     let now = Utc::now();
     let plugin = PluginInstance {
@@ -1072,6 +1073,7 @@ pub async fn update_plugin(
         &input.config,
         Some(state.repo.clone()),
         state.plugin_exec.context(),
+        state.plugin_exec.algorithm_tier(),
     )?;
 
     let updated = PluginInstance {

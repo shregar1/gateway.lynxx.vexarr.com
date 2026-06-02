@@ -1,5 +1,11 @@
 [workspace]
-members = [".", "bench", "crates/algorithms", "crates/lynxx_structures"]
+members = [
+    ".",
+    "bench",
+    "crates/algorithms",
+    "crates/algorithms/fuzz",
+    "crates/lynxx_structures",
+]
 
 [package]
 name = "lynxx-gateway"

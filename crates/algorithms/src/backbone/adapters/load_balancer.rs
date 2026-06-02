@@ -5,6 +5,50 @@ use crate::backbone::traits::{LbContext, LoadBalancer};
 
 // ── Starter tier ───────────────────────────────────────────────────
 
+/// Power of Two Choices (Mitzenmacher 1996) — lock-free, low coordination.
+pub struct P2cLb {
+    inner: crate::goals::upstream_pick::p2c::P2cBalancer,
+}
+
+impl P2cLb {
+    pub fn new(server_count: usize) -> Self {
+        Self {
+            inner: crate::goals::upstream_pick::p2c::P2cBalancer::new(server_count),
+        }
+    }
+
+    pub fn with_weights(weights: Vec<u32>) -> Self {
+        Self {
+            inner: crate::goals::upstream_pick::p2c::P2cBalancer::with_weights(weights),
+        }
+    }
+
+    /// Call when a request is dispatched to backend `idx`.
+    pub fn request_start(&self, idx: usize) {
+        self.inner.request_start(idx);
+    }
+
+    /// Call when a request completes on backend `idx`.
+    pub fn request_end(&self, idx: usize) {
+        self.inner.request_end(idx);
+    }
+}
+
+impl LoadBalancer for P2cLb {
+    #[inline]
+    fn pick(&mut self, _ctx: &LbContext<'_>) -> usize {
+        self.inner.pick()
+    }
+
+    fn name(&self) -> &'static str {
+        "p2c"
+    }
+
+    fn len(&self) -> usize {
+        self.inner.server_count()
+    }
+}
+
 /// Fast Weighted Round Robin (HAProxy).
 pub struct FwrrLb {
     inner: crate::goals::upstream_pick::fwrr::FwrrSelector,
@@ -190,6 +234,19 @@ impl LoadBalancer for BoundedCHashAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn p2c_picks_within_range() {
+        let mut lb = P2cLb::new(4);
+        let ctx = LbContext::new(0);
+        for _ in 0..50 {
+            let idx = lb.pick(&ctx);
+            assert!(idx < 4);
+            lb.request_start(idx);
+            lb.request_end(idx);
+        }
+        assert_eq!(lb.name(), "p2c");
+    }
 
     #[test]
     fn fwrr_picks_within_range() {
