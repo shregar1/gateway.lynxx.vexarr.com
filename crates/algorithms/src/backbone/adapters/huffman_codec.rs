@@ -1,6 +1,4 @@
 //! HuffmanCodec adapters — wrap HPACK Huffman encode/decode.
-//!
-//! This module is only compiled at `tier-growth` and above.
 
 use crate::backbone::traits::HuffmanCodec;
 
@@ -43,11 +41,9 @@ impl HuffmanCodec for StandardHuffman {
 // ── optimized (pro tier) ───────────────────────────────────────────
 
 /// Branchless optimized Huffman: standard encode + fast decode.
-#[cfg(feature = "tier-pro")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FastHuffman;
 
-#[cfg(feature = "tier-pro")]
 impl HuffmanCodec for FastHuffman {
     #[inline]
     fn encode(&self, dst: &mut [u8], src: &[u8]) -> usize {
@@ -94,7 +90,6 @@ mod tests {
         assert_eq!(StandardHuffman.name(), "standard_huffman");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn fast_huffman_encode_decode_roundtrip() {
         let c = FastHuffman;
@@ -110,7 +105,6 @@ mod tests {
         assert_eq!(&dec[..dlen as usize], src);
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn fast_huffman_name() {
         assert_eq!(FastHuffman.name(), "fast_huffman");

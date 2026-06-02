@@ -2960,6 +2960,7 @@ name = "lynxx-gateway"
 version = "0.9.0"
 dependencies = [
  "ahash",
+ "algorithms",
  "anyhow",
  "arc-swap",
  "argon2",

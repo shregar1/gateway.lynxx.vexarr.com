@@ -1,6 +1,4 @@
 //! CongestionController adapters — wrap congestion control algorithms.
-//!
-//! This module is only compiled at `tier-pro`.
 
 use crate::backbone::traits::{AckInfo, CongestionController};
 

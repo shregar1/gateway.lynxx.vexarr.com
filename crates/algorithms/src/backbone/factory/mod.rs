@@ -1,6 +1,8 @@
-//! Factory — compile-time tier selection via `#[cfg(feature)]` type aliases.
+//! Factory — runtime tier selection via enum dispatch.
 //!
-//! Tiers are additive: `tier-pro` implies `tier-growth` implies `tier-starter`.
+//! Every adapter compiles into the binary. At construction time, the
+//! subscription `Tier` picks the variant to instantiate; the others
+//! remain unreachable through these factory entry points.
 
 pub mod hasher;
 pub mod checksummer;
@@ -16,12 +18,8 @@ pub use hasher::{TierHasher, create_hasher};
 pub use checksummer::{TierChecksummer, create_checksummer};
 pub use base64_codec::{TierBase64, create_base64};
 pub use uri_codec::{TierUri, create_uri_codec};
+pub use huffman_codec::{TierHuffman, create_huffman};
 pub use load_balancer::TierLoadBalancer;
 pub use rate_limiter::TierRateLimiter;
 pub use health_checker::TierHealthChecker;
-
-#[cfg(feature = "tier-growth")]
-pub use huffman_codec::{TierHuffman, create_huffman};
-
-#[cfg(feature = "tier-pro")]
 pub use congestion::{TierCongestion, create_congestion};

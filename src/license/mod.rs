@@ -266,6 +266,16 @@ impl LicenseState {
         *self.inner.tier.read().expect("tier lock poisoned")
     }
 
+    /// Runtime algorithm tier for the backbone factory.
+    ///
+    /// A single binary compiles every adapter; this maps the current
+    /// subscription plan onto the [`algorithms::backbone::Tier`] that
+    /// the factory uses to pick which adapter is instantiated. Cheap
+    /// enough to call per-request: one rwlock read + a `match`.
+    pub fn algorithm_tier(&self) -> algorithms::backbone::Tier {
+        self.tier().algorithm_tier()
+    }
+
     pub fn active_nodes(&self) -> u32 {
         self.inner.node_counts.read().expect("node lock poisoned").0
     }

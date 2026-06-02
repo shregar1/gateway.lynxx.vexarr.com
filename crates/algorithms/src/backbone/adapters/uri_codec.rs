@@ -25,11 +25,9 @@ impl UriCodec for StandardUri {
 // ── optimized ──────────────────────────────────────────────────────
 
 /// Branchless optimized URI escape/unescape.
-#[cfg(feature = "tier-pro")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FastUri;
 
-#[cfg(feature = "tier-pro")]
 impl UriCodec for FastUri {
     #[inline]
     fn escape(&self, dst: &mut [u8], src: &[u8]) -> usize {
@@ -73,7 +71,6 @@ mod tests {
         assert_eq!(StandardUri.name(), "standard_uri");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn fast_uri_escape_safe_passthrough() {
         let c = FastUri;
@@ -83,7 +80,6 @@ mod tests {
         assert_eq!(&dst[..n], b"hello");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn fast_uri_name() {
         assert_eq!(FastUri.name(), "fast_uri");

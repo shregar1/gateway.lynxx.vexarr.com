@@ -13,6 +13,9 @@ pub struct GolombSet {
     p: u8,
     /// Number of elements in the set.
     count: usize,
+    /// Bounded universe `N = n * 2^p` into which hashes are reduced before
+    /// delta-coding. Stored so `contains` can apply the identical reduction.
+    universe: u64,
     /// Golomb-coded bitstream of sorted deltas.
     data: Vec<u8>,
 }
@@ -28,8 +31,20 @@ impl GolombSet {
             return Self {
                 p,
                 count: 0,
+                universe: 1,
                 data: Vec::new(),
             };
+        }
+
+        // Golomb-Coded Set: reduce every hash into a bounded universe
+        // `N = n * 2^p` before delta-coding. This bounds the average gap
+        // between sorted values to ~2^p, keeping unary quotients ~1 and the
+        // false-positive rate ~2^-p. Without this, raw 64-bit deltas produce
+        // astronomically large unary codes (gigabytes per element).
+        let p = p.min(63);
+        let universe = reduction_universe(hashes.len(), p);
+        for h in hashes.iter_mut() {
+            *h %= universe;
         }
 
         hashes.sort_unstable();
@@ -71,6 +86,7 @@ impl GolombSet {
         Self {
             p,
             count: hashes.len(),
+            universe,
             data: writer.finish(),
         }
     }
@@ -83,6 +99,9 @@ impl GolombSet {
         if self.count == 0 {
             return false;
         }
+
+        // Apply the identical universe reduction used at build time.
+        let hash = hash % self.universe;
 
         let mut reader = BitReader::new(&self.data);
         let mut current = 0u64;
@@ -132,6 +151,15 @@ impl GolombSet {
     pub fn byte_size(&self) -> usize {
         self.data.len()
     }
+}
+
+/// Compute the bounded universe `N = n * 2^p` for the Golomb-Coded Set,
+/// saturating to `u64::MAX` if the product would overflow. Always at least 1.
+fn reduction_universe(n: usize, p: u8) -> u64 {
+    (n as u64)
+        .checked_shl(p as u32)
+        .unwrap_or(u64::MAX)
+        .max(1)
 }
 
 // ── Bit-level I/O helpers ──
@@ -279,6 +307,31 @@ mod tests {
     fn byte_size_empty() {
         let gs = GolombSet::from_hashes(&mut [], 8);
         assert_eq!(gs.byte_size(), 0);
+    }
+
+    #[test]
+    fn full_range_hashes_stay_compact() {
+        // Regression: raw full-range u64 hashes must not blow up the unary
+        // quotient. With universe reduction the stream stays ~p+2 bits/elem.
+        let mut val: u64 = 0xDEAD_BEEF_CAFE_BABE;
+        let mut hashes: Vec<u64> = (0..1000)
+            .map(|_| {
+                val = val
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                val
+            })
+            .collect();
+        let probe = hashes[0];
+        let gs = GolombSet::from_hashes(&mut hashes, 10);
+        // ~ (p + 2) bits per element → well under 8 bytes/elem (raw storage).
+        assert!(
+            gs.byte_size() < 1000 * 4,
+            "byte_size={} should stay compact",
+            gs.byte_size()
+        );
+        // A value that was inserted must be reported present.
+        assert!(gs.contains(probe));
     }
 
     #[test]

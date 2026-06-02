@@ -17,9 +17,5 @@ pub use uri_codec::UriCodec;
 pub use load_balancer::{LoadBalancer, LbContext};
 pub use rate_limiter::{RateLimiter, RateLimitContext};
 pub use health_checker::HealthChecker;
-
-#[cfg(feature = "tier-growth")]
 pub use huffman_codec::HuffmanCodec;
-
-#[cfg(feature = "tier-pro")]
 pub use congestion::{CongestionController, AckInfo};

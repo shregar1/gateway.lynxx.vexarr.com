@@ -1,7 +1,6 @@
-//! CongestionController trait — TCP congestion control (pro+ only).
+//! CongestionController trait — TCP congestion control.
 
 /// ACK information for congestion control updates.
-#[cfg(feature = "tier-pro")]
 pub struct AckInfo {
     /// Round-trip time in microseconds.
     pub rtt_us: u64,
@@ -12,7 +11,6 @@ pub struct AckInfo {
 }
 
 /// Congestion controller for TCP flow management.
-#[cfg(feature = "tier-pro")]
 pub trait CongestionController {
     /// Process an ACK event.
     fn on_ack(&mut self, ack: &AckInfo);

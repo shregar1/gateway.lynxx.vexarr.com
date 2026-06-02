@@ -43,11 +43,9 @@ impl Base64Codec for StandardBase64Url {
 // ── optimized ──────────────────────────────────────────────────────
 
 /// Optimized base64: uses fast decode, standard encode.
-#[cfg(feature = "tier-pro")]
 #[derive(Debug, Clone, Copy, Default)]
 pub struct FastBase64;
 
-#[cfg(feature = "tier-pro")]
 impl Base64Codec for FastBase64 {
     #[inline]
     fn encode(&self, dst: &mut [u8], src: &[u8]) -> usize {
@@ -98,13 +96,11 @@ mod tests {
         assert_eq!(StandardBase64Url.name(), "standard_base64url");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn fast_base64_roundtrip() {
         assert_roundtrip(&FastBase64, b"Hello, Lynxx!");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn fast_base64_name() {
         assert_eq!(FastBase64.name(), "fast_base64");

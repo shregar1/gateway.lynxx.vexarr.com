@@ -1,53 +1,32 @@
 use algorithms::backbone::*;
 
 #[test]
-fn hasher_dispatch() {
-    let h = create_hasher();
-    let name = h.name();
-    
-    #[cfg(feature = "tier-pro")]
-    assert_eq!(name, "xxh64");
-    
-    #[cfg(all(feature = "tier-growth", not(feature = "tier-pro")))]
-    assert_eq!(name, "siphash13");
-    
-    #[cfg(not(feature = "tier-growth"))]
-    assert_eq!(name, "murmur2");
-    
-    // Verify it actually hashes
-    let digest = h.hash(b"hello world");
+fn hasher_dispatch_picks_per_tier() {
+    assert_eq!(create_hasher(Tier::Starter).name(), "murmur2");
+    assert_eq!(create_hasher(Tier::Growth).name(), "siphash13");
+    assert_eq!(create_hasher(Tier::Pro).name(), "xxh64");
+
+    let digest = create_hasher(Tier::Pro).hash(b"hello world");
     assert_ne!(digest, 0);
 }
 
 #[test]
-fn checksummer_dispatch() {
-    let c = create_checksummer();
-    let name = c.name();
-    
-    #[cfg(feature = "tier-pro")]
-    assert_eq!(name, "crc32_slice8");
-    
-    #[cfg(all(feature = "tier-growth", not(feature = "tier-pro")))]
-    assert_eq!(name, "crc32_long_table");
-    
-    #[cfg(not(feature = "tier-growth"))]
-    assert_eq!(name, "crc32_short_nibble");
-    
-    let sum = c.checksum(b"test data");
+fn checksummer_dispatch_picks_per_tier() {
+    assert_eq!(create_checksummer(Tier::Starter).name(), "crc32_short_nibble");
+    assert_eq!(create_checksummer(Tier::Growth).name(), "crc32_long_table");
+    assert_eq!(create_checksummer(Tier::Pro).name(), "crc32_slice8");
+
+    let sum = create_checksummer(Tier::Growth).checksum(b"test data");
     assert_ne!(sum, 0);
 }
 
 #[test]
-fn base64_dispatch() {
-    let codec = create_base64();
-    
-    #[cfg(feature = "tier-pro")]
-    assert_eq!(codec.name(), "fast_base64");
-    
-    #[cfg(not(feature = "tier-pro"))]
-    assert_eq!(codec.name(), "standard_base64");
+fn base64_dispatch_picks_per_tier() {
+    assert_eq!(create_base64(Tier::Starter).name(), "standard_base64");
+    assert_eq!(create_base64(Tier::Growth).name(), "standard_base64");
+    assert_eq!(create_base64(Tier::Pro).name(), "fast_base64");
 
-    // Round-trip test
+    let codec = create_base64(Tier::Pro);
     let src = b"Hello, Lynxx!";
     let mut encoded = vec![0u8; 64];
     let elen = codec.encode(&mut encoded, src);
@@ -60,57 +39,80 @@ fn base64_dispatch() {
 }
 
 #[test]
-fn uri_codec_dispatch() {
-    let codec = create_uri_codec();
-    
-    #[cfg(feature = "tier-pro")]
-    assert_eq!(codec.name(), "fast_uri");
-    
-    #[cfg(not(feature = "tier-pro"))]
-    assert_eq!(codec.name(), "standard_uri");
-}
-
-#[cfg(feature = "tier-growth")]
-#[test]
-fn huffman_dispatch() {
-    let codec = create_huffman();
-    
-    #[cfg(feature = "tier-pro")]
-    assert_eq!(codec.name(), "fast_huffman");
-    
-    #[cfg(not(feature = "tier-pro"))]
-    assert_eq!(codec.name(), "standard_huffman");
-}
-
-#[cfg(feature = "tier-pro")]
-#[test]
-fn congestion_dispatch() {
-    let cc = create_congestion();
-    assert_eq!(cc.name(), "cubic");
+fn uri_codec_dispatch_picks_per_tier() {
+    assert_eq!(create_uri_codec(Tier::Starter).name(), "standard_uri");
+    assert_eq!(create_uri_codec(Tier::Growth).name(), "standard_uri");
+    assert_eq!(create_uri_codec(Tier::Pro).name(), "fast_uri");
 }
 
 #[test]
-fn load_balancer_trait() {
-    // Constructor differs per tier
-    #[cfg(not(feature = "tier-growth"))]
-    let mut lb = TierLoadBalancer::new(&[10u32, 20, 30]);
+fn huffman_dispatch_picks_per_tier() {
+    assert_eq!(create_huffman(Tier::Starter).name(), "standard_huffman");
+    assert_eq!(create_huffman(Tier::Growth).name(), "standard_huffman");
+    assert_eq!(create_huffman(Tier::Pro).name(), "fast_huffman");
+}
 
-    #[cfg(all(feature = "tier-growth", not(feature = "tier-pro")))]
-    let mut lb = TierLoadBalancer::new(3, 10_000_000_000); // 3 backends, 10s decay
+#[test]
+fn congestion_dispatch_picks_per_tier() {
+    assert_eq!(create_congestion(Tier::Starter).name(), "cubic");
+    assert_eq!(create_congestion(Tier::Growth).name(), "cubic");
+    assert_eq!(create_congestion(Tier::Pro).name(), "bbr");
+}
 
-    #[cfg(feature = "tier-pro")]
-    let mut lb = TierLoadBalancer::new(&["a", "b", "c"]);
+#[test]
+fn rate_limiter_dispatch_uses_for_tier() {
+    let mut starter = TierRateLimiter::for_tier(Tier::Starter);
+    let mut growth = TierRateLimiter::for_tier(Tier::Growth);
+    let mut pro = TierRateLimiter::for_tier(Tier::Pro);
+
+    assert_eq!(starter.name(), "leaky_bucket");
+    assert_eq!(growth.name(), "token_bucket");
+    assert_eq!(pro.name(), "gradient");
+
+    let ctx = RateLimitContext::new(1_000_000_000);
+    assert!(starter.allow(&ctx));
+    assert!(growth.allow(&ctx));
+    assert!(pro.allow(&ctx));
+}
+
+#[test]
+fn load_balancer_dispatch_uses_for_tier() {
+    let weights: &[u32] = &[10, 20, 30];
+    let names: &[&str] = &["a", "b", "c"];
+
+    let mut starter = TierLoadBalancer::for_tier(Tier::Starter, weights, names);
+    let mut growth = TierLoadBalancer::for_tier(Tier::Growth, weights, names);
+    let mut pro = TierLoadBalancer::for_tier(Tier::Pro, weights, names);
+
+    assert_eq!(starter.name(), "fwrr");
+    assert_eq!(growth.name(), "peak_ewma");
+    assert_eq!(pro.name(), "maglev");
 
     let ctx = LbContext::new(1_000_000);
-    let idx = lb.pick(&ctx);
-    assert!(idx < 3);
+    assert!(starter.pick(&ctx) < 3);
+    assert!(growth.pick(&ctx) < 3);
+    let ctx_keyed = LbContext::with_key(1_000_000, b"req-key");
+    assert!(pro.pick(&ctx_keyed) < 3);
 }
 
 #[test]
-fn health_checker_trait() {
-    let mut hc = TierHealthChecker::new(3, 5000);
-    assert!(hc.allow_request(1000));
-    hc.record_failure(1000);
-    hc.record_failure(1001);
-    hc.record_failure(1002);
+fn health_checker_dispatch_uses_for_tier() {
+    let mut starter = TierHealthChecker::for_tier(Tier::Starter, 3, 5000);
+    let mut growth = TierHealthChecker::for_tier(Tier::Growth, 3, 5000);
+    let mut pro = TierHealthChecker::for_tier(Tier::Pro, 3, 5000);
+
+    assert_eq!(starter.name(), "circuit_breaker");
+    assert_eq!(growth.name(), "passive_health");
+    assert_eq!(pro.name(), "passive_health");
+
+    assert!(starter.allow_request(1000));
+    assert!(growth.allow_request(1000));
+    assert!(pro.allow_request(1000));
+}
+
+#[test]
+fn tier_is_recoverable_from_factory_instance() {
+    assert_eq!(create_hasher(Tier::Growth).tier(), Tier::Growth);
+    assert_eq!(create_checksummer(Tier::Pro).tier(), Tier::Pro);
+    assert_eq!(TierRateLimiter::for_tier(Tier::Starter).tier(), Tier::Starter);
 }

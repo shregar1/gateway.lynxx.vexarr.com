@@ -60,12 +60,10 @@ impl RateLimiter for LeakyBucketLimiter {
 // ── Growth tier ────────────────────────────────────────────────────
 
 /// Atomic token bucket — lock-free, good burst handling.
-#[cfg(feature = "tier-growth")]
 pub struct TokenBucketLimiter {
     inner: crate::goals::rate_limit::atomic_token_bucket::AtomicTokenBucket,
 }
 
-#[cfg(feature = "tier-growth")]
 impl TokenBucketLimiter {
     pub fn new(rate: f64, burst: f64) -> Self {
         Self {
@@ -76,7 +74,6 @@ impl TokenBucketLimiter {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl RateLimiter for TokenBucketLimiter {
     #[inline]
     fn allow(&mut self, ctx: &RateLimitContext) -> bool {
@@ -87,12 +84,10 @@ impl RateLimiter for TokenBucketLimiter {
 }
 
 /// Admission controller — probabilistic rejection based on success rate.
-#[cfg(feature = "tier-growth")]
 pub struct AdmissionLimiter {
     inner: crate::goals::rate_limit::admission_control::AdmissionController,
 }
 
-#[cfg(feature = "tier-growth")]
 impl AdmissionLimiter {
     pub fn new(window_size: usize) -> Self {
         Self {
@@ -103,7 +98,6 @@ impl AdmissionLimiter {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl RateLimiter for AdmissionLimiter {
     #[inline]
     fn allow(&mut self, _ctx: &RateLimitContext) -> bool {
@@ -116,12 +110,10 @@ impl RateLimiter for AdmissionLimiter {
 // ── Pro tier ───────────────────────────────────────────────────────
 
 /// Gradient concurrency controller — RTT-aware.
-#[cfg(feature = "tier-pro")]
 pub struct GradientLimiter {
     inner: crate::goals::rate_limit::gradient_controller::GradientController,
 }
 
-#[cfg(feature = "tier-pro")]
 impl GradientLimiter {
     pub fn new() -> Self {
         Self {
@@ -140,7 +132,10 @@ impl GradientLimiter {
     }
 }
 
-#[cfg(feature = "tier-pro")]
+impl Default for GradientLimiter {
+    fn default() -> Self { Self::new() }
+}
+
 impl RateLimiter for GradientLimiter {
     #[inline]
     fn allow(&mut self, _ctx: &RateLimitContext) -> bool {
@@ -163,7 +158,6 @@ mod tests {
         assert_eq!(rl.name(), "leaky_bucket");
     }
 
-    #[cfg(feature = "tier-growth")]
     #[test]
     fn token_bucket_allows_within_burst() {
         let mut rl = TokenBucketLimiter::new(10.0, 10.0); // 10/s, burst 10
@@ -172,7 +166,6 @@ mod tests {
         assert_eq!(rl.name(), "token_bucket");
     }
 
-    #[cfg(feature = "tier-growth")]
     #[test]
     fn admission_initially_admits() {
         let mut rl = AdmissionLimiter::new(100);
@@ -182,7 +175,6 @@ mod tests {
         assert_eq!(rl.name(), "admission_control");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn gradient_initially_allows() {
         let mut rl = GradientLimiter::new();

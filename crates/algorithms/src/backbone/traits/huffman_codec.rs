@@ -1,7 +1,6 @@
-//! HuffmanCodec trait — HPACK Huffman (growth+ only).
+//! HuffmanCodec trait — HPACK Huffman header compression.
 
 /// HPACK Huffman encoder/decoder for HTTP/2 header compression.
-#[cfg(feature = "tier-growth")]
 pub trait HuffmanCodec {
     /// Huffman-encode `src` into `dst`. Returns bytes written.
     fn encode(&self, dst: &mut [u8], src: &[u8]) -> usize;

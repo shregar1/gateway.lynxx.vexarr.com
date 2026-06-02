@@ -71,6 +71,10 @@ doc_lazy_continuation = "allow" # markdown list indentation in rustdoc
 unused_imports = "warn"
 
 [dependencies]
+# Single-binary algorithm dispatch: every adapter compiles in, and the
+# subscription `Tier` (resolved from LicenseState.algorithm_tier())
+# selects which one runs at startup.
+algorithms = { path = "crates/algorithms" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }

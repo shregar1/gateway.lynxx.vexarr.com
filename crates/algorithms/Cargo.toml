@@ -4,12 +4,6 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[features]
-default = ["tier-starter"]
-tier-starter = []
-tier-growth = ["tier-starter"]
-tier-pro = ["tier-growth"]
-
 [dependencies]
 lynxx-algo = { path = "/Users/shreyansh/Downloads/nginx-master/nginx-algo" }
 

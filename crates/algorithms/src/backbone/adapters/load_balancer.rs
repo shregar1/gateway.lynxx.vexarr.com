@@ -58,12 +58,10 @@ impl LoadBalancer for FwlcLb {
 // ── Growth tier ────────────────────────────────────────────────────
 
 /// Peak EWMA latency-based LB (linkerd2-proxy).
-#[cfg(feature = "tier-growth")]
 pub struct PeakEwmaAdapter {
     inner: crate::goals::upstream_pick::peak_ewma::PeakEwmaLb,
 }
 
-#[cfg(feature = "tier-growth")]
 impl PeakEwmaAdapter {
     pub fn new(count: usize, decay_ns: u64) -> Self {
         Self {
@@ -77,7 +75,6 @@ impl PeakEwmaAdapter {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl LoadBalancer for PeakEwmaAdapter {
     #[inline]
     fn pick(&mut self, ctx: &LbContext<'_>) -> usize {
@@ -88,12 +85,10 @@ impl LoadBalancer for PeakEwmaAdapter {
 }
 
 /// Earliest Deadline First scheduler (Envoy).
-#[cfg(feature = "tier-growth")]
 pub struct EdfLb {
     inner: crate::goals::upstream_pick::edf::EdfScheduler,
 }
 
-#[cfg(feature = "tier-growth")]
 impl EdfLb {
     pub fn new(weights: &[f64]) -> Self {
         Self {
@@ -102,7 +97,6 @@ impl EdfLb {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl LoadBalancer for EdfLb {
     #[inline]
     fn pick(&mut self, _ctx: &LbContext<'_>) -> usize {
@@ -113,12 +107,10 @@ impl LoadBalancer for EdfLb {
 }
 
 /// Weighted Random Selection Queue (Envoy).
-#[cfg(feature = "tier-growth")]
 pub struct WrsqLb {
     inner: crate::goals::upstream_pick::wrsq::WrsqSelector,
 }
 
-#[cfg(feature = "tier-growth")]
 impl WrsqLb {
     pub fn new(weights: &[f64]) -> Self {
         Self {
@@ -127,7 +119,6 @@ impl WrsqLb {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl LoadBalancer for WrsqLb {
     #[inline]
     fn pick(&mut self, _ctx: &LbContext<'_>) -> usize {
@@ -140,12 +131,10 @@ impl LoadBalancer for WrsqLb {
 // ── Pro tier ───────────────────────────────────────────────────────
 
 /// Maglev consistent hash table (Google/Envoy).
-#[cfg(feature = "tier-pro")]
 pub struct MaglevLb {
     inner: crate::goals::upstream_pick::maglev::MaglevTable,
 }
 
-#[cfg(feature = "tier-pro")]
 impl MaglevLb {
     pub fn new(backends: &[&str]) -> Self {
         Self {
@@ -154,7 +143,6 @@ impl MaglevLb {
     }
 }
 
-#[cfg(feature = "tier-pro")]
 impl LoadBalancer for MaglevLb {
     #[inline]
     fn pick(&mut self, ctx: &LbContext<'_>) -> usize {
@@ -172,12 +160,10 @@ impl LoadBalancer for MaglevLb {
 }
 
 /// Bounded consistent hash with load factor (HAProxy).
-#[cfg(feature = "tier-pro")]
 pub struct BoundedCHashAdapter {
     inner: crate::goals::upstream_pick::chash_bounded::BoundedCHash,
 }
 
-#[cfg(feature = "tier-pro")]
 impl BoundedCHashAdapter {
     pub fn new(nodes: &[&str], replicas: u32, load_factor: f64) -> Self {
         Self {
@@ -191,7 +177,6 @@ impl BoundedCHashAdapter {
     pub fn release(&self, idx: usize) { self.inner.release(idx) }
 }
 
-#[cfg(feature = "tier-pro")]
 impl LoadBalancer for BoundedCHashAdapter {
     #[inline]
     fn pick(&mut self, ctx: &LbContext<'_>) -> usize {
@@ -231,7 +216,6 @@ mod tests {
         assert!(idx < 2);
     }
 
-    #[cfg(feature = "tier-growth")]
     #[test]
     fn peak_ewma_picks_within_range() {
         let mut lb = PeakEwmaAdapter::new(3, 10_000_000_000);
@@ -240,7 +224,6 @@ mod tests {
         assert!(idx < 3);
     }
 
-    #[cfg(feature = "tier-growth")]
     #[test]
     fn edf_picks_within_range() {
         let mut lb = EdfLb::new(&[1.0, 2.0, 3.0]);
@@ -249,7 +232,6 @@ mod tests {
         assert!(idx < 3);
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn maglev_picks_within_range() {
         let mut lb = MaglevLb::new(&["a", "b", "c"]);
@@ -259,7 +241,6 @@ mod tests {
         assert_eq!(lb.name(), "maglev");
     }
 
-    #[cfg(feature = "tier-pro")]
     #[test]
     fn maglev_deterministic_with_hash_key() {
         let mut lb = MaglevLb::new(&["a", "b", "c"]);

@@ -43,12 +43,10 @@ impl HealthChecker for CircuitBreakerChecker {
 // ── Growth tier ────────────────────────────────────────────────────
 
 /// Fail-fast detector — quick rejection after first failure.
-#[cfg(feature = "tier-growth")]
 pub struct FailfastChecker {
     inner: crate::goals::resilience::failfast::Failfast,
 }
 
-#[cfg(feature = "tier-growth")]
 impl FailfastChecker {
     pub fn new(timeout_ms: u64) -> Self {
         Self {
@@ -57,7 +55,6 @@ impl FailfastChecker {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl HealthChecker for FailfastChecker {
     #[inline]
     fn allow_request(&mut self, now_ms: u64) -> bool {
@@ -78,12 +75,10 @@ impl HealthChecker for FailfastChecker {
 }
 
 /// Passive health check — windowed success/failure tracking.
-#[cfg(feature = "tier-growth")]
 pub struct PassiveHealthChecker {
     inner: crate::goals::resilience::passive_health::PassiveHealthCheck,
 }
 
-#[cfg(feature = "tier-growth")]
 impl PassiveHealthChecker {
     pub fn new(threshold: u32, window_ms: u64) -> Self {
         Self {
@@ -95,7 +90,6 @@ impl PassiveHealthChecker {
     }
 }
 
-#[cfg(feature = "tier-growth")]
 impl HealthChecker for PassiveHealthChecker {
     #[inline]
     fn allow_request(&mut self, now_ms: u64) -> bool {
@@ -143,7 +137,6 @@ mod tests {
         assert_eq!(cb2.name(), "circuit_breaker");
     }
 
-    #[cfg(feature = "tier-growth")]
     #[test]
     fn failfast_contract() {
         let mut ff = FailfastChecker::new(5000);
@@ -151,7 +144,6 @@ mod tests {
         assert_eq!(ff.name(), "failfast");
     }
 
-    #[cfg(feature = "tier-growth")]
     #[test]
     fn passive_health_contract() {
         let mut ph = PassiveHealthChecker::new(3, 10000);

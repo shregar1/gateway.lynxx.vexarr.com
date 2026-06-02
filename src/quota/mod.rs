@@ -232,6 +232,21 @@ impl PlanTier {
             PlanTier::Enterprise => "enterprise",
         }
     }
+
+    /// Map a billing `PlanTier` onto the runtime algorithm `Tier`.
+    ///
+    /// Free → Starter, Pro → Growth, Business / Enterprise → Pro. The
+    /// algorithms crate has only three performance tiers; Business and
+    /// Enterprise share the top-tier algorithm set and are distinguished
+    /// purely by quota.
+    pub fn algorithm_tier(self) -> algorithms::backbone::Tier {
+        use algorithms::backbone::Tier;
+        match self {
+            PlanTier::Free => Tier::Starter,
+            PlanTier::Pro => Tier::Growth,
+            PlanTier::Business | PlanTier::Enterprise => Tier::Pro,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
