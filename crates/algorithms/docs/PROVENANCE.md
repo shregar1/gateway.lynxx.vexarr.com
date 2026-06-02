@@ -102,6 +102,8 @@ Which proxy each ported algorithm/structure originates from.
 | `admission_control.rs` | Envoy | Probabilistic request rejection (rolling success rate, aggression exponent) |
 | `ip_reputation.rs` | ATS | Multi-tier sieve-LRU IP reputation tracker (adaptive bucket promotion, aging) |
 | `histogram.rs` | ATS | Stepped logarithmic histogram (O(1) insert, configurable range/span bits, decay) |
+| `dagor.rs` | Paper (DAGOR) | Compound priority admission control (business+user, histogram-adaptive shedding, WeChat SoCC'18) |
+| `codel.rs` | Paper (RFC 8289) | CoDel active queue management (min sojourn time, sqrt-paced dropping) |
 
 ### Upstream Pick / Load Balancing (`goals/upstream_pick/`)
 
@@ -121,6 +123,7 @@ Which proxy each ported algorithm/structure originates from.
 | `priority_lb.rs` | Envoy | Priority-based load distribution (multi-level failover, panic mode) |
 | `peak_ewma.rs` | linkerd2-proxy | Peak EWMA latency-based load balancing (snap-up, smooth decay) |
 | `completion_tracker.rs` | linkerd2-proxy | Load completion signaling (first-byte, headers, full response) |
+| `p2c.rs` | Paper (Mitzenmacher) | Power of Two Choices (sample 2, pick lower load, O(log log n) max) |
 
 ### Crypto (`goals/crypt/`)
 
@@ -232,6 +235,8 @@ Which proxy each ported algorithm/structure originates from.
 | `bravo_lock.rs` | ATS | BRAVO reader-biased RWLock (per-slot atomics, zero-contention read fast path) |
 | `clock_cache.rs` | ATS | Clock eviction cache (second-chance circular buffer, referenced bit) |
 | `write_buffer.rs` | ATS | Aggregate write buffer (aligned write coalescing, reserve + read-back) |
+| `arc_cache.rs` | Paper (ARC) | Adaptive Replacement Cache (self-tuning recency/frequency, ghost lists, FAST'03) |
+| `wtinylfu.rs` | Paper (W-TinyLFU) | Window TinyLFU (4-bit Count-Min Sketch, SLRU main, Einziger 2015) |
 
 ---
 
@@ -249,4 +254,5 @@ Which proxy each ported algorithm/structure originates from.
 | Varnish | 3 modules | 1 module | 4 |
 | H2O | 3 modules | 1 module | 4 |
 | ATS | 7 modules | 4 modules | 11 |
-| **Total** | **~95** | **~40** | **~135** |
+| Papers | 3 modules | 2 modules | 5 |
+| **Total** | **~98** | **~42** | **~140** |

@@ -27,3 +27,4 @@ pub mod locality_lb;
 pub mod priority_lb;
 pub mod peak_ewma;
 pub mod completion_tracker;
+pub mod p2c;
