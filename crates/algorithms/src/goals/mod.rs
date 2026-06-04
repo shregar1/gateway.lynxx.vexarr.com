@@ -13,3 +13,4 @@ pub mod pattern;
 pub mod mqtt;
 pub mod congestion;
 pub mod fix_protocol;
+pub mod crypto;

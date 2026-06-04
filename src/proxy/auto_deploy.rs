@@ -606,7 +606,12 @@ impl DeployExecutor {
             ),
             DeployStrategy::Rolling => TrafficShifter::new(
                 0,
-                (100 / plan.old_target_ids.len().max(1) as u8).max(1),
+                // Compute the step in usize so the divisor is clamped to >= 1
+                // BEFORE any cast. The old `... .len().max(1) as u8` cast the
+                // length to u8 *after* `.max(1)`, so a fleet size that is a
+                // nonzero multiple of 256 truncated to 0 and `100 / 0u8`
+                // aborted the process.
+                (100usize / plan.old_target_ids.len().max(1)).clamp(1, 100) as u8,
                 Duration::from_secs(30),
             ),
         };

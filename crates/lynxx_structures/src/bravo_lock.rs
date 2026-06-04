@@ -2,7 +2,7 @@ use std::cell::UnsafeCell;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const NUM_SLOTS: usize = 64;
 const INHIBIT_DURATION_NS: u64 = 5_000_000; // 5ms bias inhibit after write
@@ -71,7 +71,9 @@ impl<'a, T> Drop for BravoReadGuard<'a, T> {
 /// the underlying write lock.
 pub struct BravoWriteGuard<'a, T> {
     lock: &'a BravoLock<T>,
-    _guard: std::sync::RwLockWriteGuard<'a, ()>,
+    /// `Option` so `Drop` can release the inner write lock *before* it
+    /// re-enables reader bias.
+    _guard: Option<std::sync::RwLockWriteGuard<'a, ()>>,
 }
 
 impl<'a, T> Deref for BravoWriteGuard<'a, T> {
@@ -88,6 +90,23 @@ impl<'a, T> DerefMut for BravoWriteGuard<'a, T> {
         // SAFETY: Same as Deref — exclusive access is guaranteed by the write lock
         // plus slot drain.
         unsafe { &mut *self.lock.data.get() }
+    }
+}
+
+impl<'a, T> Drop for BravoWriteGuard<'a, T> {
+    fn drop(&mut self) {
+        // Start the bias-inhibit window at write *completion*, so the next
+        // readers don't immediately re-bias and thrash with a following writer.
+        self.lock
+            .inhibit_until
+            .store(now_nanos() + INHIBIT_DURATION_NS, Ordering::Relaxed);
+        // Release the inner write lock FIRST (so slow-path readers waiting on
+        // `sync` proceed only once exclusive access has actually ended)...
+        self._guard.take();
+        // ...then re-enable reader bias. Because `rbias` was held `false` for
+        // the entire lifetime of the exclusive `&mut T`, no fast-path reader
+        // could have claimed a slot and aliased it.
+        self.lock.rbias.store(true, Ordering::Release);
     }
 }
 
@@ -169,16 +188,17 @@ impl<T> BravoLock<T> {
         // Acquire write lock (waits for any slow-path readers too)
         let guard = self.sync.write().unwrap();
 
-        // Set inhibit window to prevent immediate bias resume (reduces thrashing)
-        let until = now_nanos() + INHIBIT_DURATION_NS;
-        self.inhibit_until.store(until, Ordering::Relaxed);
-
-        // Re-enable bias for future readers
-        self.rbias.store(true, Ordering::Release);
-
+        // Reader bias stays DISABLED for the whole lifetime of the returned
+        // guard — it is re-enabled only in `BravoWriteGuard::drop`, after the
+        // exclusive `&mut T` is gone. The previous code re-enabled bias here,
+        // before returning the guard: since fast-path readers never touch
+        // `sync` and the writer holds no slot, a reader could then claim a slot
+        // and alias the live `&mut T` (the 5ms inhibit window was only a timing
+        // heuristic, defeated by any longer critical section or a backward
+        // clock jump — a data race / UB, not a correctness barrier).
         BravoWriteGuard {
             lock: self,
-            _guard: guard,
+            _guard: Some(guard),
         }
     }
 
@@ -213,10 +233,12 @@ fn thread_slot() -> usize {
 }
 
 fn now_nanos() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos() as u64
+    // Monotonic timeline anchored at first use. The inhibit window guards
+    // against bias thrashing, so it must never move backward; a wall-clock
+    // (`SystemTime`) source could jump back under NTP and shrink or invert the
+    // window.
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_nanos() as u64
 }
 
 #[cfg(test)]
@@ -224,6 +246,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     #[test]
     fn test_basic_read() {
@@ -280,6 +303,25 @@ mod tests {
     fn test_is_biased_default() {
         let lock = BravoLock::new(0);
         assert!(lock.is_biased());
+    }
+
+    #[test]
+    fn bias_disabled_for_full_write_guard_lifetime() {
+        // Regression: write() used to re-enable reader bias before returning
+        // the guard, so a fast-path reader could claim a slot and alias the
+        // live &mut T. Bias must stay OFF for the entire lifetime of the
+        // exclusive guard and only resume once it drops.
+        let lock = BravoLock::new(0u64);
+        let w = lock.write();
+        assert!(
+            !lock.is_biased(),
+            "reader bias must stay disabled while a write guard is held"
+        );
+        drop(w);
+        assert!(
+            lock.is_biased(),
+            "reader bias should resume after the write guard is dropped"
+        );
     }
 
     #[test]

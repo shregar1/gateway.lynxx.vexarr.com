@@ -12,7 +12,9 @@ enum Color {
 
 struct RbNode<K, V> {
     key: K,
-    value: V,
+    /// `Option` so a removed node's value can be moved out with `take()`,
+    /// leaving `None` behind. Reachable nodes always hold `Some`.
+    value: Option<V>,
     color: Color,
     parent: usize,
     left: usize,
@@ -40,7 +42,7 @@ impl<K: Ord, V> RbTree<K, V> {
         let new_idx = self.nodes.len() + 1; // 1-based indexing (0 = NIL)
         self.nodes.push(RbNode {
             key,
-            value,
+            value: Some(value),
             color: Color::Red,
             parent: NIL,
             left: NIL,
@@ -73,12 +75,9 @@ impl<K: Ord, V> RbTree<K, V> {
                 }
                 current = right;
             } else {
-                // Key exists — update value
-                self.node_mut(current).value = {
-                    // Swap the value from the new node
-                    let new_node = self.nodes.pop().unwrap();
-                    new_node.value
-                };
+                // Key exists — overwrite with the new value. The new node was
+                // just pushed, so it is the last arena slot; pop it back off.
+                self.node_mut(current).value = self.nodes.pop().unwrap().value;
                 return;
             }
         }
@@ -95,7 +94,7 @@ impl<K: Ord, V> RbTree<K, V> {
             } else if *key > node.key {
                 current = node.right;
             } else {
-                return Some(&node.value);
+                return node.value.as_ref();
             }
         }
         None
@@ -129,28 +128,23 @@ impl<K: Ord, V> RbTree<K, V> {
         let right = self.node(idx).right;
 
         if left != NIL && right != NIL {
-            // Two children: find in-order successor
+            // Two children: move the in-order successor's payload into this
+            // node, then delete the successor. The successor is the minimum of
+            // the right subtree, so it has no left child and therefore falls
+            // into the ≤1-child base case below — the recursion is bounded to
+            // one extra level and always terminates.
+            //
+            // Only the key+value move; the structural links
+            // (color/parent/left/right) stay with the slot. The previous code
+            // swapped whole nodes, which dragged the children along, so the
+            // slot kept re-qualifying as a two-child node and recursed
+            // forever.
             let succ = self.minimum(right);
-            // Swap keys/values
-            // We need unsafe-free swap so we use index gymnastics
-            let succ_left = self.node(succ).left;
-            let succ_right = self.node(succ).right;
-            let succ_parent = self.node(succ).parent;
-            let succ_color = self.node(succ).color;
-
-            // Extract successor value, put it in idx
-            // This is a simplified approach: swap contents then delete successor
-            let si = succ - 1;
-            let ii = idx - 1;
-            self.nodes.swap(si, ii);
-
-            // Fix parent/child pointers after swap
-            self.repair_swap(idx, succ);
-
+            self.swap_payload(idx, succ);
             return self.delete_node(succ);
         }
 
-        // Zero or one child
+        // Zero or one child: splice `idx` out of the tree.
         let child = if left != NIL { left } else { right };
         let parent = self.node(idx).parent;
         let color = self.node(idx).color;
@@ -171,50 +165,32 @@ impl<K: Ord, V> RbTree<K, V> {
             self.node_mut(child).color = Color::Black;
         }
 
-        // Return the removed value
-        // Safety: we're reading from a now-orphaned node
-        // The arena keeps it alive but it's logically deleted
-        let node = &self.nodes[idx - 1];
-        // We can't move out of the arena easily, so we use a workaround
-        unsafe {
-            let ptr = &node.value as *const V;
-            std::ptr::read(ptr)
-        }
+        // Move the value out of the arena slot, leaving `None` behind. The
+        // spliced node physically remains in the arena (its slot is not
+        // reclaimed — a known limitation of this simplified tree), but it is
+        // unreachable through the tree and its value is now owned solely by
+        // the caller, so it drops exactly once. This replaces the old
+        // `ptr::read`, which left a live bitwise duplicate in the arena and
+        // double-dropped non-`Copy` values when the tree was dropped.
+        self.node_mut(idx)
+            .value
+            .take()
+            .expect("a node reached for deletion always holds a value")
     }
 
-    fn repair_swap(&mut self, a: usize, b: usize) {
-        // After swapping nodes[a-1] and nodes[b-1], fix all external references
-        // Fix children pointing to old parent
-        for &idx in &[a, b] {
-            let left = self.node(idx).left;
-            let right = self.node(idx).right;
-            if left != NIL && left != a && left != b {
-                self.node_mut(left).parent = idx;
-            }
-            if right != NIL && right != a && right != b {
-                self.node_mut(right).parent = idx;
-            }
+    /// Swap only the `key` and `value` of two arena nodes, leaving their
+    /// structural links (color/parent/left/right) in place. Used by
+    /// `delete_node` to lift an in-order successor's payload into the node
+    /// being removed without moving the successor's children.
+    fn swap_payload(&mut self, a: usize, b: usize) {
+        if a == b {
+            return;
         }
-
-        // Fix parents pointing to old child
-        for &idx in &[a, b] {
-            let parent = self.node(idx).parent;
-            if parent != NIL && parent != a && parent != b {
-                if self.node(parent).left == a || self.node(parent).left == b {
-                    let other = if self.node(parent).left == a { a } else { b };
-                    self.node_mut(parent).left = idx;
-                }
-                if self.node(parent).right == a || self.node(parent).right == b {
-                    self.node_mut(parent).right = idx;
-                }
-            }
-        }
-
-        if self.root == a {
-            self.root = b;
-        } else if self.root == b {
-            self.root = a;
-        }
+        let (ai, bi) = (a - 1, b - 1);
+        let (lo, hi) = if ai < bi { (ai, bi) } else { (bi, ai) };
+        let (left, right) = self.nodes.split_at_mut(hi);
+        std::mem::swap(&mut left[lo].key, &mut right[0].key);
+        std::mem::swap(&mut left[lo].value, &mut right[0].value);
     }
 
     fn minimum(&self, mut idx: usize) -> usize {
@@ -399,5 +375,71 @@ mod tests {
         assert_eq!(val, Some("three"));
         assert_eq!(t.get(&3), None);
         assert_eq!(t.get(&5), Some(&"five"));
+    }
+
+    #[test]
+    fn remove_node_with_two_children() {
+        // Regression: this used to recurse forever (whole-node swap) and
+        // hang / stack-overflow. Node 30 has both children (20 and 40).
+        let mut t = RbTree::new();
+        for k in [50, 30, 70, 20, 40, 60, 80, 35] {
+            t.insert(k, k * 10);
+        }
+        assert_eq!(t.remove(&30), Some(300));
+        assert_eq!(t.get(&30), None);
+        for k in [50, 70, 20, 40, 60, 80, 35] {
+            assert_eq!(t.get(&k), Some(&(k * 10)), "key {k} lost after removing 30");
+        }
+    }
+
+    #[test]
+    fn remove_root_with_two_children() {
+        let mut t = RbTree::new();
+        t.insert(2, "b");
+        t.insert(1, "a");
+        t.insert(3, "c");
+        assert_eq!(t.remove(&2), Some("b"));
+        assert_eq!(t.get(&2), None);
+        assert_eq!(t.get(&1), Some(&"a"));
+        assert_eq!(t.get(&3), Some(&"c"));
+    }
+
+    #[test]
+    fn remove_returns_owned_non_copy_without_double_free() {
+        // Regression: delete_node used ptr::read and left a live bitwise
+        // duplicate in the arena, double-dropping non-Copy values when the
+        // tree dropped. With String values that was a double free; here the
+        // test simply completing (and the tree dropping cleanly at the end)
+        // is the assertion.
+        let mut t: RbTree<i32, String> = RbTree::new();
+        for (k, v) in [(5, "five"), (3, "three"), (8, "eight"), (1, "one"), (4, "four")] {
+            t.insert(k, v.to_string());
+        }
+        // Key 3 has two children (1 and 4) -> exercises the successor path.
+        assert_eq!(t.remove(&3), Some("three".to_string()));
+        assert_eq!(t.get(&3), None);
+        assert_eq!(t.get(&4), Some(&"four".to_string()));
+        assert_eq!(t.get(&1), Some(&"one".to_string()));
+        assert_eq!(t.get(&8), Some(&"eight".to_string()));
+        // Dropping `t` here must not double-free any String.
+    }
+
+    #[test]
+    fn remove_all_then_reinsert() {
+        let mut t = RbTree::new();
+        for i in 0..16 {
+            t.insert(i, i);
+        }
+        for i in 0..16 {
+            assert_eq!(t.remove(&i), Some(i), "removing {i}");
+            assert_eq!(t.get(&i), None);
+            // Remaining keys stay findable (BST order preserved).
+            for j in (i + 1)..16 {
+                assert_eq!(t.get(&j), Some(&j), "key {j} lost after removing {i}");
+            }
+        }
+        // Arena still usable after deleting everything.
+        t.insert(42, 4200);
+        assert_eq!(t.get(&42), Some(&4200));
     }
 }

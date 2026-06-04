@@ -25,10 +25,10 @@ hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,256B,86.49,85.88,
 hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,1024B,311.45,308.78,314.42,3.06,GiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,excellent,excellent,good,low,benchmarked,
 hashing,1,SipHasher::hash_fast (siphash13),ATS,hashing_siphash,4096B,1473.80,1305.40,1733.20,2.59,GiB/s,fast,O(n/8) 64-bit blocks reduced rounds,yes,excellent,excellent,good,low,benchmarked,
 hashing,1,SnowflakeGenerator::generate,ATS,hashing_snowflake,single_id,976.73,975.27,978.28,,n/a,moderate,O(1) atomic + clock,yes,good,good,moderate,medium,benchmarked,~1M IDs/sec — clock-bottlenecked
-hashing,1,wt6_hash,HAProxy,,,,,,,,,planned,O(n) dual-state rotation,,,,,,not_implemented,Willy Tarreau dual-state hash
-hashing,1,sdbm_hash,HAProxy,,,,,,,,,planned,O(n) shift-add,,,,,,not_implemented,SDBM hash
-hashing,1,crc32c_hash,HAProxy,,,,,,,,,planned,O(n) Castagnoli table,,,,,,not_implemented,CRC32c Castagnoli (RFC 4960)
-hashing,1,xxhash,HAProxy,,,,,,,,,planned,O(n) state-of-art,,,,,,not_implemented,XXH32 + XXH64
+hashing,1,wt6_hash,HAProxy,,,,,,,,,implemented,O(n) dual-state rotation,,,,,,implemented,Willy Tarreau dual-state hash
+hashing,1,sdbm_hash,HAProxy,,,,,,,,,implemented,O(n) shift-add,,,,,,implemented,SDBM hash
+hashing,1,crc32c_hash,HAProxy,,,,,,,,,implemented,O(n) Castagnoli table,,,,,,implemented,CRC32c Castagnoli (RFC 4960)
+hashing,1,xxhash,HAProxy,,,,,,,,,implemented,O(n) state-of-art,,,,,,implemented,XXH32 + XXH64
 checksum,2,ngx_crc32_short,nginx,hash_crc32_short,16B,3.47,3.16,3.75,4.30,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,uses crc32fast — SIMD intrinsics
 checksum,2,ngx_crc32_short,nginx,hash_crc32_short,64B,4.34,4.29,4.39,13.74,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
 checksum,2,ngx_crc32_short,nginx,hash_crc32_short,256B,24.36,24.27,24.46,9.79,GiB/s,fast,O(n) hardware CRC,yes,excellent,excellent,excellent,none,benchmarked,
@@ -77,15 +77,15 @@ encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,64B,418.76,405.50,434.67,3
 encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,256B,1094.60,1047.80,1155.00,453.04,MiB/s,slow,O(n) branch + hex decode,yes,moderate,moderate,poor,high,benchmarked,
 encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,1024B,5136.10,4540.60,5887.50,386.22,MiB/s,slow,O(n) branch + hex decode,yes,moderate,poor,poor,high,benchmarked,
 encoding,3,ngx_unescape_uri,nginx,encode_unescape_uri,4096B,17861.00,16899.00,19103.00,444.23,MiB/s,slow,O(n) branch + hex decode,yes,moderate,poor,poor,high,benchmarked,top optimization target in encoding
-encoding,3,escape_html,nginx,,,,,,,,,,planned,O(n) entity replace,,,,,,not_implemented,HTML entity escaping
-encoding,3,escape_json,nginx,,,,,,,,,,planned,O(n) escape,,,,,,not_implemented,JSON string escaping
-encoding,3,slz_compress,HAProxy,,,,,,,,,,planned,O(n) static Huffman,,,,,,not_implemented,stateless DEFLATE/GZIP
-encoding,3,uri_normalize,HAProxy,,,,,,,,,,planned,O(n) RFC 3986,,,,,,not_implemented,dot resolve + slash merge
-encoding,3,accept_encoding,Traefik,,,,,,,,,,planned,O(k) q-value sort,,,,,,not_implemented,RFC 9110 negotiation
-encoding,3,etag_encode,Caddy,,,,,,,,,,planned,O(1) suffix ops,,,,,,not_implemented,ETag modification
-encoding,3,path_trim,Caddy,,,,,,,,,,planned,O(n) escape-aware,,,,,,not_implemented,
-encoding,3,golomb_set,H2O,,,,,,,,,,planned,O(n) bit coding,,,,,,not_implemented,Golomb-Rice coded sets
-encoding,3,vary_encode,Varnish,,,,,,,,,,planned,O(k log k) sorted,,,,,,not_implemented,compact binary Vary key
+encoding,3,escape_html,nginx,,,,,,,,,,implemented,O(n) entity replace,,,,,,implemented,HTML entity escaping
+encoding,3,escape_json,nginx,,,,,,,,,,implemented,O(n) escape,,,,,,implemented,JSON string escaping
+encoding,3,slz_compress,HAProxy,,,,,,,,,,implemented,O(n) static Huffman,,,,,,implemented,stateless DEFLATE/GZIP
+encoding,3,uri_normalize,HAProxy,,,,,,,,,,implemented,O(n) RFC 3986,,,,,,implemented,dot resolve + slash merge
+encoding,3,accept_encoding,Traefik,,,,,,,,,,implemented,O(k) q-value sort,,,,,,implemented,RFC 9110 negotiation
+encoding,3,etag_encode,Caddy,,,,,,,,,,implemented,O(1) suffix ops,,,,,,implemented,ETag modification
+encoding,3,path_trim,Caddy,,,,,,,,,,implemented,O(n) escape-aware,,,,,,implemented,
+encoding,3,golomb_set,H2O,,,,,,,,,,implemented,O(n) bit coding,,,,,,implemented,Golomb-Rice coded sets
+encoding,3,vary_encode,Varnish,,,,,,,,,,implemented,O(k log k) sorted,,,,,,implemented,compact binary Vary key
 http_codec,4,ngx_http_huff_encode,nginx,codec_huff_encode,short (12B),20.41,19.65,21.39,560.59,MiB/s,fast,O(n) table + bit packing,yes,good,good,moderate,medium,benchmarked,HPACK Huffman encode
 http_codec,4,ngx_http_huff_encode,nginx,codec_huff_encode,medium (30B),53.90,47.74,61.17,548.55,MiB/s,fast,O(n) table + bit packing,yes,good,good,moderate,medium,benchmarked,
 http_codec,4,ngx_http_huff_encode,nginx,codec_huff_encode,long (66B),60.59,58.87,62.50,1.01,GiB/s,fast,O(n) table + bit packing,yes,excellent,excellent,good,low,benchmarked,
@@ -130,12 +130,12 @@ http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,two_blocks,36.89,35.
 http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,ten_blocks,88.66,84.74,93.66,,n/a,fast,O(blocks) decompose,yes,excellent,excellent,good,low,benchmarked,
 http_codec,4,RangeSlicer::slice,ATS,http_codec_range_slicer,hundred_blocks,294.29,290.87,297.69,,n/a,moderate,O(blocks) decompose,yes,good,good,moderate,medium,benchmarked,
 http_codec,4,RangeSlicer::parse_content_range,ATS,http_codec_range_slicer,header_parse,60.88,60.17,61.61,,n/a,fast,O(n) string parse,no,excellent,excellent,excellent,none,benchmarked,
-http_codec,4,ws_mask,Caddy,,,,,,,,,,planned,O(n) XOR masking,,,,,,not_implemented,WebSocket frame masking
-http_codec,4,vary_key,Pingora,,,,,,,,,,planned,O(k log k) BTreeMap,,,,,,not_implemented,order-independent Vary key
-http_codec,4,replay_body,linkerd2-proxy,,,,,,,,,,planned,O(n) buffer,,,,,,not_implemented,retryable body replay
-http_codec,4,ttl_calc,Varnish,,,,,,,,,,planned,O(1) arithmetic,,,,,,not_implemented,RFC 7234 TTL calculator
-http_codec,4,h2_scheduler,H2O,,,,,,,,,,planned,O(log n) WFQ,,,,,,not_implemented,HTTP/2 dependency-tree scheduler
-http_codec,4,ext_priority,H2O,,,,,,,,,,planned,O(1) parse,,,,,,not_implemented,RFC 9218 Extensible Priorities
+http_codec,4,ws_mask,Caddy,,,,,,,,,,implemented,O(n) XOR masking,,,,,,implemented,WebSocket frame masking
+http_codec,4,vary_key,Pingora,,,,,,,,,,implemented,O(k log k) BTreeMap,,,,,,implemented,order-independent Vary key
+http_codec,4,replay_body,linkerd2-proxy,,,,,,,,,,implemented,O(n) buffer,,,,,,implemented,retryable body replay
+http_codec,4,ttl_calc,Varnish,,,,,,,,,,implemented,O(1) arithmetic,,,,,,implemented,RFC 7234 TTL calculator
+http_codec,4,h2_scheduler,H2O,,,,,,,,,,implemented,O(log n) WFQ,,,,,,implemented,HTTP/2 dependency-tree scheduler
+http_codec,4,ext_priority,H2O,,,,,,,,,,implemented,O(1) parse,,,,,,implemented,RFC 9218 Extensible Priorities
 networking,5,ngx_inet_addr,nginx,inet_addr_v4,loopback,13.86,12.43,15.45,,n/a,fast,O(n) dotted-decimal,no,excellent,excellent,excellent,none,benchmarked,
 networking,5,ngx_inet_addr,nginx,inet_addr_v4,private,14.25,14.15,14.37,,n/a,fast,O(n) dotted-decimal,no,excellent,excellent,excellent,none,benchmarked,
 networking,5,ngx_inet_addr,nginx,inet_addr_v4,public,17.64,16.40,19.10,,n/a,fast,O(n) dotted-decimal,no,excellent,excellent,excellent,none,benchmarked,
@@ -144,11 +144,11 @@ networking,5,ngx_inet6_addr,nginx,inet_addr_v6,full (39B),87.88,76.74,100.38,,n/
 networking,5,ngx_inet6_addr,nginx,inet_addr_v6,compressed (24B),51.96,47.39,57.15,,n/a,fast,O(n) colon-hex parse,no,excellent,excellent,good,low,benchmarked,
 networking,5,ngx_proxy_protocol_v1_parse_inet,nginx,inet_proxy_v1,TCP4 header,51.93,45.89,59.26,,n/a,moderate,O(n) text parse,yes,good,good,moderate,medium,benchmarked,text-based — 50x slower than v2
 networking,5,ngx_proxy_protocol_v2_parse_inet,nginx,inet_proxy_v2,binary header,0.97,0.95,0.99,,n/a,fast,O(1) memcpy,yes,excellent,excellent,excellent,none,benchmarked,sub-nanosecond binary parse
-networking,5,sni_check,Traefik,,,,,,,,,,planned,O(n) compare,,,,,,not_implemented,domain fronting protection
-networking,5,cname_flatten,Traefik,,,,,,,,,,planned,O(chain) recursive,,,,,,not_implemented,CNAME chain resolution
-networking,5,domain_dedup,Traefik,,,,,,,,,,planned,O(n log n) sort,,,,,,not_implemented,ACME domain dedup
-networking,5,cert_selection,Caddy,,,,,,,,,,planned,O(n) multi-criteria,,,,,,not_implemented,certificate selection
-networking,5,sni_index,Caddy,,,,,,,,,,planned,O(1) hash lookup,,,,,,not_implemented,SNI-indexed policy fast path
+networking,5,sni_check,Traefik,,,,,,,,,,implemented,O(n) compare,,,,,,implemented,domain fronting protection
+networking,5,cname_flatten,Traefik,,,,,,,,,,implemented,O(chain) recursive,,,,,,implemented,CNAME chain resolution
+networking,5,domain_dedup,Traefik,,,,,,,,,,implemented,O(n log n) sort,,,,,,implemented,ACME domain dedup
+networking,5,cert_selection,Caddy,,,,,,,,,,implemented,O(n) multi-criteria,,,,,,implemented,certificate selection
+networking,5,sni_index,Caddy,,,,,,,,,,implemented,O(1) hash lookup,,,,,,implemented,SNI-indexed policy fast path
 parsing,6,ngx_atoi,nginx,parse_atoi,small (2B),2.54,2.50,2.59,,n/a,fast,O(n) digit scan,no,excellent,excellent,excellent,none,benchmarked,
 parsing,6,ngx_atoi,nginx,parse_atoi,medium (6B),6.33,6.10,6.59,,n/a,fast,O(n) digit scan,no,excellent,excellent,excellent,none,benchmarked,
 parsing,6,ngx_atoi,nginx,parse_atoi,large (10B),11.00,10.47,11.67,,n/a,fast,O(n) digit scan,no,excellent,excellent,excellent,none,benchmarked,
@@ -196,10 +196,12 @@ rate_limiting,8,Histogram::record,ATS,rate_limit_histogram,large (20/6),1.54,1.5
 rate_limiting,8,Histogram::percentile,ATS,rate_limit_histogram,p99 (10K samples),137.44,133.30,142.63,,n/a,fast,O(buckets) scan,no,excellent,excellent,good,low,benchmarked,
 rate_limiting,8,IpReputation::record_hit,ATS,rate_limit_ip_reputation,256 IPs,1099.90,1085.40,1113.60,,n/a,moderate,O(tiers) sieve lookup,yes,good,good,moderate,medium,benchmarked,~1µs per hit — sieve overhead
 rate_limiting,8,IpReputation::reputation,ATS,rate_limit_ip_reputation,lookup,18.01,17.78,18.24,,n/a,fast,O(1) hash lookup,yes,excellent,excellent,excellent,none,benchmarked,18ns read-only query
-rate_limiting,8,freq_ctr,HAProxy,,,,,,,,,,planned,O(1) CAS atomic,,,,,,not_implemented,sliding-window frequency counter
-rate_limiting,8,atomic_token_bucket,Envoy,,,,,,,,,,planned,O(1) CAS atomic,,,,,,not_implemented,Folly-inspired token bucket
-rate_limiting,8,gradient_controller,Envoy,,,,,,,,,,planned,O(1) arithmetic,,,,,,not_implemented,adaptive concurrency limiter
-rate_limiting,8,admission_control,Envoy,,,,,,,,,,planned,O(1) probabilistic,,,,,,not_implemented,rolling success rate rejection
+rate_limiting,8,freq_ctr,HAProxy,,,,,,,,,,implemented,O(1) CAS atomic,,,,,,implemented,sliding-window frequency counter
+rate_limiting,8,atomic_token_bucket,Envoy,,,,,,,,,,implemented,O(1) CAS atomic,,,,,,implemented,Folly-inspired token bucket
+rate_limiting,8,gradient_controller,Envoy,,,,,,,,,,implemented,O(1) arithmetic,,,,,,implemented,adaptive concurrency limiter
+rate_limiting,8,admission_control,Envoy,,,,,,,,,,implemented,O(1) probabilistic,,,,,,implemented,rolling success rate rejection
+rate_limiting,8,codel,Paper,,,,,,,,,,implemented,O(1) queue delay,,,,,,implemented,CoDel adaptive queue delay (RFC 8289)
+rate_limiting,8,dagor,Paper,,,,,,,,,,implemented,O(1) priority admit,,,,,,implemented,DAGOR compound overload control (WeChat)
 upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,3 backends,2.42,2.15,2.75,,n/a,fast,O(retries) mod hash,yes,excellent,excellent,excellent,none,benchmarked,
 upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,10 backends,5.39,5.10,5.75,,n/a,fast,O(retries) mod hash,yes,excellent,excellent,excellent,none,benchmarked,
 upstream_pick,9,ngx_ip_hash_select,nginx,inet_ip_hash,100 backends,58.09,55.67,61.29,,n/a,fast,O(retries) mod hash,yes,excellent,excellent,good,low,benchmarked,
@@ -208,51 +210,52 @@ upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,2 buckets,1.90,1
 upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,5 buckets,1.74,1.73,1.75,,n/a,fast,O(n) linear scan,yes,excellent,excellent,excellent,none,benchmarked,
 upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,20 buckets,5.62,5.60,5.65,,n/a,fast,O(n) linear scan,yes,excellent,excellent,excellent,none,benchmarked,
 upstream_pick,9,ngx_split_clients_pick,nginx,inet_split_clients,100 buckets,24.15,23.97,24.34,,n/a,fast,O(n) linear scan,yes,excellent,excellent,good,low,benchmarked,consider binary search at 100+
-upstream_pick,9,fwlc,HAProxy,,,,,,,,,,planned,O(log n) BTreeMap,,,,,,not_implemented,Fast Weighted Least Connections
-upstream_pick,9,fwrr,HAProxy,,,,,,,,,,planned,O(1) 3-tree,,,,,,not_implemented,Fast Weighted Round Robin
-upstream_pick,9,fas,HAProxy,,,,,,,,,,planned,O(n) scan,,,,,,not_implemented,First Available Server
-upstream_pick,9,chash_bounded,HAProxy,,,,,,,,,,planned,O(1) ring,,,,,,not_implemented,Consistent Hash with Bounded Loads
-upstream_pick,9,maglev,Envoy,,,,,,,,,,planned,O(1) table lookup,,,,,,not_implemented,Maglev consistent hashing
-upstream_pick,9,edf,Envoy,,,,,,,,,,planned,O(log n) min-heap,,,,,,not_implemented,Earliest Deadline First
-upstream_pick,9,wrsq,Envoy,,,,,,,,,,planned,O(1) FIFO,,,,,,not_implemented,Weighted Random Selection Queue
-upstream_pick,9,slow_start,Envoy,,,,,,,,,,planned,O(1) ramp,,,,,,not_implemented,slow start weight ramp
-upstream_pick,9,locality_lb,Envoy,,,,,,,,,,planned,O(zones) weighted,,,,,,not_implemented,locality-weighted LB
-upstream_pick,9,priority_lb,Envoy,,,,,,,,,,planned,O(levels) failover,,,,,,not_implemented,priority-based distribution
-upstream_pick,9,peak_ewma,linkerd2-proxy,,,,,,,,,,planned,O(1) decay,,,,,,not_implemented,Peak EWMA latency-based LB
-upstream_pick,9,completion_tracker,linkerd2-proxy,,,,,,,,,,planned,O(1) signal,,,,,,not_implemented,load completion signaling
-crypto,10,apr1,nginx,,,,,,,,,,planned,O(n) iterated MD5,,,,,,not_implemented,Apache APR1 password hash
-crypto,10,plain_check,nginx,,,,,,,,,,planned,O(n) compare,,,,,,not_implemented,plaintext password check
-crypto,10,sha_ssha,nginx,,,,,,,,,,planned,O(n) SHA digest,,,,,,not_implemented,SHA/SSHA password hash
-text,11,ngx_utf8_decode,nginx,,,,,,,,,,planned,O(n) byte scan,,,,,,not_implemented,UTF-8 decode/validate (in nginx-algo)
-text,11,ngx_utf8_decode_scan,nginx,,,,,,,,,,planned,O(n) SIMD scan,,,,,,not_implemented,UTF-8 bulk validation (in nginx-algo)
-tree_algorithms,12,RadixTree32,nginx,,,,,,,,,,planned,O(depth) trie walk,,,,,,not_implemented,radix tree LPM (in nginx-algo)
-tree_algorithms,12,ngx_rbtree_timer_less,nginx,,,,,,,,,,planned,O(1) compare,,,,,,not_implemented,timer rbtree comparator (in nginx-algo)
-tree_algorithms,12,keyed_rbtree,nginx,,,,,,,,,,planned,O(log n) insert/find,,,,,,not_implemented,keyed red-black tree
-tree_algorithms,12,str_rbtree,nginx,,,,,,,,,,planned,O(log n * k) insert/find,,,,,,not_implemented,string-keyed red-black tree
-congestion,13,cubic,HAProxy,,,,,,,,,,planned,O(1) per ACK,,,,,,not_implemented,RFC 9438 CUBIC
-congestion,13,bbr_v3,HAProxy,,,,,,,,,,planned,O(1) per ACK,,,,,,not_implemented,BBRv3 model-based
+upstream_pick,9,fwlc,HAProxy,,,,,,,,,,implemented,O(log n) BTreeMap,,,,,,implemented,Fast Weighted Least Connections
+upstream_pick,9,fwrr,HAProxy,,,,,,,,,,implemented,O(1) 3-tree,,,,,,implemented,Fast Weighted Round Robin
+upstream_pick,9,fas,HAProxy,,,,,,,,,,implemented,O(n) scan,,,,,,implemented,First Available Server
+upstream_pick,9,chash_bounded,HAProxy,,,,,,,,,,implemented,O(1) ring,,,,,,implemented,Consistent Hash with Bounded Loads
+upstream_pick,9,maglev,Envoy,,,,,,,,,,implemented,O(1) table lookup,,,,,,implemented,Maglev consistent hashing
+upstream_pick,9,edf,Envoy,,,,,,,,,,implemented,O(log n) min-heap,,,,,,implemented,Earliest Deadline First
+upstream_pick,9,wrsq,Envoy,,,,,,,,,,implemented,O(1) FIFO,,,,,,implemented,Weighted Random Selection Queue
+upstream_pick,9,slow_start,Envoy,,,,,,,,,,implemented,O(1) ramp,,,,,,implemented,slow start weight ramp
+upstream_pick,9,locality_lb,Envoy,,,,,,,,,,implemented,O(zones) weighted,,,,,,implemented,locality-weighted LB
+upstream_pick,9,priority_lb,Envoy,,,,,,,,,,implemented,O(levels) failover,,,,,,implemented,priority-based distribution
+upstream_pick,9,peak_ewma,linkerd2-proxy,,,,,,,,,,implemented,O(1) decay,,,,,,implemented,Peak EWMA latency-based LB
+upstream_pick,9,completion_tracker,linkerd2-proxy,,,,,,,,,,implemented,O(1) signal,,,,,,implemented,load completion signaling
+upstream_pick,9,p2c,Paper,,,,,,,,,,implemented,O(1) two-sample,,,,,,implemented,Power of Two Choices (Mitzenmacher)
+crypto,10,apr1,nginx,,,,,,,,,,implemented,O(n) iterated MD5,,,,,,implemented,Apache APR1 password hash
+crypto,10,plain_check,nginx,,,,,,,,,,implemented,O(n) compare,,,,,,implemented,plaintext password check
+crypto,10,sha_ssha,nginx,,,,,,,,,,implemented,O(n) SHA digest,,,,,,implemented,SHA/SSHA password hash
+text,11,ngx_utf8_decode,nginx,,,,,,,,,,implemented,O(n) byte scan,,,,,,implemented,UTF-8 decode/validate (in nginx-algo)
+text,11,ngx_utf8_decode_scan,nginx,,,,,,,,,,implemented,O(n) SIMD scan,,,,,,implemented,UTF-8 bulk validation (in nginx-algo)
+tree_algorithms,12,RadixTree32,nginx,,,,,,,,,,implemented,O(depth) trie walk,,,,,,implemented,radix tree LPM (in nginx-algo)
+tree_algorithms,12,ngx_rbtree_timer_less,nginx,,,,,,,,,,implemented,O(1) compare,,,,,,implemented,timer rbtree comparator (in nginx-algo)
+tree_algorithms,12,keyed_rbtree,nginx,,,,,,,,,,implemented,O(log n) insert/find,,,,,,implemented,keyed red-black tree
+tree_algorithms,12,str_rbtree,nginx,,,,,,,,,,implemented,O(log n * k) insert/find,,,,,,implemented,string-keyed red-black tree
+congestion,13,cubic,HAProxy,,,,,,,,,,implemented,O(1) per ACK,,,,,,implemented,RFC 9438 CUBIC
+congestion,13,bbr_v3,HAProxy,,,,,,,,,,implemented,O(1) per ACK,,,,,,implemented,BBRv3 model-based
 resilience,14,PromotionPolicy::should_promote,ATS,resilience_cache_promote,threshold=1,83.59,78.13,90.43,,n/a,fast,O(1) LRU hash lookup,yes,excellent,excellent,excellent,none,benchmarked,
 resilience,14,PromotionPolicy::should_promote,ATS,resilience_cache_promote,threshold=3,62.57,61.89,63.26,,n/a,fast,O(1) LRU hash lookup,yes,excellent,excellent,excellent,none,benchmarked,
 resilience,14,PromotionPolicy::should_promote,ATS,resilience_cache_promote,threshold=10,62.81,62.36,63.22,,n/a,fast,O(1) LRU hash lookup,yes,excellent,excellent,excellent,none,benchmarked,
 resilience,14,chance_promote,ATS,resilience_cache_promote,10pct,7.82,7.79,7.85,,n/a,fast,O(1) RNG,no,excellent,excellent,excellent,none,benchmarked,
 resilience,14,chance_promote,ATS,resilience_cache_promote,50pct,11.87,11.48,12.25,,n/a,fast,O(1) RNG,no,excellent,excellent,excellent,none,benchmarked,
 resilience,14,chance_promote,ATS,resilience_cache_promote,90pct,9.52,9.21,9.91,,n/a,fast,O(1) RNG,no,excellent,excellent,excellent,none,benchmarked,
-resilience,14,circuit_breaker,Traefik,,,,,,,,,,planned,O(1) state machine,,,,,,not_implemented,3-state circuit breaker
-resilience,14,backoff,Traefik,,,,,,,,,,planned,O(1) exponential,,,,,,not_implemented,bounded exponential backoff
-resilience,14,passive_health,Traefik,,,,,,,,,,planned,O(1) sliding window,,,,,,not_implemented,passive health checker
-resilience,14,retry_budget,Envoy,,,,,,,,,,planned,O(1) percentage,,,,,,not_implemented,dynamic retry budget
-resilience,14,stampede_lock,Pingora,,,,,,,,,,planned,O(1) permit/wait,,,,,,not_implemented,cache thundering-herd prevention
-resilience,14,failfast,linkerd2-proxy,,,,,,,,,,planned,O(1) gate,,,,,,not_implemented,readiness-based circuit breaker
-fix_protocol,15,fix_parse,HAProxy,,,,,,,,,,planned,O(n) tag-value,,,,,,not_implemented,FIX protocol parser
-mqtt,16,mqtt_parse,HAProxy,,,,,,,,,,planned,O(n) CONNECT parse,,,,,,not_implemented,MQTT v3.1/3.1.1/5.0
-jwt_pattern,17,jwt_tokenize,HAProxy,,,,,,,,,,planned,O(n) dot-split,,,,,,not_implemented,JWT tokenize + JWS verify
-jwt_pattern,17,pattern_matcher,HAProxy,,,,,,,,,,planned,O(patterns) multi-type,,,,,,not_implemented,14-type pattern matcher
-jwt_pattern,17,matcher_tree,Traefik,,,,,,,,,,planned,O(depth) boolean eval,,,,,,not_implemented,binary matcher tree
-jwt_pattern,17,ban_evaluator,Varnish,,,,,,,,,,planned,O(predicates) conjunction,,,,,,not_implemented,predicate-based cache invalidation
+resilience,14,circuit_breaker,Traefik,,,,,,,,,,implemented,O(1) state machine,,,,,,implemented,3-state circuit breaker
+resilience,14,backoff,Traefik,,,,,,,,,,implemented,O(1) exponential,,,,,,implemented,bounded exponential backoff
+resilience,14,passive_health,Traefik,,,,,,,,,,implemented,O(1) sliding window,,,,,,implemented,passive health checker
+resilience,14,retry_budget,Envoy,,,,,,,,,,implemented,O(1) percentage,,,,,,implemented,dynamic retry budget
+resilience,14,stampede_lock,Pingora,,,,,,,,,,implemented,O(1) permit/wait,,,,,,implemented,cache thundering-herd prevention
+resilience,14,failfast,linkerd2-proxy,,,,,,,,,,implemented,O(1) gate,,,,,,implemented,readiness-based circuit breaker
+fix_protocol,15,fix_parse,HAProxy,,,,,,,,,,implemented,O(n) tag-value,,,,,,implemented,FIX protocol parser
+mqtt,16,mqtt_parse,HAProxy,,,,,,,,,,implemented,O(n) CONNECT parse,,,,,,implemented,MQTT v3.1/3.1.1/5.0
+jwt_pattern,17,jwt_tokenize,HAProxy,,,,,,,,,,implemented,O(n) dot-split,,,,,,implemented,JWT tokenize + JWS verify
+jwt_pattern,17,pattern_matcher,HAProxy,,,,,,,,,,implemented,O(patterns) multi-type,,,,,,implemented,14-type pattern matcher
+jwt_pattern,17,matcher_tree,Traefik,,,,,,,,,,implemented,O(depth) boolean eval,,,,,,implemented,binary matcher tree
+jwt_pattern,17,ban_evaluator,Varnish,,,,,,,,,,implemented,O(predicates) conjunction,,,,,,implemented,predicate-based cache invalidation
 fingerprint,18,Ja4Fingerprint::compute,ATS,fingerprint_ja4,minimal (3c/5e),3724.00,3654.40,3794.00,,n/a,moderate,O(c+e) sort + hash,yes,good,good,moderate,medium,benchmarked,JA4 TLS fingerprint
 fingerprint,18,Ja4Fingerprint::compute,ATS,fingerprint_ja4,typical (15c/20e),6514.10,6449.50,6586.80,,n/a,moderate,O(c+e) sort + hash,yes,good,good,moderate,medium,benchmarked,
 fingerprint,18,Ja4Fingerprint::compute,ATS,fingerprint_ja4,large (40c/50e),12137.00,12005.00,12281.00,,n/a,slow,O(c+e) sort + hash,yes,moderate,moderate,poor,high,benchmarked,12µs — optimize for MAANG TLS inspection
-fingerprint,18,os_fingerprint,HAProxy,,,,,,,,,,planned,O(n) TCP/IP passive,,,,,,not_implemented,TCP/IP passive OS fingerprinting
+fingerprint,18,os_fingerprint,HAProxy,,,,,,,,,,implemented,O(n) TCP/IP passive,,,,,,implemented,TCP/IP passive OS fingerprinting
 ,,,,,,,,,,,,,,,,,,,,
 ,,,OPTIMIZED VARIANTS,,,,,,,,,,,,,,,,,,
 checksum,2,crc32_slice4 (optimized),lynxx,opt_crc32_vs,16B,4.90,4.85,4.94,3.04,GiB/s,fast,O(n/4) slicing-by-4,yes,excellent,excellent,excellent,none,optimized,2.9× faster than ngx_crc32_long_table

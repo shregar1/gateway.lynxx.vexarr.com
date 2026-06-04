@@ -605,5 +605,33 @@ name = "fingerprint_os_fingerprint"
 path = "benches/fingerprint/os_fingerprint.rs"
 harness = false
 
+# ── goals: crypto ──
+[[bench]]
+name = "crypto_apr1"
+path = "benches/crypto/apr1.rs"
+harness = false
+
+[[bench]]
+name = "crypto_plain_check"
+path = "benches/crypto/plain_check.rs"
+harness = false
+
+[[bench]]
+name = "crypto_sha_ssha"
+path = "benches/crypto/sha_ssha.rs"
+harness = false
+
+# ── goals: pattern (ban_evaluator) ──
+[[bench]]
+name = "pattern_ban_evaluator"
+path = "benches/pattern/ban_evaluator.rs"
+harness = false
+
+# ── goals: text (utf8_scan) ──
+[[bench]]
+name = "text_utf8_scan"
+path = "benches/text/utf8_scan.rs"
+harness = false
+
 # NOTE: [profile.bench] is at the WORKSPACE ROOT Cargo.toml
 # (profiles in member crates are ignored by cargo)
