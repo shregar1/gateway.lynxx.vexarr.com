@@ -58,8 +58,11 @@ impl AggregateWriteBuffer {
             return None;
         }
         let aligned_pos = self.align_up(self.write_pos);
-        if aligned_pos + data.len() > self.capacity {
-            return None;
+        // Bug fix (defense in depth): use checked_add so a near-usize::MAX
+        // length cannot wrap the bounds check into a false "fits" result.
+        match aligned_pos.checked_add(data.len()) {
+            Some(end) if end <= self.capacity => {}
+            _ => return None,
         }
         self.write_pos = aligned_pos;
         self.buffer[self.write_pos..self.write_pos + data.len()].copy_from_slice(data);
@@ -84,8 +87,11 @@ impl AggregateWriteBuffer {
             return None;
         }
         let aligned_pos = self.align_up(self.write_pos);
-        if aligned_pos + size > self.capacity {
-            return None;
+        // Bug fix (defense in depth): use checked_add so a near-usize::MAX
+        // size cannot wrap the bounds check into a false "fits" result.
+        match aligned_pos.checked_add(size) {
+            Some(end) if end <= self.capacity => {}
+            _ => return None,
         }
         self.write_pos = aligned_pos;
         let offset = self.write_pos;
@@ -100,10 +106,18 @@ impl AggregateWriteBuffer {
 
     /// Read back data from the buffer (for read-while-write scenarios).
     pub fn read(&self, offset: usize, length: usize) -> Option<&[u8]> {
-        if length == 0 || offset + length > self.write_pos {
-            return None;
+        // Bug fix: the previous guard `offset + length > self.write_pos` could
+        // overflow. With overflow-checks off (release) `offset + length` wraps
+        // (e.g. usize::MAX + 1 -> 0), the comparison passes as in-bounds, and
+        // the slice `buffer[usize::MAX..0]` panics on the inverted range; in
+        // debug the add itself panics. Use checked_add so an overflowing
+        // request returns None instead of panicking.
+        match offset.checked_add(length) {
+            Some(end) if length != 0 && end <= self.write_pos => {
+                Some(&self.buffer[offset..end])
+            }
+            _ => None,
         }
-        Some(&self.buffer[offset..offset + length])
     }
 
     /// Get the buffer contents for flushing, aligned up to the alignment boundary.
@@ -115,6 +129,14 @@ impl AggregateWriteBuffer {
 
     /// Reset the buffer after a flush, clearing all pending entries.
     pub fn reset(&mut self) {
+        // Bug fix: previously reset() rewound write_pos without zeroing the
+        // buffer, so a subsequent fill cycle's flush_data() would emit stale
+        // bytes from the prior cycle in the alignment-padding region (an
+        // information leak of prior-cycle data). Zero the just-used region
+        // (rounded up to the alignment boundary, the extent flush_data may
+        // expose) before rewinding so padding bytes are always zeros.
+        let prev = self.align_up(self.write_pos).min(self.capacity);
+        self.buffer[..prev].fill(0);
         self.write_pos = 0;
         self.pending_entries.clear();
     }
@@ -348,6 +370,37 @@ mod tests {
         buf.append(&[0u8; 1], 1);
         let wr2 = buf.append(&[1u8; 1], 2).unwrap();
         assert_eq!(wr2.offset, 4096);
+    }
+
+    #[test]
+    fn test_reset_zeros_padding_no_stale_leak() {
+        // Regression: reset() must not leave prior-cycle bytes in the region
+        // that flush_data() exposes as alignment padding. Without zeroing on
+        // reset, bytes 100..512 below would still be 0xAA from the first cycle.
+        let mut buf = AggregateWriteBuffer::new(4096, 512);
+        buf.append(&[0xAA; 600], 1).unwrap();
+        buf.reset();
+        buf.append(&[0xBB; 100], 2).unwrap();
+        let flushed = buf.flush_data();
+        assert_eq!(flushed.len(), 512);
+        assert_eq!(&flushed[..100], &[0xBB; 100]);
+        // The padding region must be zeros, not the previous cycle's 0xAA.
+        assert!(
+            flushed[100..512].iter().all(|&b| b == 0),
+            "flush_data padding leaked stale bytes from a previous cycle"
+        );
+    }
+
+    #[test]
+    fn test_read_overflow_offset_returns_none() {
+        // Regression: read(offset, length) with offset+length overflowing must
+        // return None, not panic. Pre-fix the unchecked add wrapped to 0 and
+        // the guard passed, then buffer[usize::MAX..0] panicked on release.
+        let mut buf = AggregateWriteBuffer::new(4096, 1);
+        buf.append(b"hello", 1).unwrap();
+        assert!(buf.read(usize::MAX, 1).is_none());
+        assert!(buf.read(1, usize::MAX).is_none());
+        assert!(buf.read(usize::MAX, usize::MAX).is_none());
     }
 
     proptest! {

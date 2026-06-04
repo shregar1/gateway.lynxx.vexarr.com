@@ -32,11 +32,17 @@ fn compute_root_size(page_size: usize) -> usize {
     if page_size < 3 {
         return 1;
     }
-    let mut k = 1usize;
-    while (1usize << (k + 1)) - 1 <= page_size {
+    // BUG FIX: the loop previously used an unbounded `1usize << (k + 1)`, which
+    // for page_size >= 2^63 made the shift amount reach usize::BITS. In debug
+    // that panics ("attempt to shift left with overflow"); in release the shift
+    // wraps mod 64, keeping the `<= page_size` condition true forever (infinite
+    // loop / pinned CPU). Bound k against usize::BITS so the shift is always
+    // in range and the result saturates at the largest representable 2^k - 1.
+    let mut k = 1u32;
+    while k + 1 < usize::BITS && (1usize << (k + 1)) - 1 <= page_size {
         k += 1;
     }
-    (1 << k) - 1
+    (1usize << k) - 1
 }
 
 impl<T: PartialOrd> VmHeap<T> {
@@ -229,6 +235,21 @@ mod tests {
         assert_eq!(compute_root_size(16), 15);
         assert_eq!(compute_root_size(512), 511);
         assert_eq!(compute_root_size(1023), 1023);
+    }
+
+    #[test]
+    fn test_compute_root_size_large_page_size_terminates() {
+        // Regression: compute_root_size previously overflowed its shift for
+        // page_size >= 2^(BITS-1). In debug it panicked ("attempt to shift
+        // left with overflow"); in release it infinite-looped because the
+        // shift wrapped mod BITS, keeping the `<= page_size` test true forever.
+        // The result must saturate at the largest representable 2^k - 1.
+        let max_complete = (1usize << (usize::BITS - 1)) - 1;
+        assert_eq!(compute_root_size(usize::MAX), max_complete);
+        assert_eq!(compute_root_size(1usize << (usize::BITS - 1)), max_complete);
+        // Reachable via the public constructor; must not panic or hang.
+        let heap: VmHeap<i32> = VmHeap::with_page_size(usize::MAX);
+        assert_eq!(heap.root_size, max_complete);
     }
 
     #[test]

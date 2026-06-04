@@ -77,9 +77,17 @@ impl FrequencySketch {
     /// Halve all counters (aging / reset). Implemented by right-shifting
     /// each nibble independently using a mask to prevent bit bleed.
     fn reset(&mut self) {
-        const ONES: u64 = 0x1111_1111_1111_1111;
+        // BUG FIX: the previous expression
+        //   (*word >> 1) & !ONES | (*word & ONES) >> 1
+        // dropped each nibble's LSB-of-floor and bled bit-0 of the
+        // next-higher nibble into bit-3 of the lower one, systematically
+        // under-counting (e.g. 2->0, 3->0) and contaminating neighbours.
+        // Correct halving is a whole-word >>1 followed by clearing bit-3
+        // (the bit that bled in from the next-higher nibble) of every
+        // nibble, yielding exact floor(n/2) per counter with no bleed.
+        const SEVENS: u64 = 0x7777_7777_7777_7777;
         for word in &mut self.table {
-            *word = (*word >> 1) & !ONES | (*word & ONES) >> 1;
+            *word = (*word >> 1) & SEVENS;
         }
     }
 }
@@ -426,6 +434,36 @@ mod tests {
             after <= (before + 1) / 2 + 1,
             "after reset: before={before}, after={after}"
         );
+    }
+
+    #[test]
+    fn frequency_sketch_reset_halves_exactly() {
+        // Regression: reset() must halve each counter to exactly floor(n/2)
+        // with no cross-nibble bleed. The old buggy expression produced
+        // e.g. 2->0, 3->0, 14->6 (under-counting + contamination); the
+        // loose existing test missed it, so assert exact halving here.
+        // Each value is exercised on a distinct key so the four hash
+        // positions all hold exactly `n` and frequency() returns `n`.
+        for &n in &[2u8, 3, 6, 7, 10, 11, 14, 15] {
+            let mut s = FrequencySketch::new(1024);
+            let hash = 0x1000 + n as u64; // distinct key per value
+            for _ in 0..n {
+                s.increment(hash);
+            }
+            assert_eq!(
+                s.frequency(hash),
+                n,
+                "pre-reset frequency mismatch for n={n}"
+            );
+            s.reset();
+            assert_eq!(
+                s.frequency(hash),
+                n / 2,
+                "reset must halve {n} to exactly {} (got {})",
+                n / 2,
+                s.frequency(hash)
+            );
+        }
     }
 
     #[test]

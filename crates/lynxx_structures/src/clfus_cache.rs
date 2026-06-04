@@ -44,6 +44,12 @@ struct HistoryEntry {
 
 const FILTER_SIZE: usize = 4096;
 
+/// Multiplicative decay applied to `average_value` each time the admission gate
+/// rejects a new key. Mirrors the EMA smoothing factor (0.9) and guarantees the
+/// rejection threshold relaxes toward 0 in bounded steps so a full cache cannot
+/// freeze permanently.
+const AVERAGE_DECAY: f64 = 0.9;
+
 impl<K, V> ClfusCache<K, V>
 where
     K: Clone + Eq + Hash,
@@ -101,6 +107,30 @@ where
             entry.value = value;
             entry.size = size;
             self.current_size = self.current_size.saturating_add(size);
+
+            // BUG FIX: the in-place update path used to return here without any
+            // make-room logic, so growing one or more existing entries let
+            // `current_size` exceed `capacity` (unbounded memory growth past the
+            // configured cap — N entries could each grow toward `capacity`).
+            // Now run the same eviction the new-key path uses to restore the
+            // size invariant. Detach the just-updated key from the LRU order so
+            // it is never chosen as its own eviction victim (eviction only ever
+            // picks from `lru_order`), then re-attach it as most-recently-used.
+            let detached = self
+                .lru_order
+                .iter()
+                .position(|k| k == &key)
+                .map(|pos| self.lru_order.remove(pos).is_some())
+                .unwrap_or(false);
+            while self.current_size > self.capacity && !self.lru_order.is_empty() {
+                self.evict_one();
+            }
+            // Re-attach the updated key. Because `size <= capacity` is enforced
+            // above, evicting every other entry always leaves room for it, so
+            // the invariant `current_size <= capacity` holds afterwards.
+            if detached {
+                self.lru_order.push_back(key.clone());
+            }
             return;
         }
 
@@ -121,6 +151,18 @@ where
             && !self.history.is_empty()
             && incoming_score < self.average_value
         {
+            // BUG FIX: this gate used to `return` outright. Because the running
+            // average could ONLY decrease via `update_average` (reachable only
+            // from `evict_one`, which is reachable only AFTER passing this gate),
+            // a full cache that began rejecting stayed frozen forever — the
+            // threshold was pinned and every subsequent new key was rejected,
+            // collapsing the hit rate to near-zero. Decay the average on each
+            // rejected admission attempt so the threshold relaxes over time and
+            // a stalled cache always recovers in a bounded number of attempts.
+            // (A plain EMA toward `incoming_score` is avoided here: with f64 it
+            // can stick exactly one ULP above the target and never cross the
+            // strict `<`, so the freeze would not be guaranteed to lift.)
+            self.average_value *= AVERAGE_DECAY;
             return;
         }
 
@@ -398,6 +440,79 @@ mod tests {
         cache.insert(key, 99, 100);
         // k0 should still be present (recently used)
         assert_eq!(cache.get(&"k0".to_string()), Some(&0));
+    }
+
+    /// Regression for the "admission filter permanently freezes the cache after
+    /// it fills" bug. Once the cache filled and the gate started rejecting,
+    /// `average_value` could only ever be lowered by an eviction that the gate
+    /// itself prevented, so every subsequent new key was rejected forever
+    /// (admissions collapsed to ~1). With the fix the threshold decays on each
+    /// rejected attempt, so a steady stream of brand-new keys keeps being
+    /// admitted. Fails on the frozen code (admitted == 1), passes with the fix.
+    #[test]
+    fn test_admission_filter_recovers_after_cache_fills() {
+        let mut cache: ClfusCache<u64, u64> = ClfusCache::new(1000);
+
+        // Fill exactly to capacity with ten low-value (score = 1/100) items.
+        for i in 0..10u64 {
+            cache.insert(i, i, 100); // first insert only marks the seen filter
+            cache.insert(i, i, 100); // second insert is admitted
+        }
+        assert_eq!(cache.size(), 1000);
+        assert_eq!(cache.len(), 10);
+
+        // Stream a long run of brand-new keys of the same size/score. On the
+        // buggy (frozen) cache only the very first eviction-triggering insert is
+        // admitted; the rest are rejected forever. With the fix the running
+        // average relaxes over rejected attempts and admissions resume.
+        let mut admitted = 0usize;
+        for i in 100..1100u64 {
+            cache.insert(i, i, 100);
+            cache.insert(i, i, 100);
+            if cache.get(&i).is_some() {
+                admitted += 1;
+            }
+        }
+
+        assert!(
+            admitted > 50,
+            "admission filter froze: only {} of 1000 new keys were admitted",
+            admitted
+        );
+        // The cache must still respect its capacity throughout.
+        assert!(cache.size() <= cache.capacity());
+    }
+
+    /// Regression for the "in-place update bypasses eviction and lets
+    /// current_size exceed capacity" bug. Growing existing entries used to skip
+    /// all make-room logic, so the summed size could blow past `capacity`. With
+    /// the fix, growing entries triggers eviction of *other* entries (never the
+    /// just-updated one) and the size invariant is preserved.
+    #[test]
+    fn test_in_place_update_growth_respects_capacity() {
+        let mut cache: ClfusCache<u64, u64> = ClfusCache::new(1000);
+
+        // Admit two entries that comfortably fit (200 of 1000 used).
+        cache.insert(1, 1, 100);
+        cache.insert(1, 1, 100);
+        cache.insert(2, 2, 100);
+        cache.insert(2, 2, 100);
+        assert_eq!(cache.size(), 200);
+        assert_eq!(cache.len(), 2);
+
+        // Grow both existing keys far past what fits together (900 + 900).
+        cache.insert(1, 1, 900);
+        cache.insert(2, 2, 900);
+
+        // Without the fix this left current_size == 1800 (> capacity 1000).
+        assert!(
+            cache.size() <= cache.capacity(),
+            "in-place update overflowed capacity: size {} > capacity {}",
+            cache.size(),
+            cache.capacity()
+        );
+        // The most-recently-updated key (2) must still fit and be resident.
+        assert_eq!(cache.get(&2), Some(&2));
     }
 
     proptest! {

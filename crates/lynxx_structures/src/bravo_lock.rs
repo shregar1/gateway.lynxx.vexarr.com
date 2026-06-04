@@ -138,10 +138,22 @@ impl<T> BravoLock<T> {
             let inhibit = self.inhibit_until.load(Ordering::Relaxed);
             if now >= inhibit {
                 let slot_idx = thread_slot();
-                // Try to claim the slot (CAS from false to true)
-                if !self.slots[slot_idx].active.swap(true, Ordering::Acquire) {
+                // Try to claim the slot (CAS from false to true).
+                //
+                // BUG FIX (soundness): this store-then-load handshake against the
+                // writer is a Dekker/seqlock-revocation pattern. The reader's slot
+                // store and its subsequent `rbias` load, together with the writer's
+                // `rbias` store and its slot scan, MUST share one total order, or
+                // StoreLoad reordering (allowed by Acquire/Release, and observable
+                // even on x86-TSO via the store buffer) permits the SB-litmus
+                // outcome where the writer's slot scan misses our `active=true`
+                // while our `rbias` load misses the writer's `rbias=false`. Both
+                // sides would then proceed, aliasing &T (fast-path reader) with
+                // &mut T (writer) => UB. SeqCst on both of the reader's accesses
+                // here (and on both of the writer's in `write()`) closes the window.
+                if !self.slots[slot_idx].active.swap(true, Ordering::SeqCst) {
                     // Verify bias wasn't revoked between our check and the slot claim
-                    if self.rbias.load(Ordering::Acquire) {
+                    if self.rbias.load(Ordering::SeqCst) {
                         return BravoReadGuard {
                             slot: Some(slot_idx),
                             lock: self,
@@ -167,14 +179,22 @@ impl<T> BravoLock<T> {
     /// wait until all readers drain, then acquire underlying write lock.
     /// Sets inhibit_until to prevent bias thrashing.
     pub fn write(&self) -> BravoWriteGuard<'_, T> {
-        // Disable reader bias
-        self.rbias.store(false, Ordering::Release);
+        // Disable reader bias.
+        //
+        // BUG FIX (soundness): see `read()`. This `rbias` store and the slot scan
+        // below form the writer half of the revocation handshake; they use SeqCst
+        // (matching the reader's SeqCst slot store + `rbias` load) so all four
+        // cross-checking accesses participate in a single total order. Without it,
+        // StoreLoad reordering lets the writer's scan observe a stale `active=false`
+        // while a fast-path reader's `rbias` load observes a stale `true`, so writer
+        // and reader overlap and alias &mut T with &T (UB).
+        self.rbias.store(false, Ordering::SeqCst);
 
         // Wait for all active slot readers to drain
         loop {
             let mut any_active = false;
             for slot in &self.slots {
-                if slot.active.load(Ordering::Acquire) {
+                if slot.active.load(Ordering::SeqCst) {
                     any_active = true;
                     break;
                 }
@@ -377,5 +397,73 @@ mod tests {
         // At least some should differ
         let unique: std::collections::HashSet<_> = slots.iter().collect();
         assert!(unique.len() > 1);
+    }
+
+    #[test]
+    fn concurrent_readers_never_observe_writer_sentinel() {
+        // Concurrency smoke test accompanying the SeqCst revocation-handshake fix.
+        //
+        // The bug: the reader/writer handshake used Acquire/Release on its four
+        // cross-checking accesses (reader's slot `swap` + `rbias` load; writer's
+        // `rbias` store + slot-scan load). That is a Dekker / store-then-load
+        // pattern that needs a single total order — Acquire/Release permits
+        // StoreLoad reordering, so the writer's scan could miss a reader's
+        // `active=true` while that reader's `rbias` load missed the writer's
+        // `rbias=false`, letting a fast-path reader's &T alias the writer's
+        // &mut T. The fix promotes those four accesses to SeqCst.
+        //
+        // HONEST CAVEAT: this test does NOT deterministically reproduce the
+        // store-buffer race. The window is tiny, and because every write arms a
+        // 5ms bias-inhibit, readers spend most of a hammer loop on the slow path,
+        // so the buggy Acquire/Release version would usually pass here too. Treat
+        // it as a non-flaky invariant check (a fast-path reader must never observe
+        // the writer's transient sentinel), not a guaranteed regression. The fix's
+        // correctness rests on the SeqCst total-order argument above; deterministic
+        // verification needs a model checker (loom) or ThreadSanitizer.
+        const SENTINEL: u64 = u64::MAX;
+        let lock = Arc::new(BravoLock::new(0u64));
+        let done = Arc::new(AtomicBool::new(false));
+
+        let readers: Vec<_> = (0..6)
+            .map(|_| {
+                let l = Arc::clone(&lock);
+                let d = Arc::clone(&done);
+                thread::spawn(move || {
+                    while !d.load(Ordering::Relaxed) {
+                        let g = l.read();
+                        // If a reader and writer ever overlap, the reader can
+                        // observe the writer's transient SENTINEL -> aliasing UB.
+                        assert_ne!(
+                            *g.get(),
+                            SENTINEL,
+                            "fast-path reader observed the writer's exclusive \
+                             sentinel: reader and writer overlapped (missing \
+                             SeqCst total order in the revocation handshake)"
+                        );
+                        drop(g);
+                        std::hint::spin_loop();
+                    }
+                })
+            })
+            .collect();
+
+        // Hammer the write path so revocations race against fast-path readers.
+        for i in 1..2_000u64 {
+            let mut w = lock.write();
+            // Enter the forbidden state while exclusive, then leave a valid
+            // value before dropping the guard.
+            *w = SENTINEL;
+            std::hint::spin_loop();
+            *w = i;
+        }
+
+        done.store(true, Ordering::Relaxed);
+        for h in readers {
+            h.join().unwrap();
+        }
+
+        // Final state is the last committed (non-sentinel) value.
+        let r = lock.read();
+        assert_eq!(*r.get(), 1_999);
     }
 }
