@@ -156,8 +156,16 @@ impl GolombSet {
 /// Compute the bounded universe `N = n * 2^p` for the Golomb-Coded Set,
 /// saturating to `u64::MAX` if the product would overflow. Always at least 1.
 fn reduction_universe(n: usize, p: u8) -> u64 {
+    // Bug fix: `checked_shl(p)` only returns `None` when `p >= 64`; for `p < 64`
+    // (always true here, since the caller clamps `p` to <= 63) it performs a
+    // wrapping shift, so a too-large product silently truncated to a small value
+    // — e.g. `(n=4, p=63)` wrapped to 0, collapsing the universe to 1 via
+    // `.max(1)` and making `contains()` return true for every input (mod-1).
+    // Detect the truncation by reversing the shift: if `v >> p != n` the high
+    // bits were lost, so saturate to `u64::MAX` per the doc comment instead.
     (n as u64)
         .checked_shl(p as u32)
+        .filter(|v| v >> p == n as u64)
         .unwrap_or(u64::MAX)
         .max(1)
 }
@@ -332,6 +340,42 @@ mod tests {
         );
         // A value that was inserted must be reported present.
         assert!(gs.contains(probe));
+    }
+
+    #[test]
+    fn high_p_does_not_collapse_universe() {
+        // Regression: with p=63 the universe `n * 2^p` overflows u64 and the
+        // shift wrapped to 0, collapsing `universe` to 1 (every hash % 1 == 0)
+        // so `contains()` returned true for EVERYTHING — a 100% false-positive
+        // rate. The fix saturates the universe to u64::MAX on overflow, so the
+        // set must NOT report absent values as present.
+        let mut hashes = vec![111u64, 222, 333, 444];
+        let gs = GolombSet::from_hashes(&mut hashes, 63);
+        assert_eq!(gs.len(), 4);
+        // Values that were never inserted must be reported absent.
+        assert!(!gs.contains(999_999), "absent value must not match");
+        assert!(!gs.contains(7), "absent value must not match");
+        assert!(!gs.contains(123_456_789), "absent value must not match");
+        // And the inserted values must still be found.
+        for &h in &[111u64, 222, 333, 444] {
+            assert!(gs.contains(h), "should contain {}", h);
+        }
+    }
+
+    #[test]
+    fn reduction_universe_saturates_on_overflow() {
+        // Directly exercise the helper at the overflowing (n, p) pairs the bug
+        // report flagged: each must saturate to u64::MAX, not wrap to a tiny
+        // (or zero -> 1) universe.
+        assert_eq!(reduction_universe(1000, 63), u64::MAX);
+        assert_eq!(reduction_universe(2, 63), u64::MAX);
+        assert_eq!(reduction_universe(1 << 24, 40), u64::MAX);
+        // Normal, non-overflowing cases stay exact.
+        assert_eq!(reduction_universe(1000, 10), 1_024_000);
+        assert_eq!(reduction_universe(5, 8), 1280);
+        // Edges: always at least 1.
+        assert_eq!(reduction_universe(1, 0), 1);
+        assert_eq!(reduction_universe(0, 8), 1);
     }
 
     #[test]

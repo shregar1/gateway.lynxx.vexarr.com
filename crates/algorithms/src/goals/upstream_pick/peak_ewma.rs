@@ -39,6 +39,12 @@ impl PeakEwmaLb {
     /// Pick the backend with the lowest cost.
     ///
     /// Cost = `ewma_rtt * max(active_conns, 1)`. Ties broken by index.
+    ///
+    /// Increments the chosen backend's active-connection count. Callers MUST
+    /// balance every `pick()` with exactly one of `record()` (request completed,
+    /// with an RTT sample) or `release()` (request failed before producing an
+    /// RTT) — otherwise the active count leaks and biases the backend out of
+    /// rotation. See the `release()` docs for the bug this asymmetry caused.
     pub fn pick(&self, now_ns: u64) -> usize {
         let _ = now_ns; // available for future decay-at-pick
         let mut best_idx = 0;
@@ -72,16 +78,52 @@ impl PeakEwmaLb {
             1.0
         };
 
-        let old_bits = self.ewma_ns[idx].load(Ordering::Relaxed);
-        let old_ewma = f64::from_bits(old_bits);
-        let new_ewma = old_ewma + alpha * (rtt - old_ewma);
+        // BUG FIX (lost update): the previous load/compute/store sequence was a
+        // non-atomic read-modify-write — two concurrent `record()` calls for the
+        // same idx could read the same old_bits and the second store would clobber
+        // the first, silently dropping an RTT sample. Use a CAS retry loop so every
+        // sample is folded into the EWMA atomically.
+        let _ = self.ewma_ns[idx].fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |old_bits| {
+                let old_ewma = f64::from_bits(old_bits);
+                let new_ewma = old_ewma + alpha * (rtt - old_ewma);
+                // Use peak: take the max of new_ewma and the sample
+                let peak = new_ewma.max(rtt);
+                Some(peak.to_bits())
+            },
+        );
 
-        // Use peak: take the max of new_ewma and the sample
-        let peak = new_ewma.max(rtt);
-        self.ewma_ns[idx].store(peak.to_bits(), Ordering::Relaxed);
+        // Decrement active connections.
+        // BUG FIX (counter underflow): a plain fetch_sub(1) wraps to u64::MAX when
+        // the counter is already 0 (e.g. a completion with no prior pick, or a
+        // double-complete). With overflow-checks=false the wrap is silent and the
+        // backend's cost becomes ~9.2e22, permanently removing it from selection.
+        // Saturate at 0 so an orphan completion is a harmless no-op.
+        let _ = self.active[idx].fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |x| Some(x.saturating_sub(1)),
+        );
+    }
 
-        // Decrement active connections
-        self.active[idx].fetch_sub(1, Ordering::Relaxed);
+    /// Release an active connection for backend `idx` without recording an RTT.
+    ///
+    /// BUG FIX (resource leak): `pick()` unconditionally increments
+    /// `active[idx]`, but the only decrement used to live in `record()`. On the
+    /// connection-failure path (backend down / connect timeout) the caller has
+    /// no RTT and never calls `record()`, so the counter leaked forever and the
+    /// backend's cost (`ewma_rtt * active`) stayed inflated with no self-heal.
+    /// This gives the failure path a symmetric counterpart to the `pick()`
+    /// increment (mirroring fwlc's `connect`/`release`); it is underflow-safe so
+    /// an unmatched release cannot wrap the counter to u64::MAX.
+    pub fn release(&self, idx: usize) {
+        let _ = self.active[idx].fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |x| Some(x.saturating_sub(1)),
+        );
     }
 
     /// Current EWMA RTT for backend `idx` in nanoseconds.
@@ -145,5 +187,83 @@ mod tests {
         lb.pick(0); // active[0] = 1
         lb.record(0, 1000, 1); // active[0] = 0
         assert_eq!(lb.active_conns(0), 0);
+    }
+
+    // Regression: an orphan `record()` (completion with no prior `pick()`, or a
+    // double-complete) used to `fetch_sub(1)` on a 0 counter and wrap to
+    // u64::MAX, exploding the backend's cost and removing it from selection.
+    // The decrement must now saturate at 0.
+    #[test]
+    fn orphan_record_does_not_underflow_active() {
+        let lb = PeakEwmaLb::new(2, 10_000_000_000);
+        // No pick() first: active[0] == 0.
+        lb.record(0, 1000, 1);
+        assert_eq!(lb.active_conns(0), 0, "orphan record must not wrap to u64::MAX");
+
+        // Double-complete: one pick, two records.
+        lb.pick(1); // active[1] == 1
+        lb.record(1, 1000, 2); // -> 0
+        lb.record(1, 1000, 3); // -> must stay 0, not wrap
+        assert_eq!(lb.active_conns(1), 0, "double-complete must not wrap to u64::MAX");
+
+        // The backend must remain selectable (cost finite, not ~9.2e22).
+        assert!(lb.pick(4) < 2);
+    }
+
+    // Regression: the connection-failure path produces no RTT, so `record()` is
+    // never called and the `pick()` increment used to leak forever. `release()`
+    // gives that path a symmetric, underflow-safe decrement.
+    #[test]
+    fn release_balances_pick_on_failure_path() {
+        let lb = PeakEwmaLb::new(2, 10_000_000_000);
+        let idx = lb.pick(0); // simulate dispatch
+        assert_eq!(lb.active_conns(idx), 1);
+        lb.release(idx); // simulate connect failure (no RTT recorded)
+        assert_eq!(lb.active_conns(idx), 0, "release must reclaim the leaked active count");
+
+        // release on a 0 counter is a harmless no-op, never an underflow.
+        lb.release(idx);
+        assert_eq!(lb.active_conns(idx), 0);
+    }
+
+    // Regression: `record()` used to load/compute/store the EWMA non-atomically,
+    // so concurrent same-index records dropped samples and, via the shared
+    // active-counter decrement, could lose decrements. With the CAS retry loops
+    // every increment is matched by exactly one decrement under contention, so
+    // the active count returns to 0.
+    #[test]
+    fn concurrent_records_do_not_lose_decrements() {
+        use std::sync::Arc;
+
+        let lb = Arc::new(PeakEwmaLb::new(1, 10_000_000_000));
+        const THREADS: usize = 8;
+        const ITERS: usize = 1000;
+
+        // Seed active[0] with exactly THREADS*ITERS outstanding "picks".
+        for _ in 0..(THREADS * ITERS) {
+            lb.pick(0);
+        }
+        assert_eq!(lb.active_conns(0), (THREADS * ITERS) as u64);
+
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let lb = Arc::clone(&lb);
+                std::thread::spawn(move || {
+                    for i in 0..ITERS {
+                        lb.record(0, 1000 + i as u64, i as u64);
+                    }
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // If a single decrement were lost to a non-atomic RMW this would be > 0.
+        assert_eq!(
+            lb.active_conns(0),
+            0,
+            "concurrent record() must not lose active-count decrements"
+        );
     }
 }

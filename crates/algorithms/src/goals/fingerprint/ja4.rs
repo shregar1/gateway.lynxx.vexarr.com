@@ -218,10 +218,24 @@ impl Ja4Fingerprint {
         let cipher_count = ciphers.len().min(99);
         let ext_count = exts.len().min(99);
 
-        let alpn = match &input.alpn_first {
-            Some(s) if s.len() >= 2 => s[..2].to_string(),
-            Some(s) if s.len() == 1 => format!("{}0", &s[..1]),
-            _ => "00".to_string(),
+        // BUG FIX: the previous `s[..2]`/`s[..1]` str slicing used byte offsets
+        // derived from `str::len()`, which panics when the ALPN string's leading
+        // character is a multibyte UTF-8 codepoint (e.g. "€x" or the U+FFFD
+        // produced by from_utf8_lossy on invalid ALPN bytes) — the byte index 2
+        // landed inside a char. Operate on raw bytes (taking the first two, like
+        // the optimized/ja4.rs path) so we never slice at a non-char-boundary.
+        let alpn = {
+            let b = input.alpn_first.as_deref().unwrap_or("").as_bytes();
+            match b.len() {
+                0 => "00".to_string(),
+                1 => format!("{}0", b[0] as char),
+                _ => {
+                    let mut t = String::with_capacity(2);
+                    t.push(b[0] as char);
+                    t.push(b[1] as char);
+                    t
+                }
+            }
         };
 
         let ja4_a = format!(
@@ -409,6 +423,22 @@ mod tests {
         input.alpn_first = Some("x".to_string());
         let fp = Ja4Fingerprint::compute(&input);
         assert!(fp.ja4_a.ends_with("_x0"), "ja4_a = {}", fp.ja4_a);
+    }
+
+    #[test]
+    fn multibyte_alpn_does_not_panic() {
+        // Regression: a multibyte UTF-8 leading char in the ALPN string used to
+        // panic via `s[..2]` slicing at a non-char-boundary. These inputs
+        // (len() >= 2 but first char is multibyte) previously aborted compute().
+        for alpn in ["€x", "\u{FFFD}", "\u{20AC}", "é€"] {
+            let mut input = sample_input();
+            input.alpn_first = Some(alpn.to_string());
+            let fp = Ja4Fingerprint::compute(&input);
+            // ja4_a is well-formed: prefix underscore then a 2-char ALPN hint.
+            let parts: Vec<&str> = fp.ja4_a.split('_').collect();
+            assert_eq!(parts.len(), 2, "ja4_a = {}", fp.ja4_a);
+            assert_eq!(parts[1].chars().count(), 2, "ja4_a = {}", fp.ja4_a);
+        }
     }
 
     #[test]

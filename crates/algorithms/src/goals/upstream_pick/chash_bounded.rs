@@ -28,6 +28,10 @@ impl BoundedCHash {
     /// connections (e.g. 1.25 means each node accepts at most 125 % of avg).
     pub fn new(nodes: &[&str], replicas: u32, load_factor: f64) -> Self {
         assert!(!nodes.is_empty(), "nodes must not be empty");
+        // Bug fix: replicas == 0 produced an empty ring (the `0..replicas` loop
+        // pushes nothing) while `active` still held nodes.len() entries, so any
+        // pick() fell through to `self.ring[start]` and panicked on the empty Vec.
+        assert!(replicas > 0, "replicas must be > 0");
         let mut ring = Vec::with_capacity(nodes.len() * replicas as usize);
 
         for (idx, &name) in nodes.iter().enumerate() {
@@ -54,6 +58,12 @@ impl BoundedCHash {
 
     /// Find the node responsible for `key`, respecting load bounds.
     pub fn pick(&self, key: &[u8]) -> usize {
+        // Bug fix: guard against an empty ring so pick() is total. With an empty
+        // ring the fallback `self.ring[start]` below would index out of bounds.
+        if self.ring.is_empty() {
+            return 0;
+        }
+
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
         let h = hasher.finish();
@@ -151,5 +161,14 @@ mod tests {
     fn ring_size() {
         let ch = BoundedCHash::new(&["x", "y"], 50, 1.5);
         assert_eq!(ch.ring_size(), 100);
+    }
+
+    // Regression: replicas == 0 used to build an empty ring, and the first
+    // pick() then indexed `self.ring[0]` out of bounds and panicked. new() now
+    // rejects replicas == 0 up front, so the empty ring can never be built.
+    #[test]
+    #[should_panic(expected = "replicas must be > 0")]
+    fn zero_replicas_rejected() {
+        let _ = BoundedCHash::new(&["a", "b", "c"], 0, 1.25);
     }
 }

@@ -42,8 +42,15 @@ pub fn check_domain_fronting(sni: &str, host_header: &str) -> bool {
     let host_domain = if let Some(bracket_end) = host.find(']') {
         // IPv6 literal: [::1]:443
         &host[..bracket_end + 1]
-    } else if let Some(colon_pos) = host.rfind(':') {
-        // Check if everything after the colon is a valid port.
+    } else if host.matches(':').count() == 1 {
+        // BUG FIX: a bare (unbracketed) IPv6 literal contains multiple colons
+        // (e.g. "2001:db8::1"), and its trailing hextet may be all digits — the
+        // previous `rfind(':')` logic mistook that hextet for a port and truncated
+        // the address (-> "2001:db8:"). Only treat a trailing numeric run as a port
+        // when the host has exactly one colon (hostname:port / IPv4:port). Multi-colon
+        // unbracketed values are raw IPv6 literals and must be left intact; bracketed
+        // "[..]:port" forms are already handled by the branch above.
+        let colon_pos = host.rfind(':').expect("exactly one colon present");
         let after = &host[colon_pos + 1..];
         if after.chars().all(|c| c.is_ascii_digit()) {
             &host[..colon_pos]
@@ -118,5 +125,18 @@ mod tests {
     #[test]
     fn test_fronting_case_insensitive() {
         assert!(check_domain_fronting("Example.COM", "example.com:8080"));
+    }
+
+    // Regression: a bare (unbracketed) IPv6 Host whose trailing hextet is all
+    // digits must NOT have that hextet stripped as a "port". Before the fix,
+    // "2001:db8::1" was truncated to "2001:db8:" and failed to match an
+    // identical SNI. (Bug: rfind(':') treated the final numeric group as a port.)
+    #[test]
+    fn test_fronting_bare_ipv6_numeric_tail() {
+        assert!(check_domain_fronting("2001:db8::1", "2001:db8::1"));
+        assert!(check_domain_fronting("fe80::1", "fe80::1"));
+        assert!(check_domain_fronting("::1", "::1"));
+        // Distinct bare-IPv6 addresses must still be reported as differing.
+        assert!(!check_domain_fronting("2001:db8::1", "2001:db8::2"));
     }
 }

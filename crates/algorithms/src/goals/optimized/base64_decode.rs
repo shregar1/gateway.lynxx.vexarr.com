@@ -78,11 +78,34 @@ pub fn decode_base64url_fast(dst: &mut [u8], src: &[u8]) -> isize {
 
 #[inline(always)]
 fn decode_internal_fast(dst: &mut [u8], src: &[u8], lut: &[u8; 256]) -> isize {
-    // Find actual data length (strip padding and whitespace)
-    let mut src_len = src.len();
-    while src_len > 0 && (src[src_len - 1] == b'=' || src[src_len - 1] == b'\n' || src[src_len - 1] == b'\r') {
-        src_len -= 1;
-    }
+    // BUG FIX (was line 82): the old code determined the data length by
+    // stripping a *trailing* run of '=' / '\r' / '\n'. That diverged from the
+    // canonical `ngx_decode_base64` in two ways:
+    //   (1) Permissive: trailing CR/LF (e.g. "n9Gb\r") was silently stripped and
+    //       decoded, but any byte not in the alphabet (incl. CR/LF) must error.
+    //   (2) Regression: an interior '=' followed by more data (e.g. "Awyt=+Zh")
+    //       hit the 0xff sentinel mid-stream and returned -1, but '=' is a hard
+    //       terminator — the canonical decoder decodes only the prefix "Awyt".
+    // Replicate the reference's length determination: scan from the start, treat
+    // the first '=' as a hard terminator, and error on the first non-alphabet
+    // byte (LUT sentinel 0xff). Then decode exactly [0, src_len).
+    let src_len = {
+        let mut i = 0usize;
+        while i < src.len() {
+            let byte = src[i];
+            if byte == b'=' {
+                // Padding marks the end of the encoded data (hard terminator).
+                break;
+            }
+            if lut[byte as usize] == B64_INVALID {
+                // CR/LF/whitespace/any other non-alphabet byte is rejected,
+                // matching ngx_decode_base64 (returns NGX_ERROR).
+                return -1;
+            }
+            i += 1;
+        }
+        i
+    };
 
     if src_len == 0 {
         return 0;
@@ -230,5 +253,48 @@ mod tests {
         let mut dst = [0u8; 64];
         let n = decode_base64url_fast(&mut dst, src);
         assert!(n > 0);
+    }
+
+    // Regression for the length-determination bug (was line 82): the old
+    // trailing-strip logic diverged from the canonical ngx_decode_base64.
+
+    #[test]
+    fn rejects_trailing_cr() {
+        // "n9Gb\r": '\r' is not in the alphabet. The canonical decoder returns
+        // an error; the old trailing-strip logic wrongly decoded 3 bytes.
+        let src = b"n9Gb\r";
+        let mut dst = [0u8; 64];
+        let n = decode_base64_fast(&mut dst, src);
+        assert_eq!(n, -1);
+    }
+
+    #[test]
+    fn rejects_trailing_lf() {
+        // Same as above for '\n'.
+        let src = b"n9Gb\n";
+        let mut dst = [0u8; 64];
+        let n = decode_base64_fast(&mut dst, src);
+        assert_eq!(n, -1);
+    }
+
+    #[test]
+    fn rejects_interior_cr() {
+        // CR in the middle is also rejected, not silently passed through.
+        let src = b"n9\rGb";
+        let mut dst = [0u8; 64];
+        let n = decode_base64_fast(&mut dst, src);
+        assert_eq!(n, -1);
+    }
+
+    #[test]
+    fn interior_equals_terminates_and_decodes_prefix() {
+        // "Awyt=+Zh": '=' is a hard terminator. The canonical decoder decodes
+        // only the "Awyt" prefix = [3, 12, 173]; the old code returned -1
+        // because it saw the interior '=' map to the 0xff sentinel.
+        let src = b"Awyt=+Zh";
+        let mut dst = [0u8; 64];
+        let n = decode_base64_fast(&mut dst, src);
+        assert_eq!(n, 3);
+        assert_eq!(&dst[..n as usize], &[3u8, 12, 173]);
     }
 }

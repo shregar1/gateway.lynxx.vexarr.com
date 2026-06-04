@@ -108,12 +108,22 @@ pub fn unescape_uri_fast(dst: &mut [u8], src: &[u8], uri: bool) -> usize {
                     *dst_ptr.add(d) = decoded;
                     d += 1;
                     s += 2;
-                } else {
-                    // Invalid hex — emit the character after '%' as-is
-                    // (matches NGINX behavior: skip '%', emit next char)
+                } else if hi_val == 0xff {
+                    // First hex digit invalid (state 1, hex_val(ch) == None in the
+                    // reference): emit the char after '%' as a literal and consume
+                    // only that one byte; the second byte is re-scanned as input.
                     *dst_ptr.add(d) = hi;
                     d += 1;
                     s += 1;
+                } else {
+                    // BUG FIX: first hex digit valid but second invalid. The previous
+                    // single else-branch wrongly emitted `hi` as a literal and advanced
+                    // s by 1, leaving the second byte to be re-scanned — diverging from
+                    // ngx_unescape_uri (e.g. "%4G" yielded "4G" instead of ""). The
+                    // reference state machine reaches state 2 (decoded = hi), then on the
+                    // invalid second digit (hex_val == None) emits NOTHING and has already
+                    // advanced past BOTH pair bytes. Mirror that: consume both, emit none.
+                    s += 2;
                 }
             } else if s < src_len {
                 // Only one char after '%' — emit it
@@ -200,6 +210,35 @@ mod tests {
         let mut dst = [0u8; 64];
         let n = unescape_uri_fast(&mut dst, b"", false);
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn valid_then_invalid_hex_consumes_both_emits_nothing() {
+        // Regression for the '%<valid-hex><invalid-hex>' divergence. The reference
+        // ngx_unescape_uri reaches state 2 (first digit valid) and then, on an invalid
+        // second digit, consumes both pair bytes and emits NOTHING. The old code emitted
+        // the first hex char as a literal and re-scanned the second, producing extra bytes.
+
+        // First digit valid, second invalid -> "" (both bytes consumed).
+        let mut dst = [0u8; 64];
+        let n = unescape_uri_fast(&mut dst, b"%4G", false);
+        assert_eq!(&dst[..n], b"", "%4G must decode to empty, not \"4G\"");
+
+        // Trailing '%' as the invalid second digit must also be consumed, not re-scanned.
+        let mut dst = [0u8; 64];
+        let n = unescape_uri_fast(&mut dst, b"%0%", false);
+        assert_eq!(&dst[..n], b"", "%0%: trailing '%' is consumed as the 2nd pair byte");
+
+        // Same divergence in uri mode where the invalid 2nd digit is '?'.
+        let mut dst = [0u8; 64];
+        let n = unescape_uri_fast(&mut dst, b"%1?", true);
+        assert_eq!(&dst[..n], b"", "%1? must decode to empty in uri mode");
+
+        // Boundary check: when the FIRST digit is invalid, the reference DOES emit that
+        // char and re-scans the rest, so this branch must be preserved unchanged.
+        let mut dst = [0u8; 64];
+        let n = unescape_uri_fast(&mut dst, b"%G4", false);
+        assert_eq!(&dst[..n], b"G4", "%G4: first digit invalid emits 'G' then literal '4'");
     }
 
     #[test]

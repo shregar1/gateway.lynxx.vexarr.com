@@ -34,7 +34,16 @@ pub fn parse_accept_encoding(header: &str) -> Vec<EncodingPref> {
             let enc = part[..semi_pos].trim();
             let params = part[semi_pos + 1..].trim();
             let q = if let Some(qval) = params.strip_prefix("q=").or_else(|| params.strip_prefix("Q=")) {
-                qval.trim().parse::<f32>().unwrap_or(1.0).clamp(0.0, 1.0)
+                // Bug fix: `"nan"`/`"inf"` parse successfully to a non-finite f32, so a bare
+                // `.unwrap_or(1.0)` stored NaN, which later failed every `q > 0.0` check in
+                // select_encoding and silently dropped the encoding. Filter out non-finite
+                // results so malformed qvalues fall back to the documented default of 1.0.
+                qval.trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(1.0)
+                    .clamp(0.0, 1.0)
             } else {
                 1.0
             };
@@ -169,5 +178,35 @@ mod tests {
         let result = select_encoding(&prefs, &["br", "gzip"]);
         // Both have q=1.0, but "br" is checked first in supported list
         assert!(result.is_some());
+    }
+
+    // Regression: a non-finite quality token (`q=nan`) must fall back to the
+    // documented default of 1.0 rather than storing NaN, which previously caused
+    // the encoding to be silently dropped by select_encoding's `q > 0.0` check.
+    #[test]
+    fn parse_nan_quality_defaults_to_one() {
+        let prefs = parse_accept_encoding("gzip;q=nan");
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].encoding, "gzip");
+        // NaN would fail this assertion (NaN == 1.0 is false, and NaN is not finite).
+        assert!(prefs[0].quality.is_finite());
+        assert_eq!(prefs[0].quality, 1.0);
+    }
+
+    // Regression: with `gzip;q=nan, br;q=0.5`, gzip must be treated as q=1.0 and win;
+    // before the fix gzip's NaN quality failed `q > 0.0` and the result was Some("br").
+    #[test]
+    fn select_nan_quality_not_dropped() {
+        let prefs = parse_accept_encoding("gzip;q=nan, br;q=0.5");
+        let result = select_encoding(&prefs, &["gzip", "br"]);
+        assert_eq!(result.as_deref(), Some("gzip"));
+    }
+
+    // Non-finite `inf` must also fall back to the 1.0 default.
+    #[test]
+    fn parse_inf_quality_defaults_to_one() {
+        let prefs = parse_accept_encoding("br;q=inf");
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(prefs[0].quality, 1.0);
     }
 }

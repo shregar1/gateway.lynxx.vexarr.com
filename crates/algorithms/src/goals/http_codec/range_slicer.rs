@@ -31,9 +31,37 @@ impl RangeSlicer {
             return Vec::new();
         }
 
+        // BUG FIX: `parse_range_header` encodes open-ended (`500-`) and suffix
+        // (`-500`) ranges with `end == u64::MAX` as an unresolved sentinel that
+        // the caller is expected to resolve against a known total first. Without
+        // this guard, slicing such a range computed a block count of ~1.8e16,
+        // so `Vec::with_capacity` below requested an astronomically large buffer
+        // (allocator-abort / capacity-overflow) and the inclusive loop would run
+        // ~18 quadrillion iterations (resource-exhaustion DoS / process abort).
+        // Refuse to slice an unresolved sentinel range and any range whose block
+        // count would exceed what a `Vec` can hold; the caller must resolve the
+        // sentinel (clamp `end` to `total - 1`) before calling `slice`.
+        if range.end == u64::MAX {
+            return Vec::new();
+        }
+
         let first_block = self.block_for_byte(range.start);
         let last_block = self.block_for_byte(range.end);
-        let mut blocks = Vec::with_capacity((last_block - first_block + 1) as usize);
+
+        // `last_block >= first_block` here (start <= end), so this cannot
+        // underflow; `+ 1` cannot overflow because `last_block < u64::MAX`
+        // (we rejected `end == u64::MAX` above, so `end / block_size` is
+        // strictly less than `u64::MAX` for any `block_size >= 1`).
+        let block_count = last_block - first_block + 1;
+
+        // Defensive cap: if the resolved range is still pathologically large
+        // (more blocks than a `Vec` can index), bail out instead of attempting
+        // a giant allocation / loop.
+        if block_count > usize::MAX as u64 {
+            return Vec::new();
+        }
+
+        let mut blocks = Vec::with_capacity(block_count as usize);
 
         for idx in first_block..=last_block {
             let (block_start, block_end) = self.block_range(idx);
@@ -319,6 +347,29 @@ mod tests {
         assert_eq!(blocks[0].block_index, 1);
         assert_eq!(blocks[0].skip_bytes, 0);
         assert_eq!(blocks[0].take_bytes, 1024);
+    }
+
+    // Regression: slicing an unresolved open-ended (`500-`) or suffix (`-500`)
+    // range, whose `end` is the `u64::MAX` sentinel, must NOT attempt to allocate
+    // ~1.8e16 blocks / loop ~18 quadrillion times (resource-exhaustion abort).
+    // Without the guard in `slice`, `Vec::with_capacity(u64::MAX/block_size)`
+    // aborts the process; with it, `slice` returns an empty Vec so the caller is
+    // forced to resolve the sentinel against a known total first.
+    #[test]
+    fn test_slice_open_ended_sentinel_does_not_explode() {
+        let s = RangeSlicer::new(1024);
+
+        // Open-ended range as produced by `parse_range_header("bytes=500-")`.
+        let open = ContentRange { start: 500, end: u64::MAX, total: None };
+        assert!(s.slice(&open).is_empty());
+
+        // Suffix range as produced by `parse_range_header("bytes=-500")`.
+        let suffix = ContentRange { start: u64::MAX - 499, end: u64::MAX, total: None };
+        assert!(s.slice(&suffix).is_empty());
+
+        // Drive it end-to-end through the parser, matching the reported trigger.
+        let parsed = RangeSlicer::parse_range_header("bytes=500-").unwrap();
+        assert!(s.slice(&parsed[0]).is_empty());
     }
 
     // ── parse_content_range ──

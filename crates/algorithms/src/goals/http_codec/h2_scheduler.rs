@@ -48,6 +48,21 @@ impl H2Scheduler {
     /// - `exclusive`: if true, this stream becomes the sole child of the parent
     ///   and all former children of the parent become children of this stream.
     pub fn add_stream(&mut self, id: u32, weight: u16, parent: Option<u32>, exclusive: bool) {
+        // BUG FIX: re-adding an already-existing id used to fall through to the
+        // insert paths below, which (a) overwrote the node with `children:
+        // Vec::new()` — silently orphaning its former subtree — and (b) pushed
+        // `id` onto the new parent's children list a second time without
+        // detaching it from its old parent, yielding duplicate entries (e.g.
+        // root.children = [1, 1]). The duplicate then had its WFQ deficit
+        // incremented/decremented twice per round, double-weighting it and
+        // skewing fairness. Delegate to `reprioritize`, which detaches from the
+        // old parent, preserves the existing subtree, and guards against
+        // duplicate pushes.
+        if self.streams.contains_key(&id) {
+            self.reprioritize(id, weight, parent, exclusive);
+            return;
+        }
+
         let weight = weight.clamp(1, 256);
         let parent_id = parent.unwrap_or(ROOT_ID);
         let actual_parent = if self.streams.contains_key(&parent_id) {
@@ -63,8 +78,20 @@ impl H2Scheduler {
 
         if exclusive {
             // Move all current children of the parent under the new stream.
-            let former_children = if let Some(p) = self.streams.get_mut(&actual_parent) {
+            //
+            // BUG FIX: when `id` is an EXISTING child of `actual_parent` being
+            // re-added exclusively under its current parent, it appeared in the
+            // parent's children list. Without filtering it out, `id` would adopt
+            // itself as a child (children = [.., id, ..]) and its own parent would
+            // be set to `id`, creating a self-cycle. Any subsequent traversal
+            // (schedule_from / has_active_descendant / is_descendant_of) then
+            // recurses forever -> stack overflow. Filter `id` out before adopting,
+            // mirroring the exclusive branch of `reprioritize` (see below).
+            let former_children: Vec<u32> = if let Some(p) = self.streams.get_mut(&actual_parent) {
                 std::mem::take(&mut p.children)
+                    .into_iter()
+                    .filter(|&c| c != id)
+                    .collect()
             } else {
                 Vec::new()
             };
@@ -388,6 +415,94 @@ mod tests {
         s.activate(1);
         // Stream 1 is now under stream 3, so scheduling should still work.
         assert_eq!(s.schedule(), Some(1));
+    }
+
+    #[test]
+    fn test_exclusive_readd_under_current_parent_no_self_cycle() {
+        // Regression: re-adding an existing child exclusively under its CURRENT
+        // parent must not make the stream its own child. Before the fix,
+        // `former_children` still contained `id`, so stream 2 adopted itself
+        // (children = [2]) creating a self-cycle, and any traversal recursed
+        // forever -> stack overflow.
+        let mut s = H2Scheduler::new();
+        s.add_stream(1, 16, None, false);
+        s.add_stream(2, 16, Some(1), false);
+        // Re-add stream 2 exclusively under its current parent (stream 1).
+        s.add_stream(2, 16, Some(1), true);
+
+        // Stream 2 must NOT be its own child (no self-cycle).
+        let node2 = s.streams.get(&2).expect("stream 2 should exist");
+        assert!(
+            !node2.children.contains(&2),
+            "stream 2 must not be its own child; got children = {:?}",
+            node2.children
+        );
+        // Stream 2's parent must not be itself.
+        assert_ne!(node2.parent, 2, "stream 2 must not be its own parent");
+
+        // Traversals must terminate (would stack-overflow on a self-cycle).
+        assert!(!s.has_active_descendant(2));
+        assert_eq!(s.schedule(), None);
+        s.activate(2);
+        assert_eq!(s.schedule(), Some(2));
+    }
+
+    #[test]
+    fn test_readd_existing_id_does_not_duplicate_in_parent_children() {
+        // Regression: calling add_stream with an already-existing id used to
+        // push it onto the parent's children list a second time without
+        // detaching the first, yielding root.children = [1, 1]. The duplicate
+        // then had its WFQ deficit incremented twice per round, double-weighting
+        // it. After the fix, a re-add delegates to reprioritize and the id
+        // appears exactly once.
+        let mut s = H2Scheduler::new();
+        s.add_stream(1, 16, None, false);
+        s.add_stream(1, 16, None, false);
+
+        let root = s.streams.get(&ROOT_ID).expect("root should exist");
+        let occurrences = root.children.iter().filter(|&&c| c == 1).count();
+        assert_eq!(
+            occurrences, 1,
+            "stream 1 must appear exactly once in root.children; got {:?}",
+            root.children
+        );
+    }
+
+    #[test]
+    fn test_readd_existing_id_under_new_parent_preserves_subtree() {
+        // Regression: re-adding an existing id under a DIFFERENT parent used to
+        // overwrite the node with children: Vec::new(), silently orphaning its
+        // former subtree, while the old parent still listed the id (stale
+        // orphan). After the fix, the re-add reparents the node while keeping
+        // its existing children, and the old parent no longer lists it.
+        let mut s = H2Scheduler::new();
+        s.add_stream(1, 16, None, false); // under root
+        s.add_stream(2, 16, None, false); // under root
+        s.add_stream(3, 16, Some(1), false); // 3 is a child of 1
+
+        // Re-add stream 1 under a new parent (stream 2).
+        s.add_stream(1, 16, Some(2), false);
+
+        // Stream 1 keeps its subtree (child 3 still present).
+        let node1 = s.streams.get(&1).expect("stream 1 should exist");
+        assert!(
+            node1.children.contains(&3),
+            "stream 1 must retain its former subtree; got children = {:?}",
+            node1.children
+        );
+        assert_eq!(node1.parent, 2, "stream 1 should now be parented under 2");
+
+        // The old parent (root) must no longer list stream 1.
+        let root = s.streams.get(&ROOT_ID).expect("root should exist");
+        assert!(
+            !root.children.contains(&1),
+            "root must not retain a stale orphan reference to stream 1; got {:?}",
+            root.children
+        );
+
+        // The descendant 3 is still reachable for scheduling through stream 1.
+        s.activate(3);
+        assert_eq!(s.schedule(), Some(3));
     }
 
     #[test]

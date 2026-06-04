@@ -78,7 +78,11 @@ pub fn compute_ttl(input: &TtlInput) -> TtlResult {
 /// Check whether the cached response is still fresh.
 pub fn is_fresh(result: &TtlResult, now: u64, date: u64) -> bool {
     let age = now.saturating_sub(date);
-    age < result.ttl + result.grace
+    // BUG FIX: `ttl + grace` overflowed (wrapping to a tiny value in release where
+    // overflow-checks=false) for an extreme ttl (e.g. u64::MAX from s-maxage near
+    // u64::MAX), inverting a fresh response to "stale". Saturate instead so the
+    // freshness boundary clamps to u64::MAX rather than wrapping.
+    age < result.ttl.saturating_add(result.grace)
 }
 
 #[cfg(test)]
@@ -199,5 +203,29 @@ mod tests {
     fn test_is_stale() {
         let result = TtlResult { ttl: 100, grace: 10, keep: 0 };
         assert!(!is_fresh(&result, 1200, 1000)); // age=200 >= 110
+    }
+
+    #[test]
+    fn test_is_fresh_does_not_overflow_on_max_ttl() {
+        // Regression: a near-max ttl (e.g. u64::MAX from s-maxage near u64::MAX)
+        // made `ttl + grace` wrap (u64::MAX + 10 -> 9) in release, so a clearly
+        // fresh response with a realistic age was reported STALE. With saturating
+        // arithmetic the boundary clamps to u64::MAX and the response stays fresh.
+        let result = TtlResult { ttl: u64::MAX, grace: DEFAULT_GRACE, keep: 0 };
+        assert!(is_fresh(&result, 2000, 1000)); // age=1000, would be < 9 (false) if wrapped
+
+        // End-to-end: compute_ttl with s_maxage = u64::MAX and zero response age
+        // produces ttl = u64::MAX, which must remain fresh under realistic age.
+        let input = TtlInput {
+            date: 1000,
+            now: 1000,
+            max_age: None,
+            s_maxage: Some(u64::MAX),
+            expires: None,
+            last_modified: None,
+        };
+        let computed = compute_ttl(&input);
+        assert_eq!(computed.ttl, u64::MAX);
+        assert!(is_fresh(&computed, 1000 + 1_000_000, 1000));
     }
 }

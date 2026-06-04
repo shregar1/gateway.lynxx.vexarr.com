@@ -27,15 +27,24 @@ pub fn normalize_uri_path(path: &[u8]) -> Vec<u8> {
     let segments = path.split(|&b| b == b'/')
         .filter(|s| !s.is_empty());
 
+    // BUG FIX: per RFC 3986 §5.2.4 rules C/D, a path whose final segment is a
+    // dot-segment ("." or "..") resolves with a trailing slash (e.g. "/a/b/.."
+    // -> "/a/", "/a/." -> "/a/"). The previous code dropped that slash because
+    // line 56 only consulted `has_trailing_slash`. Track whether the last
+    // non-empty segment we processed was a dot-segment so we can restore it.
+    let mut last_segment_was_dot = false;
     for seg in segments {
         if seg == b"." {
             // Current directory — skip
+            last_segment_was_dot = true;
             continue;
         } else if seg == b".." {
             // Parent directory — pop last segment if any
             output_segments.pop();
+            last_segment_was_dot = true;
         } else {
             output_segments.push(seg);
+            last_segment_was_dot = false;
         }
     }
 
@@ -52,8 +61,14 @@ pub fn normalize_uri_path(path: &[u8]) -> Vec<u8> {
         result.extend_from_slice(seg);
     }
 
-    // Preserve trailing slash if the original had one (and we have segments or just a root)
-    if has_trailing_slash && !result.is_empty() && result.last() != Some(&b'/') {
+    // Preserve trailing slash if the original had one, OR if the final resolved
+    // segment was a dot-segment (RFC 3986 §5.2.4 C/D). The non-empty guard keeps
+    // the absolute-root collapse intact ("/.." / "/." stay "/" via the block
+    // below rather than gaining a spurious extra slash here).
+    if (has_trailing_slash || last_segment_was_dot)
+        && !result.is_empty()
+        && result.last() != Some(&b'/')
+    {
         result.push(b'/');
     }
 
@@ -127,5 +142,23 @@ mod tests {
     #[test]
     fn relative_path() {
         assert_eq!(normalize_uri_path(b"a/b/../c"), b"a/c");
+    }
+
+    // Regression: a path ending in a dot-segment must resolve WITH a trailing
+    // slash per RFC 3986 §5.2.4 (rules C/D). Previously these dropped the slash
+    // (e.g. "/a/b/.." -> "/a", "/a/." -> "/a", "/a/b/." -> "/a/b").
+    #[test]
+    fn trailing_dotdot_keeps_slash() {
+        assert_eq!(normalize_uri_path(b"/a/b/.."), b"/a/");
+    }
+
+    #[test]
+    fn trailing_dot_keeps_slash() {
+        assert_eq!(normalize_uri_path(b"/a/."), b"/a/");
+    }
+
+    #[test]
+    fn trailing_dot_after_segment_keeps_slash() {
+        assert_eq!(normalize_uri_path(b"/a/b/."), b"/a/b/");
     }
 }

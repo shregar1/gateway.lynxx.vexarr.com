@@ -146,7 +146,9 @@ impl IpReputation {
 
                 if count >= self.config.block_threshold {
                     self.buckets[bucket_idx].remove(&ip);
-                    self.perma_block.insert(ip, now);
+                    // Use the capped inserter so a flood of distinct offending
+                    // IPs cannot grow perma_block without bound.
+                    self.insert_perma_block(ip, now);
                     return ReputationLevel::Blocked;
                 }
 
@@ -194,6 +196,48 @@ impl IpReputation {
         false
     }
 
+    /// Insert (or refresh) a perma-block entry while keeping `perma_block`
+    /// bounded by `perma_block_size`.
+    ///
+    /// Bug fix: previously every distinct offending IP inserted into
+    /// `perma_block` lived forever — `is_blocked()` returns false for expired
+    /// entries but never removes them, and `perma_block_size` was never used as
+    /// an actual cap. The sole reclaimer (`age_entries()`) has no production
+    /// caller, so a flood of distinct IPs grew the map without bound. We now
+    /// reclaim expired entries lazily on insert and FIFO-evict the oldest
+    /// remaining block when still at capacity, guaranteeing
+    /// `perma_block.len() <= max(perma_block_size, 1)`.
+    fn insert_perma_block(&mut self, ip: IpAddr, now: Instant) {
+        // Effective cap; guard against a pathological 0 so blocking still works.
+        let cap = self.config.perma_block_size.max(1);
+
+        // Refreshing an existing entry never grows the map, so skip cap work.
+        if !self.perma_block.contains_key(&ip) && self.perma_block.len() >= cap {
+            // First, lazily reclaim anything whose block has already expired.
+            let duration = self.config.perma_block_duration;
+            self.perma_block
+                .retain(|_, blocked_at| blocked_at.elapsed() < duration);
+
+            // If still at capacity with all-live entries, evict the oldest
+            // (smallest Instant) to make room for the new block (FIFO).
+            while self.perma_block.len() >= cap {
+                let oldest = self
+                    .perma_block
+                    .iter()
+                    .min_by_key(|(_, &blocked_at)| blocked_at)
+                    .map(|(&oldest_ip, _)| oldest_ip);
+                match oldest {
+                    Some(oldest_ip) => {
+                        self.perma_block.remove(&oldest_ip);
+                    }
+                    None => break,
+                }
+            }
+        }
+
+        self.perma_block.insert(ip, now);
+    }
+
     /// Age out old entries (decay counts by 1/8).
     pub fn age_entries(&mut self) {
         let now = Instant::now();
@@ -226,7 +270,9 @@ impl IpReputation {
         for bucket in &mut self.buckets {
             bucket.remove(&ip);
         }
-        self.perma_block.insert(ip, Instant::now());
+        // Use the capped inserter so perma_block stays bounded (see fix note
+        // on insert_perma_block).
+        self.insert_perma_block(ip, Instant::now());
     }
 
     pub fn unblock(&mut self, ip: &IpAddr) {
@@ -392,6 +438,57 @@ mod tests {
         let level1 = rep.reputation(&ip(1));
         let level2 = rep.reputation(&ip(2));
         assert!(level1 != ReputationLevel::Low || level2 == ReputationLevel::Low);
+    }
+
+    #[test]
+    fn test_perma_block_stays_bounded_under_distinct_ip_flood() {
+        // Regression: perma_block previously grew unbounded — every distinct
+        // offending IP inserted an Instant that was never reclaimed (is_blocked
+        // ignores expired entries, age_entries has no production caller, and
+        // perma_block_size was never enforced as a cap). Flooding many distinct
+        // IPs past the block threshold must not exceed perma_block_size.
+        let perma_cap = 8;
+        let threshold = 5;
+        let config = SieveConfig {
+            bucket_sizes: vec![256, 128, 64, 32, 16],
+            max_age: Duration::from_secs(60),
+            perma_block_size: perma_cap,
+            // Long duration so entries do NOT expire during the test; this
+            // forces the FIFO-eviction-at-capacity path rather than time-based
+            // reclamation, proving the hard cap is what bounds the map.
+            perma_block_duration: Duration::from_secs(3600),
+            block_threshold: threshold,
+        };
+        let mut rep = IpReputation::new(config);
+
+        // Drive 200 distinct IPs (two octets of entropy) each past the
+        // threshold so each gets perma-blocked.
+        for a in 0..20u8 {
+            for b in 0..10u8 {
+                let ip_addr = IpAddr::V4(Ipv4Addr::new(10, 0, a, b));
+                for _ in 0..(threshold + 2) {
+                    rep.record_hit(ip_addr);
+                }
+            }
+        }
+
+        // Without the fix this would be 200; with the cap it stays <= 8.
+        assert!(
+            rep.blocked_count() <= perma_cap,
+            "perma_block grew unbounded: {} > {}",
+            rep.blocked_count(),
+            perma_cap
+        );
+        // The manual block() path must also respect the cap.
+        for last in 0..50u8 {
+            rep.block(IpAddr::V4(Ipv4Addr::new(172, 16, 0, last)));
+        }
+        assert!(
+            rep.blocked_count() <= perma_cap,
+            "perma_block grew unbounded via block(): {} > {}",
+            rep.blocked_count(),
+            perma_cap
+        );
     }
 
     #[test]
