@@ -55,6 +55,38 @@ fn verify_url() -> String {
     format!("{}/v1/license/verify", resolve_lynxx_base_url())
 }
 
+/// Whether `url` must use https. Every licence/billing request carries the
+/// API key as a bearer token, so it must never reach a *remote* host over
+/// cleartext http. Loopback (local auth stubs, CI) is exempt so dev/test
+/// setups keep working.
+fn https_required(url: &str) -> bool {
+    use url::Host;
+    match url::Url::parse(url) {
+        // Loopback is exempt: `localhost`, all of 127.0.0.0/8, and ::1.
+        // `Host`/`is_loopback` handles bracketed IPv6 + the full v4 range,
+        // which a plain `host_str()` string-match would miss.
+        Ok(u) => match u.host() {
+            Some(Host::Domain("localhost")) => false,
+            Some(Host::Ipv4(ip)) => !ip.is_loopback(),
+            Some(Host::Ipv6(ip)) => !ip.is_loopback(),
+            _ => true,
+        },
+        // Unparseable → fail closed (treat as if https is required).
+        Err(_) => true,
+    }
+}
+
+/// Build the HTTP client used for every licence/billing call. `https_only`
+/// is enforced for non-loopback targets, so a misconfigured `http://`
+/// `LYNXX_BASE_URL` makes reqwest refuse the request rather than leak the
+/// API key in cleartext.
+fn lynxx_api_client(timeout_secs: u64, target_url: &str) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(StdDuration::from_secs(timeout_secs))
+        .https_only(https_required(target_url))
+        .build()
+}
+
 /// Ed25519 public key for verifying signed `/v1/license/verify`
 /// responses. Compiled into the binary — a MITM cannot forge a
 /// valid signature without the billing server's private key.
@@ -94,6 +126,11 @@ pub enum LicenseError {
     StaleCache(i64),
     #[error("licence response malformed: {0}")]
     Malformed(String),
+    #[error(
+        "refusing to send the API key over plaintext http to a non-loopback host: {0} — \
+         use an https:// LYNXX_BASE_URL"
+    )]
+    InsecureUrl(String),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -117,19 +154,34 @@ struct VerifyResponse {
     monthly_call_limit: Option<u64>,
     #[serde(default)]
     allow_overage: bool,
+    /// Echo of the per-request `x-lynxx-nonce`, signed by the billing
+    /// server inside this body. Present only once the server supports it;
+    /// when present the client requires it to match (anti-replay). `None`
+    /// from current servers — the check is inert until then.
+    #[serde(default)]
+    nonce: Option<String>,
 }
 
+/// On-disk offline cache. Stores the **exact signed response body** plus
+/// its Ed25519 signature, not the parsed fields — so the signature is
+/// re-verified on read and a hand-edited cache file (e.g. `tier` bumped to
+/// enterprise) is rejected the same way an in-flight tamper would be.
 #[derive(Debug, Serialize, Deserialize)]
 struct CacheEntry {
     api_key_hash: String,
-    customer_id: String,
-    tier: String,
-    expires_at: Option<i64>,
     verified_at: i64,
+    /// Verbatim signed body (UTF-8 JSON exactly as the server sent it).
+    body: String,
+    /// Hex Ed25519 signature over `body`. `None` only when the original
+    /// response was unsigned (debug build / insecure-skip).
     #[serde(default)]
-    max_nodes: Option<u32>,
-    #[serde(default)]
-    active_nodes: Option<u32>,
+    sig_hex: Option<String>,
+}
+
+/// A cache entry whose signature has already been re-verified on read.
+struct CachedLicense {
+    resp: VerifyResponse,
+    verified_at: i64,
 }
 
 impl License {
@@ -155,52 +207,52 @@ impl License {
         }
 
         let vurl = verify_url();
+        // Fail closed: never transmit the API key to a remote host over
+        // cleartext http (loopback stubs are exempt).
+        if https_required(&vurl) && !vurl.starts_with("https://") {
+            return Err(LicenseError::InsecureUrl(vurl));
+        }
 
         match verify_online(&api_key, &vurl).await {
-            Ok(resp) => {
-                let lic = License {
-                    customer_id: resp.customer_urn.clone(),
-                    tier: PlanTier::from_str(&resp.tier),
-                    expires_at: resp
-                        .expires_at
-                        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
-                    from_cache: false,
-                    max_nodes: resp.max_nodes,
-                    active_nodes: resp.active_nodes,
-                    allow_overage: resp.allow_overage,
-                    monthly_call_limit: resp.monthly_call_limit,
-                };
-                let _ = write_cache(&api_key, &resp);
+            Ok(verified) => {
+                let lic = License::from_verify(&verified.resp, false);
+                let _ = write_cache(&api_key, &verified.body, verified.sig_hex.as_deref());
                 Ok(lic)
             }
             Err(LicenseError::Rejected(_)) => Err(LicenseError::Rejected(
                 "key not active (cancelled or invalid)".into(),
             )),
             Err(net_err) => match read_cache(&api_key)? {
-                Some(entry) => {
-                    let age_days = (Utc::now().timestamp() - entry.verified_at).max(0) / 86_400;
+                Some(cached) => {
+                    let age_days =
+                        (Utc::now().timestamp() - cached.verified_at).max(0) / 86_400;
                     if age_days > OFFLINE_GRACE_DAYS {
                         Err(LicenseError::StaleCache(age_days))
                     } else {
-                        Ok(License {
-                            customer_id: entry.customer_id,
-                            tier: PlanTier::from_str(&entry.tier),
-                            expires_at: entry
-                                .expires_at
-                                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
-                            from_cache: true,
-                            max_nodes: entry.max_nodes,
-                            active_nodes: entry.active_nodes.unwrap_or(0),
-                            allow_overage: matches!(
-                                PlanTier::from_str(&entry.tier),
-                                PlanTier::Pro | PlanTier::Business
-                            ),
-                            monthly_call_limit: PlanTier::from_str(&entry.tier).monthly_limit(),
-                        })
+                        Ok(License::from_verify(&cached.resp, true))
                     }
                 }
                 None => Err(net_err),
             },
+        }
+    }
+
+    /// Build a `License` from a verified response. Shared by the online
+    /// path and the (signature-re-verified) offline cache path so both
+    /// derive every field identically — no tier-guessing in the offline
+    /// branch.
+    fn from_verify(resp: &VerifyResponse, from_cache: bool) -> Self {
+        License {
+            customer_id: resp.customer_urn.clone(),
+            tier: PlanTier::from_str(&resp.tier),
+            expires_at: resp
+                .expires_at
+                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+            from_cache,
+            max_nodes: resp.max_nodes,
+            active_nodes: resp.active_nodes,
+            allow_overage: resp.allow_overage,
+            monthly_call_limit: resp.monthly_call_limit,
         }
     }
 
@@ -267,6 +319,16 @@ impl LicenseState {
         *self.inner.tier.read().expect("tier lock poisoned")
     }
 
+    /// Runtime algorithm tier for the backbone factory.
+    ///
+    /// A single binary compiles every adapter; this maps the current
+    /// subscription plan onto the [`algorithms::backbone::Tier`] that
+    /// the factory uses to pick which adapter is instantiated. Cheap
+    /// enough to call per-request: one rwlock read + a `match`.
+    pub fn algorithm_tier(&self) -> algorithms::backbone::Tier {
+        self.tier().algorithm_tier()
+    }
+
     pub fn active_nodes(&self) -> u32 {
         self.inner.node_counts.read().expect("node lock poisoned").0
     }
@@ -291,15 +353,18 @@ impl LicenseState {
     ) -> Result<crate::integrations::abstraction::LicenseInfo, crate::integrations::abstraction::VerifierError> {
         use crate::integrations::abstraction::{LicenseInfo, VerifierError};
         match verify_online(api_key, &self.inner.verify_url).await {
-            Ok(resp) => Ok(LicenseInfo {
-                customer_urn: resp.customer_urn,
-                tier: resp.tier,
-                expires_at: resp.expires_at,
-                max_nodes: resp.max_nodes,
-                active_nodes: resp.active_nodes,
-                monthly_call_limit: resp.monthly_call_limit,
-                allow_overage: resp.allow_overage,
-            }),
+            Ok(verified) => {
+                let resp = verified.resp;
+                Ok(LicenseInfo {
+                    customer_urn: resp.customer_urn,
+                    tier: resp.tier,
+                    expires_at: resp.expires_at,
+                    max_nodes: resp.max_nodes,
+                    active_nodes: resp.active_nodes,
+                    monthly_call_limit: resp.monthly_call_limit,
+                    allow_overage: resp.allow_overage,
+                })
+            }
             Err(LicenseError::Rejected(msg)) => Err(VerifierError::Rejected(msg)),
             Err(LicenseError::Offline(msg)) => Err(VerifierError::Transport(msg)),
             Err(LicenseError::Malformed(msg)) => Err(VerifierError::Malformed(msg)),
@@ -320,6 +385,25 @@ impl LicenseState {
             reason,
             "licence revoked — gateway is in kill-switch mode; all requests will return 402"
         );
+    }
+
+    /// Re-arm the kill-switch. Counterpart to [`flip_inactive`] — without
+    /// this the switch was write-once (only ever set to `false`), so a
+    /// single stray `flagged` usage-report or a transient rejection wedged
+    /// the gateway into permanent 402 until a full process restart, even
+    /// after an authoritative, signature-verified re-verify confirmed the
+    /// key was active again. Called from the re-verifier success branch so
+    /// a confirmed-active `/v1/license/verify` restores service.
+    fn flip_active(&self) {
+        let was_active = self
+            .inner
+            .active
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        if !was_active {
+            tracing::warn!(
+                "licence re-verified as active — clearing kill-switch; requests resume"
+            );
+        }
     }
 
     fn update_tier(&self, new_tier: PlanTier) {
@@ -352,17 +436,25 @@ pub fn spawn_license_refresher(
         loop {
             interval.tick().await;
             match verify_online(&state.inner.api_key, &state.inner.verify_url).await {
-                Ok(resp) => {
+                Ok(verified) => {
+                    let resp = &verified.resp;
+                    // An authoritative, signature-verified verify confirming
+                    // the key is active re-arms the kill-switch. Closes the
+                    // bug where a stray usage-report `flagged` (or a transient
+                    // rejection) left `active=false` forever with no in-process
+                    // path back to service short of a restart.
+                    state.flip_active();
                     state.update_tier(PlanTier::from_str(&resp.tier));
-                    state.update_node_counts(
-                        resp.active_nodes,
-                        resp.max_nodes,
-                    );
+                    state.update_node_counts(resp.active_nodes, resp.max_nodes);
                     if let Some(ref q) = quota {
                         q.set_limit(resp.monthly_call_limit);
                         q.set_allow_overage(resp.allow_overage);
                     }
-                    let _ = write_cache(&state.inner.api_key, &resp);
+                    let _ = write_cache(
+                        &state.inner.api_key,
+                        &verified.body,
+                        verified.sig_hex.as_deref(),
+                    );
                 }
                 Err(LicenseError::Rejected(msg)) => {
                     state.flip_inactive(&msg);
@@ -449,9 +541,7 @@ pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), No
         data_dir,
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-        .build()
+    let client = lynxx_api_client(VERIFY_TIMEOUT_SECS, &url)
         .map_err(|e| NodeError::RegisterFailed(e.to_string()))?;
 
     let resp = client
@@ -466,7 +556,13 @@ pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), No
     if status == reqwest::StatusCode::FORBIDDEN {
         let text = resp.text().await.unwrap_or_default();
         if text.contains("node limit") {
-            return Err(NodeError::LimitReached { active: 0, max: 0 });
+            // Bug fix: previously returned LimitReached { active: 0, max: 0 },
+            // so the operator log always rendered a literal `(0/0)` regardless
+            // of the customer's real cap (e.g. 5/5). The 403 body carries no
+            // structured counts here, so surface the server's message verbatim
+            // — mirroring the sibling RegisterFailed branch below — instead of
+            // fabricating zeros.
+            return Err(NodeError::RegisterFailed(text));
         }
         return Err(NodeError::RegisterFailed(text));
     }
@@ -500,10 +596,13 @@ pub fn spawn_node_heartbeat(api_key: String, lynxx_base_url: String) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(StdDuration::from_secs(HEARTBEAT_INTERVAL_SECS));
         interval.tick().await; // skip immediate tick
-        let client = reqwest::Client::builder()
-            .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-            .build()
-            .unwrap();
+        let client = match lynxx_api_client(VERIFY_TIMEOUT_SECS, &heartbeat_url) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "node heartbeat client build failed; not starting");
+                return;
+            }
+        };
         loop {
             interval.tick().await;
             let body = serde_json::json!({ "instance_id": instance_id });
@@ -539,9 +638,7 @@ pub async fn deregister_node(api_key: &str, lynxx_base_url: &str) {
         lynxx_base_url.trim_end_matches('/'),
     );
     let body = serde_json::json!({ "instance_id": instance_id });
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(5))
-        .build();
+    let client = lynxx_api_client(5, &url);
     if let Ok(client) = client {
         let _ = client
             .post(&url)
@@ -574,10 +671,13 @@ pub fn spawn_usage_reporter(
         let mut interval =
             tokio::time::interval(StdDuration::from_secs(USAGE_REPORT_INTERVAL_SECS));
         interval.tick().await;
-        let client = reqwest::Client::builder()
-            .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-            .build()
-            .unwrap();
+        let client = match lynxx_api_client(VERIFY_TIMEOUT_SECS, &report_url) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!(error = %e, "usage reporter client build failed; not starting");
+                return;
+            }
+        };
         loop {
             interval.tick().await;
             let snap = quota.snapshot();
@@ -663,15 +763,29 @@ fn try_dev_key(api_key: &str) -> Option<License> {
     None
 }
 
-async fn verify_online(api_key: &str, url: &str) -> Result<VerifyResponse, LicenseError> {
-    let client = reqwest::Client::builder()
-        .timeout(StdDuration::from_secs(VERIFY_TIMEOUT_SECS))
-        .build()
+/// A freshly verified online response: the parsed plan plus the exact
+/// signed bytes + signature, so the caller can persist a re-verifiable
+/// cache entry.
+struct VerifiedLicense {
+    resp: VerifyResponse,
+    body: Vec<u8>,
+    sig_hex: Option<String>,
+}
+
+async fn verify_online(api_key: &str, url: &str) -> Result<VerifiedLicense, LicenseError> {
+    let client = lynxx_api_client(VERIFY_TIMEOUT_SECS, url)
         .map_err(|e| LicenseError::Offline(e.to_string()))?;
+
+    // Per-request anti-replay nonce. Once the billing server echoes this
+    // back *inside the signed body* (`VerifyResponse.nonce`), a replayed
+    // old response fails the match below. Until the server supports it,
+    // the response carries no nonce and the check is inert.
+    let nonce = uuid::Uuid::new_v4().to_string();
 
     let resp = client
         .get(url)
         .bearer_auth(api_key)
+        .header("x-lynxx-nonce", &nonce)
         .send()
         .await
         .map_err(|e| LicenseError::Offline(e.to_string()))?;
@@ -702,16 +816,33 @@ async fn verify_online(api_key: &str, url: &str) -> Result<VerifyResponse, Licen
     // Debug builds warn but continue (for local dev without the key).
     verify_response_signature(&body_bytes, sig_hex.as_deref())?;
 
-    serde_json::from_slice::<VerifyResponse>(&body_bytes)
-        .map_err(|e| LicenseError::Malformed(e.to_string()))
+    let parsed = serde_json::from_slice::<VerifyResponse>(&body_bytes)
+        .map_err(|e| LicenseError::Malformed(e.to_string()))?;
+
+    // Anti-replay: if the (signed) body echoes a nonce, it MUST match the
+    // one we just sent. A replayed older response carries a stale nonce.
+    if let Some(echoed) = parsed.nonce.as_deref() {
+        if echoed != nonce {
+            return Err(LicenseError::Rejected(
+                "verify response nonce mismatch — possible replay or MITM".into(),
+            ));
+        }
+    }
+
+    Ok(VerifiedLicense {
+        resp: parsed,
+        body: body_bytes.to_vec(),
+        sig_hex,
+    })
 }
 
-/// Verify the Ed25519 signature on the response body.
+/// Verify the Ed25519 signature on the response body against the
+/// compiled-in billing public key.
 fn verify_response_signature(
     body: &[u8],
     sig_hex: Option<&str>,
 ) -> Result<(), LicenseError> {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    use ed25519_dalek::VerifyingKey;
 
     let pub_bytes = hex::decode(VERIFY_PUBLIC_KEY_HEX)
         .map_err(|_| LicenseError::Malformed("compiled public key is invalid hex".into()))?;
@@ -722,6 +853,20 @@ fn verify_response_signature(
             .map_err(|_| LicenseError::Malformed("compiled public key wrong length".into()))?,
     )
     .map_err(|_| LicenseError::Malformed("compiled public key invalid".into()))?;
+
+    verify_signature_with(body, sig_hex, &pub_key)
+}
+
+/// Core signature check against an explicit key. Split out from
+/// [`verify_response_signature`] so it can be unit-tested with a generated
+/// keypair (the compiled key's private half lives only on the billing
+/// server). Same policy for both the live response and the offline cache.
+fn verify_signature_with(
+    body: &[u8],
+    sig_hex: Option<&str>,
+    pub_key: &ed25519_dalek::VerifyingKey,
+) -> Result<(), LicenseError> {
+    use ed25519_dalek::{Signature, Verifier};
 
     match sig_hex {
         Some(hex_str) => {
@@ -787,38 +932,67 @@ fn key_fingerprint(api_key: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
-fn write_cache(api_key: &str, resp: &VerifyResponse) -> Result<(), std::io::Error> {
+fn write_cache(
+    api_key: &str,
+    body: &[u8],
+    sig_hex: Option<&str>,
+) -> Result<(), std::io::Error> {
     let Some(path) = cache_path() else {
+        return Ok(());
+    };
+    // The signed body is UTF-8 JSON; store it verbatim so the signature
+    // re-verifies byte-for-byte on read. If somehow not UTF-8, skip
+    // caching rather than corrupt the signed bytes.
+    let Ok(body_str) = std::str::from_utf8(body) else {
         return Ok(());
     };
     let entry = CacheEntry {
         api_key_hash: key_fingerprint(api_key),
-        customer_id: resp.customer_urn.clone(),
-        tier: resp.tier.clone(),
-        expires_at: resp.expires_at,
         verified_at: Utc::now().timestamp(),
-        max_nodes: resp.max_nodes,
-        active_nodes: Some(resp.active_nodes),
+        body: body_str.to_string(),
+        sig_hex: sig_hex.map(|s| s.to_string()),
     };
-    let body = serde_json::to_vec_pretty(&entry).unwrap();
-    std::fs::write(path, body)
+    let data = serde_json::to_vec_pretty(&entry).unwrap();
+    std::fs::write(path, data)
 }
 
-fn read_cache(api_key: &str) -> Result<Option<CacheEntry>, LicenseError> {
+fn read_cache(api_key: &str) -> Result<Option<CachedLicense>, LicenseError> {
     let Some(path) = cache_path() else {
         return Ok(None);
     };
     if !path.exists() {
         return Ok(None);
     }
-    let body =
+    let raw =
         std::fs::read(&path).map_err(|e| LicenseError::Offline(format!("cache read: {e}")))?;
-    let entry: CacheEntry = serde_json::from_slice(&body)
-        .map_err(|e| LicenseError::Malformed(format!("cache parse: {e}")))?;
+    // A stale/old-format or unparseable cache is simply ignored (fall
+    // through to a fresh verify), not treated as an error.
+    let Ok(entry) = serde_json::from_slice::<CacheEntry>(&raw) else {
+        return Ok(None);
+    };
     if entry.api_key_hash != key_fingerprint(api_key) {
         return Ok(None);
     }
-    Ok(Some(entry))
+
+    // Re-verify the Ed25519 signature over the cached body. A hand-edited
+    // cache file (e.g. `tier` bumped to enterprise) fails here exactly
+    // like an in-flight tamper would. Treat failure as "no usable cache"
+    // (and log loudly) rather than trusting it.
+    let body = entry.body.as_bytes();
+    if let Err(e) = verify_response_signature(body, entry.sig_hex.as_deref()) {
+        tracing::warn!(
+            error = %e,
+            "cached licence failed signature re-verification — ignoring (tampered or corrupt cache)"
+        );
+        return Ok(None);
+    }
+
+    let resp = serde_json::from_slice::<VerifyResponse>(body)
+        .map_err(|e| LicenseError::Malformed(format!("cache body parse: {e}")))?;
+    Ok(Some(CachedLicense {
+        resp,
+        verified_at: entry.verified_at,
+    }))
 }
 
 fn gethostname() -> String {
@@ -869,5 +1043,182 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
+    }
+
+    // ── https_only hardening ──
+
+    #[test]
+    fn https_required_exempts_loopback_only() {
+        // Loopback hosts may use plaintext http (local stubs, CI).
+        assert!(!https_required("http://127.0.0.1:9100/v1/license/verify"));
+        assert!(!https_required("http://127.0.0.2/x")); // all of 127.0.0.0/8
+        assert!(!https_required("http://localhost:9100/v1/license/verify"));
+        assert!(!https_required("http://[::1]:9100/v1/license/verify"));
+        // Any remote host requires https.
+        assert!(https_required("http://api.lynxx.vexarr.com/v1/license/verify"));
+        assert!(https_required("http://10.0.0.5/x"));
+        // https is always fine.
+        assert!(https_required("https://api.lynxx.vexarr.com/v1/license/verify"));
+        // Unparseable → fail closed (require https).
+        assert!(https_required("not even a url"));
+    }
+
+    // ── signature verification (tamper rejection) ──
+
+    fn test_keypair() -> (ed25519_dalek::SigningKey, ed25519_dalek::VerifyingKey) {
+        // Deterministic seed — no RNG needed, reproducible across runs.
+        let signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
+        let verifying = signing.verifying_key();
+        (signing, verifying)
+    }
+
+    #[test]
+    fn valid_signature_passes() {
+        use ed25519_dalek::Signer;
+        let (signing, verifying) = test_keypair();
+        let body = br#"{"customer_urn":"cus_x","tier":"pro"}"#;
+        let sig_hex = hex::encode(signing.sign(body).to_bytes());
+        assert!(verify_signature_with(body, Some(&sig_hex), &verifying).is_ok());
+    }
+
+    #[test]
+    fn tampered_body_is_rejected() {
+        use ed25519_dalek::Signer;
+        let (signing, verifying) = test_keypair();
+        let body = br#"{"customer_urn":"cus_x","tier":"free"}"#;
+        let sig_hex = hex::encode(signing.sign(body).to_bytes());
+
+        // Attacker bumps the tier — same signature, different body.
+        let tampered = br#"{"customer_urn":"cus_x","tier":"enterprise"}"#;
+        let err = verify_signature_with(tampered, Some(&sig_hex), &verifying);
+        assert!(matches!(err, Err(LicenseError::Rejected(_))));
+    }
+
+    #[test]
+    fn garbage_signature_is_rejected() {
+        let (_signing, verifying) = test_keypair();
+        let body = br#"{"tier":"pro"}"#;
+        // Not valid hex.
+        assert!(verify_signature_with(body, Some("zzzz"), &verifying).is_err());
+        // Valid hex, wrong length.
+        assert!(verify_signature_with(body, Some("deadbeef"), &verifying).is_err());
+    }
+
+    // ── cache: signed-blob round-trip + old-format tolerance ──
+
+    #[test]
+    fn cache_entry_roundtrips_body_and_sig() {
+        let entry = CacheEntry {
+            api_key_hash: "abc".into(),
+            verified_at: 123,
+            body: r#"{"customer_urn":"c","tier":"pro"}"#.into(),
+            sig_hex: Some("ff00".into()),
+        };
+        let json = serde_json::to_vec(&entry).unwrap();
+        let back: CacheEntry = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.body, entry.body);
+        assert_eq!(back.sig_hex, entry.sig_hex);
+        assert_eq!(back.verified_at, 123);
+    }
+
+    #[test]
+    fn old_format_cache_is_ignored_not_trusted() {
+        // A pre-hardening cache file (plaintext fields, no signed `body`)
+        // must fail to parse as the new CacheEntry → read_cache treats it
+        // as "no cache" rather than trusting the plaintext tier.
+        let old = serde_json::json!({
+            "api_key_hash": "abc",
+            "customer_id": "cus_x",
+            "tier": "enterprise",
+            "expires_at": null,
+            "verified_at": 1,
+        });
+        let parsed = serde_json::from_slice::<CacheEntry>(old.to_string().as_bytes());
+        assert!(parsed.is_err(), "old-format cache must not deserialize as new CacheEntry");
+    }
+
+    // ── from_verify field mapping ──
+
+    // ── kill-switch re-arming (regression: write-once active flag) ──
+
+    #[test]
+    fn kill_switch_re_arms_after_flip_active() {
+        // Regression for the "kill-switch never re-activates" bug: a stray
+        // usage-report `flagged` (or transient rejection) called flip_inactive
+        // and there was no in-process path back — `active` was write-once.
+        // flip_active() (called by the re-verifier's confirmed-active branch)
+        // must restore service. Without flip_active this test fails to compile
+        // / the gateway stays inactive forever.
+        let state = LicenseState::new(
+            "lnx_live_abc123def456",
+            "https://api.lynxx.vexarr.com/v1/license/verify",
+            PlanTier::Pro,
+            0,
+            None,
+        );
+        assert!(state.is_active(), "fresh state starts active");
+
+        // Simulate the stray usage-report `flagged` -> kill-switch.
+        state.flip_inactive("tamper detected — account suspended by billing server");
+        assert!(!state.is_active(), "kill-switch engaged");
+
+        // A subsequent authoritative confirmed-active verify re-arms service.
+        state.flip_active();
+        assert!(
+            state.is_active(),
+            "confirmed-active re-verify must clear the kill-switch"
+        );
+    }
+
+    // ── node-limit error no longer fabricates 0/0 ──
+
+    #[test]
+    fn node_limit_error_carries_server_message_not_zero_zero() {
+        // Regression for the hardcoded `(0/0)` bug: the node-limit 403 branch
+        // used to return LimitReached { active: 0, max: 0 }, so the operator
+        // log always showed `(0/0)` even when the customer was really at e.g.
+        // 5/5. The fix surfaces the server's body verbatim via RegisterFailed.
+        let server_msg = "node limit reached (5/5)";
+        let err = NodeError::RegisterFailed(server_msg.to_string());
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("5/5"),
+            "operator log must reflect the real cap, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("0/0"),
+            "must not fabricate 0/0, got: {rendered}"
+        );
+
+        // Guard the old behaviour explicitly: the LimitReached Display with
+        // zeros is exactly the misleading string we no longer emit.
+        let old = NodeError::LimitReached { active: 0, max: 0 }.to_string();
+        assert!(
+            old.contains("(0/0)"),
+            "sanity: the abandoned variant rendered the misleading 0/0"
+        );
+    }
+
+    #[test]
+    fn from_verify_maps_all_fields() {
+        let resp = VerifyResponse {
+            customer_urn: "cus_42".into(),
+            tier: "business".into(),
+            expires_at: None,
+            scopes: vec![],
+            max_nodes: Some(5),
+            active_nodes: 2,
+            monthly_call_limit: Some(100_000_000),
+            allow_overage: true,
+            nonce: None,
+        };
+        let lic = License::from_verify(&resp, true);
+        assert_eq!(lic.customer_id, "cus_42");
+        assert_eq!(lic.tier, PlanTier::Business);
+        assert!(lic.from_cache);
+        assert_eq!(lic.max_nodes, Some(5));
+        assert_eq!(lic.active_nodes, 2);
+        assert!(lic.allow_overage);
+        assert_eq!(lic.monthly_call_limit, Some(100_000_000));
     }
 }

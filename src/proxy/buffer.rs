@@ -441,8 +441,15 @@ const TAG_DELETED: u8 = 0x00;
 const TAG_ACTIVE: u8 = 0x01;
 const TAG_HOP_BY_HOP: u8 = 0x02;
 
-/// Entry header size: [tag: 1][name_len: 2][value_len: 2] = 5 bytes.
-const ENTRY_HEADER_SIZE: usize = 5;
+/// Entry header size: [tag: 1][name_len: 4][value_len: 4] = 9 bytes.
+///
+/// BUG FIX: lengths were previously `u16` (2 bytes each, 5-byte header), which
+/// truncated any name/value >= 65536 bytes (large Cookie / JWT Authorization /
+/// custom headers — all realistic HTTP inputs). The truncated on-buffer length
+/// then no longer matched the bytes actually written, desynchronising the parse
+/// walk and causing out-of-bounds slicing panics. Widened to `u32` (4 bytes
+/// each) so the stored length always matches the bytes written.
+const ENTRY_HEADER_SIZE: usize = 9;
 
 /// Known hop-by-hop header names for pre-tagging.
 static BLOCK_HOP_BY_HOP: &[&str] = &[
@@ -467,7 +474,7 @@ fn is_hop_by_hop_name(name: &str) -> bool {
 /// buffer as tagged entries:
 ///
 /// ```text
-/// [tag:u8][name_len:u16 LE][value_len:u16 LE][name bytes][value bytes]
+/// [tag:u8][name_len:u32 LE][value_len:u32 LE][name bytes][value bytes]
 /// ```
 ///
 /// This layout enables:
@@ -501,8 +508,10 @@ impl HeaderBlock {
         for (name, value) in map.iter() {
             let name_bytes = name.as_str().as_bytes();
             let value_bytes = value.as_bytes();
-            let name_len = name_bytes.len() as u16;
-            let value_len = value_bytes.len() as u16;
+            // BUG FIX: widened from `u16` (which truncated >= 64 KiB headers and
+            // corrupted the buffer) to `u32`, matching ENTRY_HEADER_SIZE = 9.
+            let name_len = name_bytes.len() as u32;
+            let value_len = value_bytes.len() as u32;
 
             let tag = if is_hop_by_hop_name(name.as_str()) {
                 TAG_HOP_BY_HOP
@@ -551,9 +560,26 @@ impl HeaderBlock {
         let mut pos = 0;
         while pos + ENTRY_HEADER_SIZE <= self.data.len() {
             let tag = self.data[pos];
-            let name_len = u16::from_le_bytes([self.data[pos + 1], self.data[pos + 2]]) as usize;
-            let value_len = u16::from_le_bytes([self.data[pos + 3], self.data[pos + 4]]) as usize;
+            // BUG FIX: lengths are now u32 (4 bytes each, see ENTRY_HEADER_SIZE).
+            let name_len = u32::from_le_bytes([
+                self.data[pos + 1],
+                self.data[pos + 2],
+                self.data[pos + 3],
+                self.data[pos + 4],
+            ]) as usize;
+            let value_len = u32::from_le_bytes([
+                self.data[pos + 5],
+                self.data[pos + 6],
+                self.data[pos + 7],
+                self.data[pos + 8],
+            ]) as usize;
             let entry_size = ENTRY_HEADER_SIZE + name_len + value_len;
+
+            // BUG FIX: bail out if a (malformed/desynced) entry would run past
+            // the buffer, so a corrupt block degrades safely instead of panicking.
+            if pos + entry_size > self.data.len() {
+                break;
+            }
 
             if tag == TAG_HOP_BY_HOP {
                 self.data[pos] = TAG_DELETED;
@@ -573,9 +599,25 @@ impl HeaderBlock {
         let mut pos = 0;
         while pos + ENTRY_HEADER_SIZE <= self.data.len() {
             let tag = self.data[pos];
-            let name_len = u16::from_le_bytes([self.data[pos + 1], self.data[pos + 2]]) as usize;
-            let value_len = u16::from_le_bytes([self.data[pos + 3], self.data[pos + 4]]) as usize;
+            // BUG FIX: lengths are now u32 (4 bytes each, see ENTRY_HEADER_SIZE).
+            let name_len = u32::from_le_bytes([
+                self.data[pos + 1],
+                self.data[pos + 2],
+                self.data[pos + 3],
+                self.data[pos + 4],
+            ]) as usize;
+            let value_len = u32::from_le_bytes([
+                self.data[pos + 5],
+                self.data[pos + 6],
+                self.data[pos + 7],
+                self.data[pos + 8],
+            ]) as usize;
             let entry_size = ENTRY_HEADER_SIZE + name_len + value_len;
+
+            // BUG FIX: stop on a desynced/oversized entry rather than slicing OOB.
+            if pos + entry_size > self.data.len() {
+                break;
+            }
 
             if tag != TAG_DELETED {
                 let entry_name = &self.data[pos + ENTRY_HEADER_SIZE..pos + ENTRY_HEADER_SIZE + name_len];
@@ -596,8 +638,10 @@ impl HeaderBlock {
     pub fn set(&mut self, name: &str, value: &[u8]) {
         self.remove(name);
         let name_bytes = name.as_bytes();
-        let name_len = name_bytes.len() as u16;
-        let value_len = value.len() as u16;
+        // BUG FIX: widened from `u16` to `u32` (see ENTRY_HEADER_SIZE) so large
+        // names/values are not truncated and the buffer stays consistent.
+        let name_len = name_bytes.len() as u32;
+        let value_len = value.len() as u32;
 
         self.data.push(TAG_ACTIVE);
         self.data.extend_from_slice(&name_len.to_le_bytes());
@@ -624,7 +668,12 @@ impl HeaderBlock {
                 axum::http::header::HeaderName::from_bytes(name),
                 axum::http::header::HeaderValue::from_bytes(value),
             ) {
-                map.insert(hn, hv);
+                // BUG FIX: previously used `map.insert`, which drops all prior
+                // values for a name — silently discarding every value but the
+                // last for multi-valued headers (Set-Cookie, Via, etc.).
+                // `append` preserves existing values, matching the multi-entry
+                // storage of HeaderBlock so duplicates survive the round-trip.
+                map.append(hn, hv);
             }
         }
         map
@@ -639,11 +688,25 @@ impl HeaderBlock {
         let mut read_pos = 0;
         while read_pos + ENTRY_HEADER_SIZE <= self.data.len() {
             let tag = self.data[read_pos];
-            let name_len =
-                u16::from_le_bytes([self.data[read_pos + 1], self.data[read_pos + 2]]) as usize;
-            let value_len =
-                u16::from_le_bytes([self.data[read_pos + 3], self.data[read_pos + 4]]) as usize;
+            // BUG FIX: lengths are now u32 (4 bytes each, see ENTRY_HEADER_SIZE).
+            let name_len = u32::from_le_bytes([
+                self.data[read_pos + 1],
+                self.data[read_pos + 2],
+                self.data[read_pos + 3],
+                self.data[read_pos + 4],
+            ]) as usize;
+            let value_len = u32::from_le_bytes([
+                self.data[read_pos + 5],
+                self.data[read_pos + 6],
+                self.data[read_pos + 7],
+                self.data[read_pos + 8],
+            ]) as usize;
             let entry_size = ENTRY_HEADER_SIZE + name_len + value_len;
+
+            // BUG FIX: stop on a desynced/oversized entry rather than slicing OOB.
+            if read_pos + entry_size > self.data.len() {
+                break;
+            }
 
             if tag != TAG_DELETED {
                 if write_pos != read_pos {
@@ -675,14 +738,30 @@ impl<'a> Iterator for HeaderBlockIter<'a> {
                 return None;
             }
             let tag = self.data[self.pos];
-            let name_len =
-                u16::from_le_bytes([self.data[self.pos + 1], self.data[self.pos + 2]]) as usize;
-            let value_len =
-                u16::from_le_bytes([self.data[self.pos + 3], self.data[self.pos + 4]]) as usize;
+            // BUG FIX: lengths are now u32 (4 bytes each, see ENTRY_HEADER_SIZE).
+            let name_len = u32::from_le_bytes([
+                self.data[self.pos + 1],
+                self.data[self.pos + 2],
+                self.data[self.pos + 3],
+                self.data[self.pos + 4],
+            ]) as usize;
+            let value_len = u32::from_le_bytes([
+                self.data[self.pos + 5],
+                self.data[self.pos + 6],
+                self.data[self.pos + 7],
+                self.data[self.pos + 8],
+            ]) as usize;
             let entry_size = ENTRY_HEADER_SIZE + name_len + value_len;
 
             let name_start = self.pos + ENTRY_HEADER_SIZE;
             let value_start = name_start + name_len;
+
+            // BUG FIX: stop iterating if a desynced/oversized entry would slice
+            // past the buffer end, rather than panicking the worker.
+            if value_start + value_len > self.data.len() {
+                return None;
+            }
+
             self.pos += entry_size;
 
             if tag != TAG_DELETED {
@@ -1509,6 +1588,67 @@ mod tests {
         assert!(block.is_empty());
         let map2 = block.into_header_map();
         assert!(map2.is_empty());
+    }
+
+    // ── Regression: multi-valued headers survive the round-trip ──
+    //
+    // BUG: into_header_map used `map.insert`, which removes all prior values
+    // for a name, so every value but the last of a multi-valued header (e.g.
+    // Set-Cookie) was silently dropped. Now it uses `map.append`.
+    #[test]
+    fn header_block_roundtrip_preserves_multivalue_headers() {
+        let mut map = axum::http::HeaderMap::new();
+        // Two Set-Cookie values under the same name — the classic multi-value case.
+        map.append("set-cookie", "a=1".parse().unwrap());
+        map.append("set-cookie", "b=2".parse().unwrap());
+        assert_eq!(map.get_all("set-cookie").iter().count(), 2);
+
+        let block = HeaderBlock::from_header_map(&map);
+        // Both entries are stored distinctly.
+        assert_eq!(block.len(), 2);
+
+        let map2 = block.into_header_map();
+        // Without the fix this is 1 (only "b=2" survives); with the fix it is 2.
+        let values: Vec<_> = map2
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values.len(), 2, "both Set-Cookie values must survive");
+        assert!(values.contains(&"a=1".to_string()));
+        assert!(values.contains(&"b=2".to_string()));
+    }
+
+    // ── Regression: headers larger than 65535 bytes are not truncated ──
+    //
+    // BUG: name_len/value_len were stored as u16, so a value >= 65536 bytes
+    // had its on-buffer length truncated (e.g. 70000 -> 4464), desynchronising
+    // the parse walk and panicking with an out-of-bounds slice. Lengths are
+    // now u32 (ENTRY_HEADER_SIZE = 9).
+    #[test]
+    fn header_block_handles_header_value_over_u16_max() {
+        // 70_000 bytes — well past u16::MAX (65_535). Realistic for a big
+        // Cookie / JWT bearer token / custom header.
+        let big_value = vec![b'x'; 70_000];
+        let mut map = axum::http::HeaderMap::new();
+        map.insert(
+            "authorization",
+            axum::http::HeaderValue::from_bytes(&big_value).unwrap(),
+        );
+        map.insert("x-small", "ok".parse().unwrap());
+
+        let mut block = HeaderBlock::from_header_map(&map);
+        assert_eq!(block.len(), 2);
+
+        // Each of these walks the buffer; under the old u16 truncation the
+        // desynced length caused an out-of-bounds panic here.
+        let removed = block.strip_hop_by_hop();
+        assert_eq!(removed, 0); // neither header is hop-by-hop
+        assert_eq!(block.iter().count(), 2);
+
+        let map2 = block.into_header_map();
+        assert_eq!(map2.get("authorization").unwrap().as_bytes(), &big_value[..]);
+        assert_eq!(map2.get("x-small").unwrap(), "ok");
     }
 
     // ── HopByHopStripper — Direct and Block strategies ──

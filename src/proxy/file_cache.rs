@@ -592,7 +592,23 @@ impl FileCache {
         }
 
         let meta = std::fs::metadata(path)?;
-        self.insert_entry(path, meta)
+        let entry = self.insert_entry(path, meta)?;
+
+        // BUG FIX: the pre-insert `if len() >= max { evict_oldest() }` (which removes at
+        // most one entry) followed by an unconditional insert is a check-then-act race —
+        // under concurrent get_or_open() for distinct uncached paths, several threads can
+        // each observe the bound satisfied (or each evict only one) and then all insert,
+        // pushing len() above max_entries. Re-enforce the cap AFTER inserting by
+        // loop-evicting until len() <= max_entries, so the documented bound holds even
+        // under contention. `max_entries.max(1)` treats a 0-capacity config as "keep at
+        // least 1" rather than evict-on-every-request churn (and also prevents evicting
+        // the entry we just inserted on the common path).
+        let cap = self.config.max_entries.max(1);
+        while self.entries.len() > cap {
+            self.evict_oldest();
+        }
+
+        Ok(entry)
     }
 
     /// Insert a new cache entry for the given file.
@@ -749,10 +765,26 @@ pub fn parse_http_date(s: &str) -> Option<SystemTime> {
     let minutes: u64 = time_parts[1].parse().ok()?;
     let seconds: u64 = time_parts[2].parse().ok()?;
 
-    let days = ymd_to_days(year, month, day as i64);
-    let total_secs = days as u64 * 86400 + hours * 3600 + minutes * 60 + seconds;
+    // BUG FIX: a well-formed pre-1970 HTTP-date (e.g. "Thu, 01 Jan 1900 00:00:00 GMT")
+    // made `ymd_to_days` return a negative i64; the old code did `days as u64 * 86400`,
+    // which wrapped to ~1.8e19 secs and then panicked (abort under panic="abort") inside
+    // `SystemTime::UNIX_EPOCH + Duration::from_secs(..)` with "overflow when adding
+    // duration to instant". Validate field ranges, reject pre-epoch / out-of-range dates,
+    // and use checked arithmetic so we return None instead of panicking.
+    if !(1..=31).contains(&day) || hours >= 24 || minutes >= 60 || seconds >= 60 {
+        return None;
+    }
 
-    Some(SystemTime::UNIX_EPOCH + Duration::from_secs(total_secs))
+    let days = ymd_to_days(year, month, day as i64);
+    if days < 0 {
+        // Pre-epoch dates are not representable as an offset from UNIX_EPOCH here.
+        return None;
+    }
+    let total_secs = (days as u64)
+        .checked_mul(86400)?
+        .checked_add(hours * 3600 + minutes * 60 + seconds)?;
+
+    SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(total_secs))
 }
 
 /// Convert days since Unix epoch to (year, month, day).
@@ -909,6 +941,36 @@ mod tests {
     fn parse_http_date_invalid() {
         assert!(parse_http_date("not a date").is_none());
         assert!(parse_http_date("").is_none());
+    }
+
+    // Regression: a well-formed pre-1970 HTTP-date used to abort the process via
+    // `days as u64 * 86400` wrapping and then panicking inside
+    // `SystemTime::UNIX_EPOCH + Duration::from_secs(..)`. It must now return None
+    // (no panic), and not_modified_since must fall through to its `false` default.
+    #[test]
+    fn parse_http_date_pre_epoch_returns_none_no_panic() {
+        // 1900-01-01 -> ymd_to_days ~= -25567 (negative).
+        assert!(parse_http_date("Thu, 01 Jan 1900 00:00:00 GMT").is_none());
+        // 1969-12-31 -> ymd_to_days == -1 (just before epoch).
+        assert!(parse_http_date("Wed, 31 Dec 1969 00:00:00 GMT").is_none());
+
+        // Reached via CachedMetadata too: a pre-epoch If-Modified-Since must not
+        // panic and must be treated as "not satisfied" (returns false).
+        let (_f, path) = temp_file(b"pre-epoch guard");
+        let meta = std::fs::metadata(&path).unwrap();
+        let cached = CachedMetadata::from_fs(&path, &meta);
+        assert!(!cached.not_modified_since("Thu, 01 Jan 1900 00:00:00 GMT"));
+    }
+
+    // Regression: out-of-range date/time fields must be rejected (return None)
+    // rather than fed into ymd_to_days / overflowing the seconds math.
+    #[test]
+    fn parse_http_date_out_of_range_fields_return_none() {
+        assert!(parse_http_date("Sat, 32 Jan 2000 00:00:00 GMT").is_none()); // day > 31
+        assert!(parse_http_date("Sat, 00 Jan 2000 00:00:00 GMT").is_none()); // day < 1
+        assert!(parse_http_date("Sat, 01 Jan 2000 24:00:00 GMT").is_none()); // hours >= 24
+        assert!(parse_http_date("Sat, 01 Jan 2000 00:60:00 GMT").is_none()); // minutes >= 60
+        assert!(parse_http_date("Sat, 01 Jan 2000 00:00:60 GMT").is_none()); // seconds >= 60
     }
 
     // ── FileCache ──
@@ -1276,6 +1338,81 @@ mod tests {
         cache.get_or_open(&p1).unwrap();
         cache.get_or_open(&p2).unwrap();
         assert!(cache.metrics.evictions.load(Ordering::Relaxed) >= 1);
+    }
+
+    // Regression: the pre-insert "evict at most one then insert unconditionally"
+    // race let len() overshoot max_entries under concurrent get_or_open() for
+    // distinct uncached paths. With the post-insert loop-evict, the documented cap
+    // must hold once all threads have settled, regardless of contention.
+    // Without the fix this assertion fails (len() climbs to ~thread count).
+    #[test]
+    fn cache_respects_max_entries_under_concurrent_inserts() {
+        const THREADS: usize = 16;
+        const PER_THREAD: usize = 8;
+        const MAX_ENTRIES: usize = 4;
+
+        let config = FileCacheConfig {
+            max_entries: MAX_ENTRIES,
+            ..Default::default()
+        };
+        let cache = std::sync::Arc::new(FileCache::new(config));
+
+        // Pre-create distinct temp files and keep their handles alive for the
+        // whole test so the paths stay valid while threads hammer the cache.
+        let mut files = Vec::new();
+        let mut paths = Vec::new();
+        for t in 0..THREADS {
+            for i in 0..PER_THREAD {
+                let (f, p) = temp_file(format!("concurrent-{t}-{i}").as_bytes());
+                files.push(f);
+                paths.push(p);
+            }
+        }
+        let paths = std::sync::Arc::new(paths);
+
+        // Release all threads at once to maximize the check-then-act window.
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(THREADS));
+        let mut handles = Vec::new();
+        for t in 0..THREADS {
+            let cache = std::sync::Arc::clone(&cache);
+            let paths = std::sync::Arc::clone(&paths);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                for i in 0..PER_THREAD {
+                    let p = &paths[t * PER_THREAD + i];
+                    let _ = cache.get_or_open(p);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // After all inserters have settled, the cap must hold.
+        assert!(
+            cache.len() <= MAX_ENTRIES,
+            "cache overshot max_entries: len={} > {}",
+            cache.len(),
+            MAX_ENTRIES
+        );
+    }
+
+    // Regression: a 0-capacity config must not cause unbounded growth nor an
+    // evict/insert spin; max_entries.max(1) keeps at least the just-inserted entry.
+    #[test]
+    fn cache_zero_max_entries_keeps_bounded() {
+        let config = FileCacheConfig {
+            max_entries: 0,
+            ..Default::default()
+        };
+        let cache = FileCache::new(config);
+        let (_f1, p1) = temp_file(b"zerocap1");
+        let (_f2, p2) = temp_file(b"zerocap2");
+        cache.get_or_open(&p1).unwrap();
+        cache.get_or_open(&p2).unwrap();
+        // Clamped to a minimum of 1 entry — never grows unbounded.
+        assert!(cache.len() <= 1);
     }
 
     // ── http_date / parse_http_date with known dates ──

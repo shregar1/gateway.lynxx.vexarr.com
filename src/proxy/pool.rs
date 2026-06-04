@@ -389,14 +389,37 @@ impl ThreadCache {
     }
 
     /// Drain excess buffers from thread cache to global pool.
+    ///
+    /// BUG FIX: the guard was previously `cache.len() > limit`, but `push_buf`
+    /// caps the cache at exactly `limit` (it rejects once `len == limit`), so
+    /// the cache length could never *exceed* `limit` and this branch was dead
+    /// code. The global byte-pool tier therefore never received any buffers,
+    /// cross-thread reuse never functioned, and overflow buffers were dropped
+    /// instead of pooled. Drain at `>= limit` down to a low-water mark so the
+    /// caller's retried `push_buf` has room and the global tier actually fills.
     fn drain_buf_to_global(&mut self, tier: BufTier) {
+        let cfg = config();
+        let limit = cfg.thread_cache_limit;
+        let batch_size = cfg.batch_size;
         let cache = &mut self.buf_caches[tier.index()];
-        let limit = config().thread_cache_limit;
-        if cache.len() > limit {
-            let excess = cache.len() - limit;
-            let mut batch: Vec<Vec<u8>> = cache.split_off(cache.len() - excess);
+        if limit > 0 && cache.len() >= limit {
+            // Drain down to a low-water mark (limit - batch_size) so that after
+            // draining the cache has spare slots for the retried push. Draining
+            // only the single at-limit item would leave the cache full again and
+            // the retry would still fail.
+            let low_water = limit.saturating_sub(batch_size.max(1));
+            let split_at = low_water.min(cache.len());
+            let mut batch: Vec<Vec<u8>> = cache.split_off(split_at);
+            let offered = batch.len();
             global_buf_pools()[tier.index()].return_batch(&mut batch);
-            // Any items that didn't fit in global are dropped here.
+            // return_batch drains accepted items out of `batch`; whatever
+            // remains did not fit in the global pool and is dropped here.
+            let accepted = offered - batch.len();
+            if accepted > 0 {
+                BUF_METRICS
+                    .global_returns
+                    .fetch_add(accepted as u64, Ordering::Relaxed);
+            }
         }
     }
 
@@ -558,13 +581,27 @@ impl Drop for PooledString {
             let mut cache = tc.borrow_mut();
             if let Some(overflow) = cache.push_string(s) {
                 // Thread cache full — drain batch to global.
-                let limit = config().thread_cache_limit;
-                if cache.string_cache.len() > limit {
-                    let excess = cache.string_cache.len() - limit;
-                    let split_at = cache.string_cache.len() - excess;
+                // BUG FIX: same off-by-one as drain_buf_to_global — push_string
+                // caps string_cache at exactly `limit`, so the old `> limit`
+                // guard was never true and the global string pool stayed dead.
+                // Drain at `>= limit` down to a low-water mark so the retried
+                // push_string below has room and the global tier actually fills.
+                let cfg = config();
+                let limit = cfg.thread_cache_limit;
+                let batch_size = cfg.batch_size;
+                if limit > 0 && cache.string_cache.len() >= limit {
+                    let low_water = limit.saturating_sub(batch_size.max(1));
+                    let split_at = low_water.min(cache.string_cache.len());
                     let mut batch: Vec<String> =
                         cache.string_cache.split_off(split_at);
+                    let offered = batch.len();
                     global_string_pool().return_batch(&mut batch);
+                    let accepted = offered - batch.len();
+                    if accepted > 0 {
+                        STRING_METRICS
+                            .global_returns
+                            .fetch_add(accepted as u64, Ordering::Relaxed);
+                    }
                 }
                 if cache.push_string(overflow).is_some() {
                     STRING_METRICS.drops.fetch_add(1, Ordering::Relaxed);
@@ -586,11 +623,23 @@ impl Drop for PooledString {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Set the pool configuration. Must be called before the first `acquire_*`
-/// call (typically at startup). Subsequent calls are ignored.
+/// Set the pool configuration. Must be called before the pool is first
+/// touched (any `acquire_*`/drop or global-pool init, typically at startup).
+/// Once the configuration has been initialised, subsequent calls are ignored
+/// **in full** — neither the sizing/limits nor the `enabled` flag are applied.
+///
+/// To toggle the master switch after startup, use [`set_enabled`].
 pub fn configure(config: PoolConfig) {
-    POOL_ENABLED.store(config.enabled, Ordering::Relaxed);
-    let _ = POOL_CONFIG.set(config);
+    // BUG FIX: previously POOL_ENABLED was stored unconditionally while the
+    // sizing config was applied via POOL_CONFIG.set(), whose Err (the OnceLock
+    // was already initialised — e.g. by an earlier acquire/drop) was silently
+    // discarded. That left an inconsistent state: the new `enabled` bit paired
+    // with default sizing/limits. Apply both atomically — only flip the enable
+    // flag if the config was actually accepted, so the two never diverge.
+    let enabled = config.enabled;
+    if POOL_CONFIG.set(config).is_ok() {
+        POOL_ENABLED.store(enabled, Ordering::Relaxed);
+    }
 }
 
 /// Enable or disable the pool allocator at runtime. When disabled, all
@@ -1092,5 +1141,95 @@ mod tests {
         assert!(is_enabled());
         // Restore original state.
         set_enabled(original);
+    }
+
+    // ── Regression: overflow buffers reach the global pool tier ──
+    //
+    // BUG: the drain guard `cache.len() > limit` was unreachable because
+    // push_buf caps the cache at exactly `limit`, so the global byte-pool tier
+    // never received buffers (global_returns stayed 0 forever) and overflow
+    // buffers were dropped instead of pooled. Runs on a dedicated thread so the
+    // thread-local cache starts empty and the fill is deterministic. Without the
+    // fix the drain branch never executes and `global_returns` never advances;
+    // with the fix the over-limit buffers are batched to the global pool.
+    #[test]
+    fn drain_to_global_fills_global_pool_tier() {
+        enable_pools();
+        let before = BUF_METRICS.global_returns.load(Ordering::Relaxed);
+
+        std::thread::spawn(move || {
+            let limit = config().thread_cache_limit;
+            // Acquire then drop well past the per-thread limit so at least one
+            // drain-to-global fires. Holding them all first guarantees the
+            // cache is genuinely at `limit` when the surplus drops.
+            let bufs: Vec<PooledBuf> =
+                (0..limit + config().batch_size + 8).map(|_| acquire_buf(64)).collect();
+            drop(bufs);
+
+            // Thread cache must remain bounded by `limit` after draining.
+            THREAD_CACHE.with(|tc| {
+                let cache = tc.borrow();
+                assert!(
+                    cache.buf_caches[BufTier::Small.index()].len() <= limit,
+                    "thread cache must stay bounded by limit after drain"
+                );
+            });
+        })
+        .join()
+        .unwrap();
+
+        let after = BUF_METRICS.global_returns.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "over-limit buffers must drain to the global pool \
+             (global_returns advanced from {before} to {after})"
+        );
+    }
+
+    // ── Regression: configure() never half-applies once the pool is touched ──
+    //
+    // BUG: configure() wrote POOL_ENABLED unconditionally but discarded the Err
+    // from POOL_CONFIG.set(); once the pool had been touched (POOL_CONFIG
+    // already initialised) a later configure() flipped `enabled` while leaving
+    // every size/limit at the default — an inconsistent half-applied state.
+    // The fix flips POOL_ENABLED only when the config is actually accepted, so
+    // the enable bit and the sizing can never diverge.
+    #[test]
+    fn configure_does_not_half_apply_after_pool_touched() {
+        // Force the config OnceLock to initialise (simulates the pool having
+        // been touched before configure() is called), so the configure() below
+        // is guaranteed to be in the already-initialised / ignored regime.
+        let _ = acquire_buf(64);
+        assert_eq!(
+            config().small_buf_cap,
+            PoolConfig::default().small_buf_cap,
+            "precondition: config is at defaults"
+        );
+
+        // Establish a known enabled state, then attempt to configure() with the
+        // OPPOSITE enabled flag and a non-default size. Because the config is
+        // already initialised, configure() must be ignored *in full*.
+        set_enabled(true);
+        let mut cfg = PoolConfig::default();
+        cfg.enabled = false; // would flip POOL_ENABLED under the old buggy code
+        cfg.small_buf_cap = 999; // sizing change that the OnceLock rejects
+        configure(cfg);
+
+        // Sizing was (correctly) rejected by the OnceLock...
+        assert_eq!(
+            config().small_buf_cap,
+            PoolConfig::default().small_buf_cap,
+            "sizing must remain at defaults — configure() is ignored after init"
+        );
+        // ...and therefore the enable flag must NOT have been applied either.
+        // Under the old code POOL_ENABLED would now be false (divergent state).
+        assert!(
+            is_enabled(),
+            "enabled flag must not change when configure() is ignored \
+             (no half-applied state)"
+        );
+
+        // Leave the pool enabled for any subsequent tests.
+        set_enabled(true);
     }
 }

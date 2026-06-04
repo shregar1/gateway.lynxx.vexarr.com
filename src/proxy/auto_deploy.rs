@@ -281,7 +281,11 @@ impl TrafficShifter {
         Self {
             new_pct: initial_pct.min(100),
             target_pct: 100,
-            step_pct: step_pct.max(1),
+            // BUG FIX: a step_pct > 100 was previously accepted here (only
+            // `.max(1)` was applied), which could overflow the u8 add in
+            // `step()`. Clamp to the [1, 100] range — mirroring the canary
+            // constructor — so the percentage step can never exceed 100.
+            step_pct: step_pct.clamp(1, 100),
             last_step: None,
             step_interval,
         }
@@ -308,7 +312,13 @@ impl TrafficShifter {
                 return false; // Too soon.
             }
         }
-        self.new_pct = (self.new_pct + self.step_pct).min(self.target_pct);
+        // BUG FIX: `new_pct + step_pct` overflowed u8 when step_pct was large
+        // (e.g. 255), panicking under overflow-checks and silently wrapping in
+        // release (causing non-monotonic traffic regression like 99 -> 98).
+        // Widen to u16 for the add+min, then narrow back; the result is always
+        // <= target_pct <= 100 so the final cast is lossless.
+        self.new_pct =
+            ((self.new_pct as u16 + self.step_pct as u16).min(self.target_pct as u16)) as u8;
         self.last_step = Some(Instant::now());
         true
     }
@@ -606,7 +616,12 @@ impl DeployExecutor {
             ),
             DeployStrategy::Rolling => TrafficShifter::new(
                 0,
-                (100 / plan.old_target_ids.len().max(1) as u8).max(1),
+                // Compute the step in usize so the divisor is clamped to >= 1
+                // BEFORE any cast. The old `... .len().max(1) as u8` cast the
+                // length to u8 *after* `.max(1)`, so a fleet size that is a
+                // nonzero multiple of 256 truncated to 0 and `100 / 0u8`
+                // aborted the process.
+                (100usize / plan.old_target_ids.len().max(1)).clamp(1, 100) as u8,
                 Duration::from_secs(30),
             ),
         };
@@ -1026,6 +1041,30 @@ mod tests {
         s.rollback();
         assert_eq!(s.new_pct(), 0);
         assert_eq!(s.old_pct(), 100);
+    }
+
+    #[test]
+    fn shifter_large_step_pct_does_not_overflow() {
+        // Regression: a large step_pct used to overflow the u8 add in step()
+        // (panic under overflow-checks, silent wrap to a *lower* pct in
+        // release — e.g. 99 -> 98). Start high so the next step crosses the
+        // u8 boundary, and pass the maximum possible step_pct.
+        let mut s = TrafficShifter::new(99, 255, Duration::ZERO);
+
+        // The constructor must clamp step_pct into [1, 100] (no longer stores
+        // 255), so step() can never push new_pct past target_pct (100).
+        assert!(s.step());
+        assert_eq!(
+            s.new_pct(),
+            100,
+            "step must saturate at target_pct, never wrap below the current pct"
+        );
+        assert!(s.is_complete());
+
+        // Monotonicity guard: a further step at the cap is a no-op, never a
+        // regression to a smaller value.
+        assert!(!s.step());
+        assert_eq!(s.new_pct(), 100);
     }
 
     #[test]

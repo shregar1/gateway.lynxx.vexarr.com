@@ -484,11 +484,16 @@ impl SteeringTable {
 
     /// Insert a rule, maintaining priority order. Returns false if at capacity.
     pub fn insert(&mut self, rule: SteeringRule) -> bool {
+        // BUG FIX: dedup BEFORE the capacity check. Previously the capacity
+        // guard ran first, so updating an existing rule (same id) while the
+        // table was full was rejected and the live update silently dropped,
+        // even though the retain would have freed its slot. Removing the old
+        // entry first means an update never trips the capacity limit; only a
+        // genuinely new id can be rejected when full.
+        self.rules.retain(|r| r.id != rule.id);
         if self.rules.len() >= self.max_rules {
             return false;
         }
-        // Remove any existing rule with the same ID.
-        self.rules.retain(|r| r.id != rule.id);
         let pos = self
             .rules
             .binary_search_by_key(&rule.priority, |r| r.priority)
@@ -534,29 +539,52 @@ impl SteeringTable {
         })
     }
 
-    /// Simplified CIDR match — checks if the prefix matches the start of the IP.
-    /// In production this would do proper bitwise prefix comparison.
+    /// CIDR match — proper bitwise prefix comparison honoring the /N mask.
+    ///
+    /// BUG FIX: the previous implementation broke out of the octet loop on the
+    /// first "0" octet of the network and discarded the /N suffix entirely. That
+    /// produced both false positives (e.g. "10.0.0.0/24" matched "10.0.99.5"
+    /// because it stopped at the third "0" octet) and false negatives (e.g.
+    /// "10.20.30.0/16" failed "10.20.99.5" by comparing octets past the mask).
+    /// We now parse both sides to u32 and compare under the prefix mask.
     fn cidr_contains(prefix: &str, ip: &str) -> bool {
-        if let Some(network) = prefix.split('/').next() {
-            // Simple prefix-based match for the network portion.
-            let net_parts: Vec<&str> = network.split('.').collect();
-            let ip_parts: Vec<&str> = ip.split('.').collect();
-            if net_parts.is_empty() || ip_parts.is_empty() {
-                return false;
+        let mut split = prefix.split('/');
+        let Some(network) = split.next() else {
+            return false;
+        };
+        // Default to a full /32 (host match) when no length is given.
+        let len: u32 = match split.next() {
+            Some(l) => match l.parse::<u32>() {
+                Ok(n) if n <= 32 => n,
+                _ => return false,
+            },
+            None => 32,
+        };
+        let (Some(net_u32), Some(ip_u32)) =
+            (Self::parse_ipv4(network), Self::parse_ipv4(ip))
+        else {
+            return false;
+        };
+        // `<< 32` is UB in Rust (shift overflow); handle the /0 case explicitly.
+        let mask: u32 = if len == 0 { 0 } else { u32::MAX << (32 - len) };
+        (ip_u32 & mask) == (net_u32 & mask)
+    }
+
+    /// Parse a dotted-quad IPv4 string into a u32. Returns None if malformed.
+    fn parse_ipv4(s: &str) -> Option<u32> {
+        let mut octets = [0u8; 4];
+        let mut count = 0usize;
+        for part in s.split('.') {
+            if count >= 4 {
+                return None;
             }
-            // Match the non-zero octets of the network.
-            for (n, i) in net_parts.iter().zip(ip_parts.iter()) {
-                if *n == "0" {
-                    break;
-                }
-                if n != i {
-                    return false;
-                }
-            }
-            true
-        } else {
-            false
+            octets[count] = part.parse::<u8>().ok()?;
+            count += 1;
         }
+        if count != 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes(octets))
     }
 
     pub fn len(&self) -> usize {
@@ -933,6 +961,9 @@ pub struct BackendMap {
     entries: Vec<BackendEntry>,
     max_backends: usize,
     generation: u64,
+    /// Generation that was current at the last successful sync.
+    /// Used to detect convergence: needs_sync() is false once this equals `generation`.
+    synced_generation: u64,
     last_sync: Option<Instant>,
 }
 
@@ -942,6 +973,7 @@ impl BackendMap {
             entries: Vec::new(),
             max_backends: max_backends.max(1),
             generation: 0,
+            synced_generation: 0,
             last_sync: None,
         }
     }
@@ -1017,6 +1049,10 @@ impl BackendMap {
 
     /// Mark that a sync to kernel map was performed.
     pub fn mark_synced(&mut self) {
+        // BUG FIX: previously mark_synced() ignored `generation`, so needs_sync()
+        // (which tested `generation > 0`) stayed true forever and sync
+        // de-duplication never converged. Record the generation we just synced.
+        self.synced_generation = self.generation;
         self.last_sync = Some(Instant::now());
     }
 
@@ -1027,7 +1063,10 @@ impl BackendMap {
 
     /// Check if a sync is needed (generation changed since last sync).
     pub fn needs_sync(&self) -> bool {
-        self.last_sync.is_none() || self.generation > 0
+        // BUG FIX: compare against the generation captured at the last sync
+        // instead of `generation > 0` (which never returned to false after any
+        // mutation). Converges once a sync has caught up to the latest mutation.
+        self.last_sync.is_none() || self.generation != self.synced_generation
     }
 
     /// Serialize all entries for bulk map update.
@@ -1273,6 +1312,36 @@ mod tests {
         assert!(!t.insert(SteeringRule::new(99, 99, MatchSpec::any(), SteeringAction::Pass)));
     }
 
+    // Regression: updating an existing rule id must succeed even when the table
+    // is exactly at capacity. Previously the capacity check ran before the dedup
+    // retain, so the live update was silently dropped and stale steering remained.
+    #[test]
+    fn steering_table_update_at_capacity() {
+        let mut t = SteeringTable::new(8); // min clamped to 8
+        for i in 0..8 {
+            assert!(t.insert(SteeringRule::new(i, i as u16, MatchSpec::any(), SteeringAction::Pass)));
+        }
+        assert_eq!(t.len(), 8); // full
+
+        // Re-point rule 0 (an update of an existing id) while at capacity.
+        assert!(
+            t.insert(SteeringRule::new(0, 0, MatchSpec::any(), SteeringAction::Drop)),
+            "update of existing id must succeed at capacity"
+        );
+        assert_eq!(t.len(), 8, "update must not grow the table");
+
+        // The update must have been applied (action is now Drop for id 0).
+        let updated = t
+            .all_rules()
+            .iter()
+            .find(|r| r.id == 0)
+            .expect("rule 0 still present");
+        assert!(matches!(updated.action, SteeringAction::Drop));
+
+        // A genuinely new id is still rejected when full.
+        assert!(!t.insert(SteeringRule::new(99, 99, MatchSpec::any(), SteeringAction::Pass)));
+    }
+
     #[test]
     fn steering_table_cidr_match() {
         let mut t = SteeringTable::new(10);
@@ -1285,6 +1354,63 @@ mod tests {
         assert!(t.lookup(Some("10.1.2.3"), None, None).is_some());
         assert!(t.lookup(Some("10.255.0.1"), None, None).is_some());
         assert!(t.lookup(Some("192.168.1.1"), None, None).is_none());
+    }
+
+    // Regression: cidr_contains must honor the /N mask instead of breaking on
+    // the first zero octet. /24 must exclude addresses outside the network
+    // (no false positive), and /16 must include addresses inside it that differ
+    // in the third octet (no false negative).
+    #[test]
+    fn steering_table_cidr_honors_prefix_length() {
+        // /24 false-positive case: 10.0.99.5 is OUTSIDE 10.0.0.0/24.
+        let mut t24 = SteeringTable::new(10);
+        t24.insert(SteeringRule::new(
+            1, 100,
+            MatchSpec::from_prefix("10.0.0.0/24"),
+            SteeringAction::ToCpu(1),
+        ));
+        assert!(
+            t24.lookup(Some("10.0.0.7"), None, None).is_some(),
+            "10.0.0.7 is inside 10.0.0.0/24"
+        );
+        assert!(
+            t24.lookup(Some("10.0.99.5"), None, None).is_none(),
+            "10.0.99.5 must NOT match 10.0.0.0/24 (false-positive regression)"
+        );
+
+        // /16 false-negative case: 10.20.99.5 IS inside 10.20.0.0/16.
+        let mut t16 = SteeringTable::new(10);
+        t16.insert(SteeringRule::new(
+            2, 100,
+            MatchSpec::from_prefix("10.20.30.0/16"),
+            SteeringAction::ToCpu(2),
+        ));
+        assert!(
+            t16.lookup(Some("10.20.99.5"), None, None).is_some(),
+            "10.20.99.5 must match 10.20.0.0/16 (false-negative regression)"
+        );
+        assert!(
+            t16.lookup(Some("10.21.0.1"), None, None).is_none(),
+            "10.21.0.1 is outside 10.20.0.0/16"
+        );
+
+        // /0 matches everything; full /32 matches only the exact host.
+        let mut t0 = SteeringTable::new(10);
+        t0.insert(SteeringRule::new(
+            3, 100,
+            MatchSpec::from_prefix("0.0.0.0/0"),
+            SteeringAction::Pass,
+        ));
+        assert!(t0.lookup(Some("203.0.113.9"), None, None).is_some());
+
+        let mut t32 = SteeringTable::new(10);
+        t32.insert(SteeringRule::new(
+            4, 100,
+            MatchSpec::from_prefix("192.168.1.1/32"),
+            SteeringAction::Drop,
+        ));
+        assert!(t32.lookup(Some("192.168.1.1"), None, None).is_some());
+        assert!(t32.lookup(Some("192.168.1.2"), None, None).is_none());
     }
 
     #[test]
@@ -1468,6 +1594,32 @@ mod tests {
         assert_eq!(m.generation(), 1);
         m.mark_unhealthy(0);
         assert_eq!(m.generation(), 2);
+    }
+
+    // Regression: needs_sync() must converge to false after mark_synced(), and
+    // flip back to true only after a subsequent mutation. Previously needs_sync
+    // tested `generation > 0`, so it stayed true forever after any mutation.
+    #[test]
+    fn backend_map_needs_sync_converges_after_mark_synced() {
+        let mut m = BackendMap::new(10);
+        // Fresh map with no sync yet: a sync is required.
+        assert!(m.needs_sync());
+
+        m.upsert(BackendEntry::new(0, [10, 0, 0, 1], 80));
+        assert!(m.needs_sync(), "mutation should require a sync");
+
+        m.mark_synced();
+        assert!(
+            !m.needs_sync(),
+            "needs_sync must be false immediately after mark_synced (de-dup must converge)"
+        );
+
+        // A further mutation re-arms the sync flag.
+        m.mark_unhealthy(0);
+        assert!(m.needs_sync(), "post-sync mutation must require another sync");
+
+        m.mark_synced();
+        assert!(!m.needs_sync(), "second sync must converge again");
     }
 
     #[test]

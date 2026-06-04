@@ -196,13 +196,22 @@ impl ClusterState {
 
     /// Register a new node. Returns false if the node already exists.
     pub fn register_node(&self, node: ClusterNode) -> bool {
-        let id = node.id;
-        if self.nodes.contains_key(&id) {
-            return false;
+        // BUG FIX: previously `contains_key` then `insert` were two separate
+        // DashMap ops with no guard held across them (TOCTOU). Two threads
+        // registering the SAME brand-new id could both see contains_key==false,
+        // both insert (overwriting a live node), both return true, and double-
+        // count nodes_registered. The entry API performs the existence check and
+        // insert atomically under the shard lock, so exactly one caller wins and
+        // the metric only counts a truly-new node.
+        use dashmap::mapref::entry::Entry;
+        match self.nodes.entry(node.id) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(node);
+                CLUSTER_METRICS.nodes_registered.fetch_add(1, Ordering::Relaxed);
+                true
+            }
         }
-        CLUSTER_METRICS.nodes_registered.fetch_add(1, Ordering::Relaxed);
-        self.nodes.insert(id, node);
-        true
     }
 
     /// Deregister a node. Returns the removed node if it existed.
@@ -218,7 +227,17 @@ impl ClusterState {
     pub fn heartbeat(&self, id: &NodeId, load_fraction: f64, active_conns: u64, rps: f64) -> bool {
         if let Some(mut entry) = self.nodes.get_mut(id) {
             entry.last_heartbeat = Instant::now();
-            entry.load_fraction = load_fraction.clamp(0.0, 1.0);
+            // BUG FIX: `f64::clamp(NaN, 0.0, 1.0) == NaN`, so a node reporting a
+            // non-finite load_fraction (e.g. NaN from a 0.0/0.0 capacity calc)
+            // used to store NaN unchanged. That NaN then poisoned avg_load()
+            // (stuck scale-down), the LatencyBased DNS sort, and best_az_for_placement
+            // (panic via partial_cmp().unwrap()). Reject non-finite values at
+            // ingestion so NaN/Inf can never enter the registry.
+            entry.load_fraction = if load_fraction.is_finite() {
+                load_fraction.clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             entry.active_connections = active_conns;
             entry.rps = rps;
             // Auto-recover from Unhealthy if heartbeat resumes.
@@ -398,7 +417,11 @@ impl DnsRecordManager {
                 // Prefer nodes with lower load (proxy for lower latency).
                 // Sort by load, assign descending weights.
                 let mut sorted = healthy.clone();
-                sorted.sort_by(|a, b| a.load_fraction.partial_cmp(&b.load_fraction).unwrap());
+                // BUG FIX: partial_cmp returns None for any NaN operand, so the
+                // old `.unwrap()` panicked on a non-finite load_fraction. Use a
+                // total order (total_cmp) so the sort can never panic even if a
+                // non-finite value slips past ingestion sanitization.
+                sorted.sort_by(|a, b| a.load_fraction.total_cmp(&b.load_fraction));
                 let n = sorted.len() as u32;
                 sorted
                     .iter()
@@ -533,26 +556,28 @@ impl SurgeController {
         let avg_load = state.avg_load();
         let current_count = state.healthy_count() as u32;
 
-        // ── Check cooldowns ────────────────────────────────────────────
-        if let Some(last_up) = self.last_scale_up {
-            let elapsed = now.duration_since(last_up);
-            if elapsed < self.policy.scale_up_cooldown {
-                return ScaleAction::CooldownActive {
-                    remaining: self.policy.scale_up_cooldown - elapsed,
-                };
-            }
-        }
-        if let Some(last_down) = self.last_scale_down {
-            let elapsed = now.duration_since(last_down);
-            if elapsed < self.policy.scale_down_cooldown {
-                return ScaleAction::CooldownActive {
-                    remaining: self.policy.scale_down_cooldown - elapsed,
-                };
-            }
-        }
+        // BUG FIX: cooldowns were previously both checked up front, so an active
+        // scale-DOWN cooldown (default 300s) would return CooldownActive and
+        // short-circuit before the scale-up check — meaning a sudden high-load
+        // surge shortly after a scale-down was ignored for up to 5 minutes,
+        // defeating the documented aggressive-scale-up guarantee. Each cooldown
+        // is now gated to its OWN direction: the scale-up path consults only
+        // scale_up_cooldown and the scale-down path only scale_down_cooldown, so
+        // a high-load surge can trigger ScaleUp even right after a scale-down
+        // while same-direction churn is still throttled.
 
         // ── Scale-up check (aggressive) ────────────────────────────────
         if max_load > self.policy.scale_up_threshold {
+            // Per-direction cooldown: a scale-up surge consults ONLY the scale-up
+            // cooldown, so a recent scale-down can no longer wedge scale-up.
+            if let Some(last_up) = self.last_scale_up {
+                let elapsed = now.duration_since(last_up);
+                if elapsed < self.policy.scale_up_cooldown {
+                    return ScaleAction::CooldownActive {
+                        remaining: self.policy.scale_up_cooldown - elapsed,
+                    };
+                }
+            }
             let since = self.high_load_since.get_or_insert(now);
             if now.duration_since(*since) >= self.policy.scale_up_sustained {
                 let to_add = ((current_count as f64 * self.policy.scale_up_factor).ceil() as u32)
@@ -571,6 +596,16 @@ impl SurgeController {
 
         // ── Scale-down check (conservative) ────────────────────────────
         if avg_load < self.policy.scale_down_threshold && current_count > state.min_nodes() {
+            // Per-direction cooldown: a scale-down consults ONLY the scale-down
+            // cooldown, not the scale-up one.
+            if let Some(last_down) = self.last_scale_down {
+                let elapsed = now.duration_since(last_down);
+                if elapsed < self.policy.scale_down_cooldown {
+                    return ScaleAction::CooldownActive {
+                        remaining: self.policy.scale_down_cooldown - elapsed,
+                    };
+                }
+            }
             let since = self.low_load_since.get_or_insert(now);
             if now.duration_since(*since) >= self.policy.scale_down_sustained {
                 let to_remove = 1u32; // Always remove just 1 at a time.
@@ -720,7 +755,10 @@ pub fn best_az_for_placement(state: &ClusterState) -> Option<String> {
     let report = az_capacity_report(state);
     report
         .into_iter()
-        .min_by(|a, b| a.avg_load.partial_cmp(&b.avg_load).unwrap())
+        // BUG FIX: partial_cmp returns None on a NaN avg_load (which arose when an
+        // AZ aggregated a non-finite node load_fraction), so the old `.unwrap()`
+        // panicked. total_cmp gives a total order so min_by can never panic.
+        .min_by(|a, b| a.avg_load.total_cmp(&b.avg_load))
         .map(|az| az.az)
 }
 
@@ -1469,5 +1507,218 @@ mod tests {
     fn node_with_weight() {
         let node = make_node(1).with_weight(200);
         assert_eq!(node.weight, 200);
+    }
+
+    // ── Regression: NaN/Inf load_fraction handling ─────────────────────
+    // A node reporting a non-finite load_fraction (e.g. NaN from a 0.0/0.0
+    // capacity computation) used to be stored unchanged because
+    // `f64::clamp(NaN, 0.0, 1.0) == NaN`. That NaN then poisoned the
+    // LatencyBased DNS sort and best_az_for_placement (panic via
+    // partial_cmp().unwrap()) and avg_load() (stuck scale-down).
+
+    #[test]
+    fn heartbeat_sanitizes_non_finite_load_to_zero() {
+        let state = make_state(1, 10);
+        let node = make_node(1);
+        let id = node.id;
+        state.register_node(node);
+
+        // NaN must not be stored verbatim.
+        assert!(state.heartbeat(&id, f64::NAN, 0, 0.0));
+        let n = state.healthy_nodes();
+        assert!(n[0].load_fraction.is_finite(), "NaN load must be sanitized");
+        assert!((n[0].load_fraction - 0.0).abs() < 0.001);
+
+        // +Inf must not be stored verbatim either.
+        assert!(state.heartbeat(&id, f64::INFINITY, 0, 0.0));
+        let n = state.healthy_nodes();
+        assert!(n[0].load_fraction.is_finite(), "Inf load must be sanitized");
+    }
+
+    #[test]
+    fn dns_latency_does_not_panic_on_non_finite_load() {
+        // Before the fix, the LatencyBased sort_by used partial_cmp().unwrap(),
+        // which panics on a NaN operand. Even if a NaN somehow reached the
+        // registry, building records must not panic.
+        let state = make_state(1, 10);
+        let n1 = make_node(1);
+        let n2 = make_node(2);
+        let n3 = make_node(3);
+        let id1 = n1.id;
+        let id2 = n2.id;
+        let id3 = n3.id;
+        state.register_node(n1);
+        state.register_node(n2);
+        state.register_node(n3);
+
+        // These get sanitized at ingestion, but the comparator is also made
+        // total-order-safe; either way this must not panic.
+        state.heartbeat(&id1, f64::NAN, 0, 0.0);
+        state.heartbeat(&id2, 0.2, 0, 0.0);
+        state.heartbeat(&id3, 0.5, 0, 0.0);
+
+        let mgr = DnsRecordManager::new(60);
+        let records = mgr.build_records(&state, ClusterStrategy::LatencyBased);
+        assert_eq!(records.len(), 3);
+    }
+
+    #[test]
+    fn best_az_does_not_panic_on_non_finite_load() {
+        // Before the fix, min_by used partial_cmp().unwrap(), which panics when
+        // an AZ's avg_load is NaN. Must return a valid AZ instead of panicking.
+        let state = make_state(1, 10);
+        let n1 = make_node(1).with_region("us-east-1", "us-east-1a");
+        let n2 = make_node(2).with_region("us-east-1", "us-east-1b");
+        let id1 = n1.id;
+        let id2 = n2.id;
+        state.register_node(n1);
+        state.register_node(n2);
+
+        state.heartbeat(&id1, f64::NAN, 0, 0.0); // sanitized to 0.0
+        state.heartbeat(&id2, 0.5, 0, 0.0);
+
+        let best = best_az_for_placement(&state);
+        assert!(best.is_some(), "best_az must not panic and must return an AZ");
+        // Sanitized NaN -> 0.0, so az-a (0.0) is the least loaded.
+        assert_eq!(best.unwrap(), "us-east-1a");
+    }
+
+    #[test]
+    fn avg_load_stays_finite_with_non_finite_node() {
+        // A single node reporting NaN used to make cluster-wide avg_load NaN,
+        // and `NaN < scale_down_threshold` is false, silently disabling
+        // scale-down forever.
+        let state = make_state(1, 10);
+        let n1 = make_node(1);
+        let n2 = make_node(2);
+        let id1 = n1.id;
+        let id2 = n2.id;
+        state.register_node(n1);
+        state.register_node(n2);
+
+        state.heartbeat(&id1, f64::NAN, 0, 0.0); // sanitized to 0.0
+        state.heartbeat(&id2, 0.1, 0, 0.0);
+
+        let avg = state.avg_load();
+        assert!(avg.is_finite(), "avg_load must stay finite, got {avg}");
+        // (0.0 + 0.1) / 2 == 0.05
+        assert!((avg - 0.05).abs() < 0.001, "expected ~0.05, got {avg}");
+
+        // And scale-down must therefore still be reachable.
+        let policy = ScalePolicy {
+            scale_down_sustained: Duration::from_millis(1),
+            scale_up_cooldown: Duration::from_millis(1),
+            scale_down_cooldown: Duration::from_millis(1),
+            ..Default::default()
+        };
+        let mut ctrl = SurgeController::new(policy);
+        let _ = ctrl.evaluate(&state);
+        std::thread::sleep(Duration::from_millis(5));
+        match ctrl.evaluate(&state) {
+            ScaleAction::ScaleDown(n) => assert_eq!(n, 1),
+            other => panic!("expected ScaleDown(1) despite a NaN node, got {other:?}"),
+        }
+    }
+
+    // ── Regression: scale-down cooldown must NOT block emergency scale-up ─
+    // Previously both cooldowns were checked up front, so a recent scale-down
+    // returned CooldownActive and short-circuited the scale-up branch, ignoring
+    // a high-load surge for up to scale_down_cooldown (default 300s).
+
+    #[test]
+    fn scale_down_cooldown_does_not_block_scale_up_surge() {
+        let state = make_state(1, 10);
+        let n1 = make_node(1);
+        let id1 = n1.id;
+        state.register_node(n1);
+        state.heartbeat(&id1, 0.95, 0, 0.0); // surge: well over 80%
+
+        let policy = ScalePolicy {
+            scale_up_sustained: Duration::from_millis(1),
+            scale_up_cooldown: Duration::from_millis(1),
+            // Long scale-DOWN cooldown that must NOT interfere with scale-up.
+            scale_down_cooldown: Duration::from_secs(300),
+            ..Default::default()
+        };
+        let mut ctrl = SurgeController::new(policy);
+
+        // Simulate a very recent scale-down event.
+        ctrl.record_scale_down();
+
+        // Start the high-load timer.
+        let _ = ctrl.evaluate(&state);
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Despite last_scale_down being only milliseconds ago (well within the
+        // 300s scale-down cooldown), the surge must still trigger ScaleUp.
+        // Before the fix this returned CooldownActive.
+        match ctrl.evaluate(&state) {
+            ScaleAction::ScaleUp(n) => assert!(n >= 1),
+            other => panic!(
+                "scale-down cooldown wrongly blocked emergency scale-up: {other:?}"
+            ),
+        }
+    }
+
+    // ── Regression: register_node atomicity (TOCTOU) ───────────────────
+    // contains_key + insert were two separate DashMap ops, so concurrent
+    // registration of the SAME fresh id could both insert (overwriting a live
+    // node) and both return true. The entry API makes it a single atomic op.
+
+    #[test]
+    fn register_node_concurrent_same_id_exactly_one_wins() {
+        use std::sync::Arc;
+
+        let state = Arc::new(make_state(1, 100));
+        let id = Uuid::new_v4();
+
+        // Spawn many threads all racing to register the SAME brand-new id.
+        // Each thread tags its node with a distinct weight so we can tell which
+        // insert actually landed and confirm it was never overwritten by a
+        // racing "duplicate" insert.
+        let n_threads = 16u32;
+        let mut handles = Vec::new();
+        for t in 0..n_threads {
+            let state = Arc::clone(&state);
+            handles.push(std::thread::spawn(move || {
+                let node = ClusterNode::new(id, ip(1)).with_weight(1000 + t);
+                state.register_node(node)
+            }));
+        }
+
+        let wins: u32 = handles
+            .into_iter()
+            .map(|h| if h.join().unwrap() { 1 } else { 0 })
+            .sum();
+
+        // Exactly one caller may win; all others must observe the id as present.
+        assert_eq!(wins, 1, "exactly one concurrent register_node must succeed");
+        assert_eq!(state.node_count(), 1, "id must be stored exactly once");
+
+        // The single stored node must be the winner's node, untouched by any
+        // racing duplicate insert.
+        let stored = state.healthy_nodes();
+        assert_eq!(stored.len(), 1);
+        assert!(
+            (1000..1000 + n_threads).contains(&stored[0].weight),
+            "stored node must be a registered one, not a partial overwrite: weight={}",
+            stored[0].weight
+        );
+    }
+
+    #[test]
+    fn register_node_duplicate_does_not_overwrite() {
+        // Sequential duplicate: second register must be rejected and must not
+        // overwrite the live node.
+        let state = make_state(1, 10);
+        let id = Uuid::new_v4();
+
+        assert!(state.register_node(ClusterNode::new(id, ip(1)).with_weight(111)));
+        assert!(!state.register_node(ClusterNode::new(id, ip(2)).with_weight(222)));
+
+        let stored = state.all_nodes();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].weight, 111, "duplicate must not overwrite live node");
+        assert_eq!(stored[0].addr, ip(1));
     }
 }

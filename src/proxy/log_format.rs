@@ -246,6 +246,24 @@ pub enum LogToken {
     Variable(LogVariable),
 }
 
+/// How resolved variable values are escaped when a template is rendered.
+///
+/// Resolved values are attacker-influenced (they come from request headers,
+/// the URI, etc.), so they must never be emitted verbatim into a log line:
+/// in text formats a raw `\n` forges a fake log record (CWE-117), and in the
+/// JSON format a raw `"` terminates the surrounding string literal and lets a
+/// caller inject forged top-level keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ValueEscape {
+    /// NGINX-style access-log escaping for human-readable formats: C0 control
+    /// characters (and DEL) are rendered as `\xNN` so a value can never break
+    /// out onto a new physical line. Used by Combined / Common / Custom.
+    Text,
+    /// Full JSON string-content escaping for the structured JSON preset, so the
+    /// rendered line is always valid JSON and values cannot inject extra keys.
+    Json,
+}
+
 /// A parsed log format template, ready for repeated rendering.
 #[derive(Clone, Debug)]
 pub struct LogTemplate {
@@ -253,6 +271,11 @@ pub struct LogTemplate {
     pub tokens: Vec<LogToken>,
     /// Human-readable name for this template (e.g. "combined", "custom_v2").
     pub name: String,
+    /// How resolved values are escaped at render time. Defaults to `Text`
+    /// (NGINX-style) for custom templates; set to `Json` for the JSON preset
+    /// so the output stays valid JSON. Private so the only way to obtain a
+    /// template is through `parse_log_format` / `render_preset`, which set it.
+    escape: ValueEscape,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -300,14 +323,20 @@ pub const JSON_FORMAT: &str = r#"{"remote_addr":"$remote_addr","remote_port":"$r
 
 /// Parse an NGINX-style log format string into a `LogTemplate`.
 ///
-/// Variables start with `$` and end at the first character that is not
-/// alphanumeric or underscore. Literal text is everything else. Backslash
-/// escapes are supported: `\"` produces a literal `"`.
+/// Variables start with `$` and end at the first character that is not an
+/// ASCII alphanumeric or underscore. Literal text is everything else.
+/// Backslash escapes are supported: `\"` produces a literal `"`.
+///
+/// A bare `$` (one not followed by a valid variable name) is treated as a
+/// literal `$`, matching NGINX, which only substitutes recognized variable
+/// names and otherwise leaves the `$` in place. A `$` followed by name-like
+/// characters that don't form a known variable is likewise re-emitted
+/// verbatim rather than producing an error.
 ///
 /// # Errors
 ///
-/// Returns `LogFormatError::UnknownVariable` if a `$name` is not recognized,
-/// or `LogFormatError::UnclosedEscape` if the string ends with a lone `\`.
+/// Returns `LogFormatError::UnclosedEscape` if the string ends with a lone
+/// `\`. (Unknown `$name` sequences no longer error — see above.)
 pub fn parse_log_format(format: &str) -> Result<LogTemplate, LogFormatError> {
     let mut tokens: Vec<LogToken> = Vec::new();
     let mut chars = format.chars().peekable();
@@ -323,25 +352,41 @@ pub fn parse_log_format(format: &str) -> Result<LogTemplate, LogFormatError> {
                 None => return Err(LogFormatError::UnclosedEscape),
             }
         } else if ch == '$' {
-            // Flush any accumulated literal.
-            if !literal_buf.is_empty() {
-                tokens.push(LogToken::Literal(std::mem::take(&mut literal_buf)));
-            }
             // Consume the '$'.
             chars.next();
-            // Collect the variable name: [a-zA-Z0-9_]+
+            // Collect the variable name: [a-zA-Z0-9_]+. Restrict to *ASCII*
+            // alphanumerics — `is_alphanumeric()` (Bug) also accepted Unicode
+            // letters, so e.g. `$statusÿ` folded the trailing `ÿ` into the
+            // name and turned an otherwise-valid `$status` into an error.
             let mut var_name = String::new();
             while let Some(&c) = chars.peek() {
-                if c.is_alphanumeric() || c == '_' {
+                if c.is_ascii_alphanumeric() || c == '_' {
                     var_name.push(c);
                     chars.next();
                 } else {
                     break;
                 }
             }
+            // Bug: the parser unconditionally entered the variable branch on
+            // `$` and returned UnknownVariable when the name was empty or not
+            // recognized — rejecting inputs NGINX accepts (`price=$5`,
+            // `cost: $ done`, `a$$b`). Fix: a `$` that does not form a known
+            // variable is emitted as a literal (NGINX-compatible) instead of
+            // erroring. We keep the `$` and the collected (non-variable) name
+            // in the literal buffer, then continue scanning normally.
             match LogVariable::from_str(&var_name) {
-                Some(var) => tokens.push(LogToken::Variable(var)),
-                None => return Err(LogFormatError::UnknownVariable(var_name)),
+                Some(var) => {
+                    // Flush any accumulated literal before the variable token.
+                    if !literal_buf.is_empty() {
+                        tokens.push(LogToken::Literal(std::mem::take(&mut literal_buf)));
+                    }
+                    tokens.push(LogToken::Variable(var));
+                }
+                None => {
+                    // Not a recognized variable: treat `$<name>` as literal text.
+                    literal_buf.push('$');
+                    literal_buf.push_str(&var_name);
+                }
             }
         } else {
             literal_buf.push(ch);
@@ -354,9 +399,21 @@ pub fn parse_log_format(format: &str) -> Result<LogTemplate, LogFormatError> {
         tokens.push(LogToken::Literal(literal_buf));
     }
 
+    // The generic parser cannot know a caller's intent, so custom templates
+    // get NGINX-style text escaping (which still neutralizes CRLF forging).
+    // The one format the engine itself knows to be JSON is its own preset, so
+    // detect that exactly and flag it for JSON escaping; this also covers the
+    // documented `parse_log_format(JSON_FORMAT)?.render(&ctx)` call path.
+    let escape = if format == JSON_FORMAT {
+        ValueEscape::Json
+    } else {
+        ValueEscape::Text
+    };
+
     Ok(LogTemplate {
         tokens,
         name: String::from("custom"),
+        escape,
     })
 }
 
@@ -493,6 +550,69 @@ fn opt_str(opt: &Option<String>) -> String {
     }
 }
 
+/// Escape a resolved value for a human-readable (text) log line.
+///
+/// Bug: resolved values (request headers, URI, ...) were emitted verbatim, so
+/// a value containing `\n`/`\r` split one log line into two physical lines and
+/// let an attacker forge a fake access-log record (CWE-117). Mirroring NGINX's
+/// default access-log escaping, every C0 control character (`0x00..=0x1F`,
+/// which includes `\t`, `\r`, `\n`) and DEL (`0x7F`) is rendered as `\xNN` so a
+/// value can never break out onto a new line. Other bytes pass through
+/// unchanged, preserving the existing look of Combined/Common output.
+fn escape_log_value_text(value: &str) -> String {
+    // Fast path: the overwhelming majority of values contain no control chars.
+    if !value.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len() + 8);
+    for ch in value.chars() {
+        let c = ch as u32;
+        if c < 0x20 || c == 0x7F {
+            // Always representable as exactly two hex digits (c <= 0x7F here).
+            out.push_str(&format!("\\x{:02X}", c));
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Escape a resolved value for embedding inside a JSON string literal.
+///
+/// Bug: the JSON preset wrapped every `$var` in literal quotes but emitted the
+/// resolved value verbatim, so a value containing `"`, `\`, or a control char
+/// produced invalid JSON and allowed forged top-level keys (e.g. a User-Agent
+/// of `x","status":"200","injected":"1`). This performs full JSON
+/// string-content escaping so the rendered line is always valid JSON and a
+/// value can never terminate its surrounding string literal.
+fn escape_log_value_json(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{0008}' => out.push_str("\\b"),
+            '\u{000C}' => out.push_str("\\f"),
+            // Remaining C0 control characters have no short escape: use \u00XX.
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Apply the template's configured escaping to a resolved value.
+#[inline]
+fn escape_value(value: &str, mode: ValueEscape) -> String {
+    match mode {
+        ValueEscape::Text => escape_log_value_text(value),
+        ValueEscape::Json => escape_log_value_json(value),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Rendering
 // ═══════════════════════════════════════════════════════════════════════════
@@ -505,8 +625,14 @@ impl LogTemplate {
         let mut out = String::with_capacity(256);
         for token in &self.tokens {
             match token {
+                // Literals come from the (trusted) format string itself, so
+                // they are emitted verbatim. Only resolved *values* are
+                // attacker-influenced and therefore escaped per `self.escape`
+                // (Text => CRLF-forging-safe \xNN; Json => valid-JSON escaping).
                 LogToken::Literal(s) => out.push_str(s),
-                LogToken::Variable(var) => out.push_str(&ctx.resolve(var)),
+                LogToken::Variable(var) => {
+                    out.push_str(&escape_value(&ctx.resolve(var), self.escape))
+                }
             }
         }
         LOG_FORMAT_METRICS
@@ -529,7 +655,15 @@ pub fn render_preset(preset: LogFormatPreset, ctx: &LogContext) -> String {
         }
     };
     // These presets are known-good, so unwrap is safe.
-    let template = parse_log_format(format_str).expect("preset format is always valid");
+    let mut template = parse_log_format(format_str).expect("preset format is always valid");
+    // Bug: the JSON preset string-templated raw values into quoted slots,
+    // producing invalid JSON / allowing key injection. Force JSON escaping for
+    // the JSON preset explicitly (rather than relying on the format-string
+    // match in `parse_log_format`) so the output is always valid JSON.
+    template.escape = match preset {
+        LogFormatPreset::Json => ValueEscape::Json,
+        _ => ValueEscape::Text,
+    };
     template.render(ctx)
 }
 
@@ -692,11 +826,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_error_unknown_variable() {
-        let err = parse_log_format("$nonexistent_var").unwrap_err();
+    fn parse_unknown_variable_is_literal() {
+        // Bug fix: an unrecognized `$name` is no longer an error — NGINX leaves
+        // such sequences in place, so we re-emit `$nonexistent_var` verbatim as
+        // a single literal token instead of returning UnknownVariable.
+        let tpl = parse_log_format("$nonexistent_var").unwrap();
         assert_eq!(
-            err,
-            LogFormatError::UnknownVariable("nonexistent_var".into())
+            tpl.tokens,
+            vec![LogToken::Literal("$nonexistent_var".into())]
         );
     }
 
@@ -886,5 +1023,125 @@ mod tests {
     fn parse_unclosed_escape_error() {
         let err = parse_log_format("trailing\\").unwrap_err();
         assert_eq!(err, LogFormatError::UnclosedEscape);
+    }
+
+    // ── Regression: JSON preset escapes values (Bug: invalid JSON / key
+    //    injection because values were never escaped) ──────────────────────
+
+    #[test]
+    fn render_json_escapes_quotes_and_controls() {
+        // A User-Agent carrying `"`, `\`, and control chars. Pre-fix this
+        // produced invalid JSON (`"http_user_agent":"a"b"`) and could inject
+        // forged top-level keys; post-fix the line must parse as valid JSON
+        // with a single `http_user_agent` key whose value round-trips exactly.
+        let injection = "a\"b\\c\n\tx\",\"injected\":\"1";
+        let ctx = LogContext {
+            http_user_agent: Some(injection.into()),
+            status: 200,
+            ..Default::default()
+        };
+        let line = render_preset(LogFormatPreset::Json, &ctx);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&line).expect("JSON preset must emit valid JSON");
+        let obj = parsed.as_object().expect("top level must be a JSON object");
+
+        // The malicious value did NOT create an extra top-level key.
+        assert!(
+            obj.get("injected").is_none(),
+            "value injection created a forged top-level key: {line}"
+        );
+        // The value survives intact (escaping is lossless on decode).
+        assert_eq!(
+            obj.get("http_user_agent").and_then(|v| v.as_str()),
+            Some(injection)
+        );
+        // And a normal field is unaffected.
+        assert_eq!(obj.get("status").and_then(|v| v.as_str()), Some("200"));
+    }
+
+    #[test]
+    fn render_json_plain_values_unchanged() {
+        // Escaping must not alter values that contain no special characters,
+        // so the existing structured-output shape is preserved.
+        let ctx = full_context();
+        let line = render_preset(LogFormatPreset::Json, &ctx);
+        let parsed: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(parsed["remote_addr"], "192.168.1.100");
+        assert_eq!(parsed["request_id"], "req-abc-123");
+        assert_eq!(parsed["status"], "200");
+    }
+
+    // ── Regression: Combined/Common neutralize CRLF log forging
+    //    (Bug: header-derived values emitted verbatim, splitting the line) ──
+
+    #[test]
+    fn render_combined_neutralizes_crlf_forging() {
+        // Attacker-controlled User-Agent tries to forge a second log record.
+        let forged = "Mozilla\r\n10.0.0.9 - admin [x] \"GET /forged\" 200 0";
+        let ctx = LogContext {
+            http_user_agent: Some(forged.into()),
+            ..full_context()
+        };
+        let line = render_preset(LogFormatPreset::Combined, &ctx);
+        // The rendered record must remain a single physical line: no raw CR/LF
+        // may survive into the output.
+        assert!(
+            !line.contains('\n') && !line.contains('\r'),
+            "CRLF forging not neutralized: {line:?}"
+        );
+        // The control bytes are rendered as visible \xNN escapes instead.
+        assert!(line.contains("\\x0D\\x0A"), "expected escaped CRLF in {line:?}");
+    }
+
+    #[test]
+    fn render_custom_template_neutralizes_control_chars() {
+        // Text escaping applies to ALL presets including Custom templates.
+        let ctx = LogContext {
+            http_referer: Some("foo\nbar".into()),
+            ..Default::default()
+        };
+        let tpl = parse_log_format("ref=$http_referer").unwrap();
+        let line = tpl.render(&ctx);
+        assert!(!line.contains('\n'));
+        assert_eq!(line, "ref=foo\\x0Abar");
+    }
+
+    // ── Regression: parser accepts literal `$` / `$`-before-non-variable
+    //    that NGINX accepts (Bug: returned UnknownVariable) ────────────────
+
+    #[test]
+    fn parse_literal_dollar_before_digits() {
+        // `$5` is not a known variable → emitted as literal `$5`, not an error.
+        let tpl = parse_log_format("price=$5").unwrap();
+        assert_eq!(tpl.tokens, vec![LogToken::Literal("price=$5".into())]);
+    }
+
+    #[test]
+    fn parse_bare_dollar_sign() {
+        // A `$` followed by a non-name char (space) is a literal `$`.
+        let tpl = parse_log_format("cost: $ done").unwrap();
+        assert_eq!(tpl.tokens, vec![LogToken::Literal("cost: $ done".into())]);
+    }
+
+    #[test]
+    fn parse_double_dollar_sign() {
+        let tpl = parse_log_format("a$$b").unwrap();
+        assert_eq!(tpl.tokens, vec![LogToken::Literal("a$$b".into())]);
+    }
+
+    #[test]
+    fn parse_unicode_after_valid_variable() {
+        // The name class is ASCII-only, so a trailing Unicode letter is NOT
+        // absorbed into the variable name; `$status` resolves and `ÿ` is a
+        // literal that follows it.
+        let tpl = parse_log_format("$status\u{00ff}").unwrap();
+        assert_eq!(
+            tpl.tokens,
+            vec![
+                LogToken::Variable(LogVariable::Status),
+                LogToken::Literal("\u{00ff}".into()),
+            ]
+        );
     }
 }

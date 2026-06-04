@@ -5,14 +5,34 @@
 use crate::models::{Target, TargetLifecycle};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
-use ahash::AHasher;
+use ahash::RandomState;
 use std::collections::BTreeMap;
-use std::hash::{Hash, Hasher};
+use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
 
 pub const STICKY_COOKIE_NAME: &str = "_lynxx_upstream";
+
+/// Fixed seed for all content-addressable hashing used by hash-based LB
+/// strategies (HRW + consistent-hash ring).
+///
+/// BUG FIX: these strategies were previously hashing with `AHasher::default()`,
+/// whose seed is drawn from `getrandom` once per process (ahash `runtime-rng`).
+/// That made the same request key map to a *different* backend on every restart
+/// and on every gateway instance, silently destroying the cache-affinity /
+/// session-stickiness guarantee these strategies exist to provide (target UUIDs
+/// and request keys are stable across processes, so only the random seed varied).
+/// We pin an explicit, hardcoded seed via `RandomState::with_seeds` (a `const fn`
+/// that only XORs the keys with fixed constants — no `getrandom`), so the hash is
+/// deterministic across processes and machines. The constants below are arbitrary
+/// fixed nothing-up-my-sleeve values; only their stability matters.
+const LB_HASH_SEED: RandomState = RandomState::with_seeds(
+    0x9E37_79B9_7F4A_7C15,
+    0xC2B2_AE3D_27D4_EB4F,
+    0x1656_67B1_9E37_79F9,
+    0xD6E8_FEB8_6659_FD93,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LbStrategy {
@@ -110,7 +130,9 @@ pub struct RequestContext<'a> {
 }
 
 fn hrw_hash(key: &str, target_id: &Uuid) -> u64 {
-    let mut hasher = AHasher::default();
+    // Fixed-seed hasher (not `AHasher::default()`) so HRW placement is stable
+    // across process restarts and across gateway instances. See LB_HASH_SEED.
+    let mut hasher = LB_HASH_SEED.build_hasher();
     key.hash(&mut hasher);
     target_id.hash(&mut hasher);
     hasher.finish()
@@ -282,7 +304,11 @@ impl FwrrIndex {
             .map(|(&key, _)| key);
         let (vtime, idx) = entry?;
         inner.tree.remove(&(vtime, idx));
-        let stride = FWRR_SCALE / inner.weights[idx].max(1) as u64;
+        // BUG FIX: floor the stride at 1. For a weight > FWRR_SCALE (2^20) the
+        // integer division `FWRR_SCALE / weight` truncates to 0, so the target's
+        // vtime would never advance — it stays the BTreeMap minimum and is
+        // returned on every pick, permanently starving all other backends.
+        let stride = (FWRR_SCALE / inner.weights[idx].max(1) as u64).max(1);
         let new_vtime = vtime + stride;
         inner.tree.insert((new_vtime, idx), ());
         inner.vtimes[idx] = new_vtime;
@@ -300,7 +326,10 @@ impl FwrrIndex {
         }
         let old = inner.vtimes[idx];
         inner.tree.remove(&(old, idx));
-        let stride = FWRR_SCALE / inner.weights[idx].max(1) as u64;
+        // BUG FIX: floor the stride at 1 (see `pick`): a weight > FWRR_SCALE
+        // would otherwise yield stride 0 and the vtime would never advance,
+        // starving every other target.
+        let stride = (FWRR_SCALE / inner.weights[idx].max(1) as u64).max(1);
         let new = old + stride;
         inner.tree.insert((new, idx), ());
         inner.vtimes[idx] = new;
@@ -374,14 +403,18 @@ impl ConsistentHashRing {
     }
 
     fn node_hash(target_id: &Uuid, vnode: u32) -> u64 {
-        let mut hasher = AHasher::default();
+        // Fixed-seed hasher (not `AHasher::default()`) so ring vnode positions
+        // are identical across restarts/instances. See LB_HASH_SEED.
+        let mut hasher = LB_HASH_SEED.build_hasher();
         target_id.hash(&mut hasher);
         vnode.hash(&mut hasher);
         hasher.finish()
     }
 
     fn key_hash(key: &str) -> u64 {
-        let mut hasher = AHasher::default();
+        // Fixed-seed hasher (not `AHasher::default()`) so a key lands on the
+        // same ring position across restarts/instances. See LB_HASH_SEED.
+        let mut hasher = LB_HASH_SEED.build_hasher();
         key.hash(&mut hasher);
         hasher.finish()
     }
@@ -1239,6 +1272,33 @@ mod tests {
     }
 
     #[test]
+    fn fwrr_weight_above_scale_does_not_starve_others() {
+        // Regression: a weight greater than FWRR_SCALE (2^20) made
+        // `FWRR_SCALE / weight` truncate to 0, so the heavy target's vtime
+        // never advanced and it was returned on *every* pick, permanently
+        // starving the weight-1 target. With the stride floored at 1, the
+        // weight-1 target must still receive at least one pick.
+        let heavy = (FWRR_SCALE as u32) + 1; // 1_048_577 → stride would be 0
+        let targets = make_weighted_targets(&[heavy, 1]);
+        let lb = ServiceLoadBalancer::new(LbStrategy::RoundRobin, targets);
+        assert!(lb.fwrr_index.is_some());
+        let ctx = default_ctx();
+        let mut counts = std::collections::HashMap::new();
+        for _ in 0..1000 {
+            let t = lb.pick(None, &ctx).unwrap();
+            *counts.entry(t.target.url.clone()).or_insert(0) += 1;
+        }
+        let h0 = *counts.get("http://host-0:8080").unwrap_or(&0);
+        let h1 = *counts.get("http://host-1:8080").unwrap_or(&0);
+        // The heavy target still dominates, but the light one is not starved.
+        assert!(h0 > h1, "heavy target should still dominate: h0={h0} h1={h1}");
+        assert!(
+            h1 >= 1,
+            "weight-1 target must get at least 1 pick (was 0 before fix): h1={h1}"
+        );
+    }
+
+    #[test]
     fn fwrr_incremental_weight_update() {
         let targets = make_weighted_targets(&[1, 1]);
         let svc_id = Uuid::new_v4();
@@ -1991,6 +2051,75 @@ mod tests {
             let t = lb.pick(None, &ctx).unwrap();
             assert_eq!(t.target.id, first.target.id, "HRW not consistent");
         }
+    }
+
+    // ── Regression: hash-based LB must be deterministic across processes ──
+
+    /// Regression for the bug where hash-based LB strategies hashed with
+    /// `AHasher::default()` (a per-process-random seed), so the same request
+    /// key mapped to a different backend on every restart and every instance.
+    ///
+    /// A second gateway process is modeled by an *independently* constructed
+    /// fixed-seed hasher built from the same literal constants. With the bug
+    /// (random per-process seed) the production hash functions disagree with
+    /// this reference; with the fix they agree exactly. The 64-bit space makes
+    /// an accidental match under the old random-seed code effectively
+    /// impossible (~1/2^64), so this test fails before the fix and passes after.
+    #[test]
+    fn hash_strategies_deterministic_across_processes() {
+        // A "second process" rebuilds the seed from the same hardcoded keys.
+        let reference = RandomState::with_seeds(
+            0x9E37_79B9_7F4A_7C15,
+            0xC2B2_AE3D_27D4_EB4F,
+            0x1656_67B1_9E37_79F9,
+            0xD6E8_FEB8_6659_FD93,
+        );
+
+        // Fixed key + fixed target id so the expected mapping is reproducible
+        // (modeling DB-persisted target UUIDs that are identical across runs).
+        let key = "/api/v1/users";
+        let target_id =
+            Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+
+        // hrw_hash must equal the value a separate process would compute.
+        let expected_hrw = {
+            let mut h = reference.build_hasher();
+            key.hash(&mut h);
+            target_id.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            hrw_hash(key, &target_id),
+            expected_hrw,
+            "hrw_hash diverged from the fixed-seed reference — \
+             placement is not stable across processes/instances"
+        );
+
+        // Ring key_hash must likewise be process-stable.
+        let expected_key = {
+            let mut h = reference.build_hasher();
+            key.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            ConsistentHashRing::key_hash(key),
+            expected_key,
+            "ring key_hash is not stable across processes/instances"
+        );
+
+        // Ring node_hash (target id + vnode index) must be process-stable.
+        let vnode = 7u32;
+        let expected_node = {
+            let mut h = reference.build_hasher();
+            target_id.hash(&mut h);
+            vnode.hash(&mut h);
+            h.finish()
+        };
+        assert_eq!(
+            ConsistentHashRing::node_hash(&target_id, vnode),
+            expected_node,
+            "ring node_hash is not stable across processes/instances"
+        );
     }
 
     #[test]

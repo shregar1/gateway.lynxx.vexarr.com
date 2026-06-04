@@ -232,6 +232,21 @@ impl PlanTier {
             PlanTier::Enterprise => "enterprise",
         }
     }
+
+    /// Map a billing `PlanTier` onto the runtime algorithm `Tier`.
+    ///
+    /// Free → Starter, Pro → Growth, Business / Enterprise → Pro. The
+    /// algorithms crate has only three performance tiers; Business and
+    /// Enterprise share the top-tier algorithm set and are distinguished
+    /// purely by quota.
+    pub fn algorithm_tier(self) -> algorithms::backbone::Tier {
+        use algorithms::backbone::Tier;
+        match self {
+            PlanTier::Free => Tier::Starter,
+            PlanTier::Pro => Tier::Growth,
+            PlanTier::Business | PlanTier::Enterprise => Tier::Pro,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +279,14 @@ pub struct QuotaTracker {
     /// guards both the string and the rollover transition; the hot
     /// path never touches it.
     period_string: std::sync::Mutex<String>,
+    /// Call counter. Its meaning depends on the active `CounterStrategy`:
+    ///   * `BatchedAtomic` — the shared running total (flushed batches of 64).
+    ///   * `PerThread`      — the period BASELINE: usage carried over from
+    ///     prior process runs (DB-seeded in `load()`) that is not represented
+    ///     in any live per-thread slot. The running total under PerThread is
+    ///     `calls + aggregate_per_thread_calls()`. flush() must NOT overwrite
+    ///     this with the bare slot aggregate (that previously dropped the
+    ///     baseline and let the Free hard-block tier overshoot the limit).
     calls: AtomicU64,
     rejected: AtomicU64,
     overage: AtomicU64,
@@ -434,15 +457,29 @@ impl QuotaTracker {
             return QuotaResult::Allowed;
         }
 
-        // Approximate global total: the last cached aggregate (written by
-        // the periodic flush task) plus this thread's own count.
+        // BUG FIX (live-aggregate under-count / N× overshoot): the old code
+        // computed `self.calls.load() + my_count`, i.e. a 30s-stale global
+        // cache plus ONLY this thread's own slot. Because `self.calls` was
+        // refreshed just once every FLUSH_INTERVAL_SECS and the hot path
+        // never observed sibling threads' live slots, each of the N worker
+        // threads independently believed it still had the full remaining
+        // quota. On the Free hard-block tier (allow_overage=false) that let
+        // the gateway serve up to ~N× the limit before any thread tripped.
         //
-        // The cached aggregate may include a stale version of our own
-        // slot, making the sum slightly conservative (over-estimate). This
-        // is safe — it means we hit the limit slightly early rather than
-        // late. For monthly limits in the millions, the error is negligible.
-        let cached_aggregate = self.calls.load(Ordering::Relaxed);
-        let post_total = cached_aggregate + my_count;
+        // Fix: derive the post-increment global total from the LIVE slots of
+        // every worker thread so all threads share one consistent view.
+        //   * `aggregate_per_thread_calls()` already includes this request —
+        //     the increment was stored into our own slot just above — so we
+        //     add NO +1 (that would over-count by one per request).
+        //   * `self.calls` is the period BASELINE: usage carried over from
+        //     prior process runs (DB-seeded in `load()`) / earlier in this
+        //     period, which is not represented in any live slot. The true
+        //     running total is therefore `baseline + live per-thread sum`.
+        // This O(num_threads) (~128 relaxed loads) scan only runs for limited
+        // tiers (the `limit == 0` unlimited case returned above) and is
+        // negligible next to the per-request proxy/TLS work.
+        let baseline = self.calls.load(Ordering::Relaxed);
+        let post_total = baseline + aggregate_per_thread_calls();
 
         if post_total <= limit {
             QuotaResult::Allowed
@@ -461,7 +498,13 @@ impl QuotaTracker {
         let period = self.period_string.lock().expect("period_string mutex").clone();
         let calls = match counter_strategy() {
             CounterStrategy::BatchedAtomic => self.calls.load(Ordering::Relaxed),
-            CounterStrategy::PerThread => aggregate_per_thread_calls(),
+            // BUG FIX: report baseline + live per-thread sum (the true total).
+            // Reading only `aggregate_per_thread_calls()` here would omit the
+            // period baseline now that flush() no longer folds it into the
+            // slots, under-reporting usage to the admin API.
+            CounterStrategy::PerThread => {
+                self.calls.load(Ordering::Relaxed) + aggregate_per_thread_calls()
+            }
         };
         let rejected = self.rejected.load(Ordering::Relaxed);
         let overage = self.overage.load(Ordering::Relaxed);
@@ -492,12 +535,18 @@ impl QuotaTracker {
         let calls = match counter_strategy() {
             CounterStrategy::BatchedAtomic => self.calls.load(Ordering::Relaxed),
             CounterStrategy::PerThread => {
-                // Aggregate all per-thread slots and cache the result
-                // in `self.calls` so the per-thread quota check has a
-                // reasonably fresh global view.
-                let total = aggregate_per_thread_calls();
-                self.calls.store(total, Ordering::Relaxed);
-                total
+                // Persist the true period total = baseline + live per-thread
+                // sum. `self.calls` is the BASELINE (prior usage not held in
+                // any slot); the live delta is the sum of all slots.
+                //
+                // BUG FIX: previously this did `self.calls.store(aggregate)`,
+                // which clobbered the baseline ~30s after boot with the bare
+                // slot sum (dropping the DB-seeded prior usage) and would have
+                // re-broken the hot-path check that now reads the baseline.
+                // The hot path reads the live slots directly, so flush no
+                // longer needs to (and must not) cache anything into
+                // `self.calls`; it only persists the total to the DB.
+                self.calls.load(Ordering::Relaxed) + aggregate_per_thread_calls()
             }
         };
         let rejected = self.rejected.load(Ordering::Relaxed);
@@ -1096,7 +1145,8 @@ mod tests {
         reset_globals();
         set_counter_strategy(CounterStrategy::PerThread);
 
-        // cached_aggregate (calls) = 95, thread slot will add 1 each time.
+        // baseline (calls) = 95; this thread's slot adds 1 each call, and the
+        // check is baseline + live per-thread sum.
         let tracker = make_tracker(PlanTier::Free, 100, 95);
 
         // 5 calls should succeed (95+1=96..95+5=100 <= 100).
@@ -1104,7 +1154,7 @@ mod tests {
             assert_eq!(tracker.check_and_count(), QuotaResult::Allowed);
         }
 
-        // 6th call: cached_aggregate(95) + my_count(6) = 101 > 100 => Rejected.
+        // 6th call: baseline(95) + live_sum(6) = 101 > 100 => Rejected.
         let result = tracker.check_and_count();
         assert_eq!(result, QuotaResult::Rejected);
         assert_eq!(tracker.rejected.load(Ordering::Relaxed), 1);
@@ -1124,6 +1174,53 @@ mod tests {
         let result = tracker.check_and_count();
         assert_eq!(result, QuotaResult::Overage);
         assert_eq!(tracker.overage.load(Ordering::Relaxed), 1);
+    }
+
+    /// Regression test for the live-aggregate under-count (N× overshoot) bug.
+    ///
+    /// In PerThread mode each worker thread owns its own slot. The old hot
+    /// path computed `self.calls (30s-stale cache) + my_count (only this
+    /// thread's slot)`, so a thread never observed the calls already served
+    /// by its N-1 sibling worker threads. On the Free hard-block tier that
+    /// let every thread keep serving while it alone was under the limit,
+    /// overshooting by ~N× before any thread tripped.
+    ///
+    /// Here three "sibling" worker threads have already counted 99 calls
+    /// (slots 0..3, just under the limit of 100), with the baseline `calls`
+    /// at 0. A fourth thread (this test thread, which is assigned slot 3)
+    /// then issues requests. With the fix it sees the live global of 99 and
+    /// trips on the call that would push the global past 100. Under the bug
+    /// it would only see its own slot and wrongly keep returning `Allowed`
+    /// (the overshoot), so the second assertion below would fail.
+    #[test]
+    fn per_thread_check_sees_sibling_threads_live_aggregate() {
+        let _lock = lock_tests();
+        reset_globals();
+        set_counter_strategy(CounterStrategy::PerThread);
+
+        // limit = 100, baseline (self.calls) = 0.
+        let tracker = make_tracker(PlanTier::Free, 100, 0);
+
+        // Three sibling worker threads have collectively counted 99 calls.
+        // This thread will register as slot index 3 (count was 3).
+        THREAD_SLOT_COUNT.store(3, Ordering::Relaxed);
+        PER_THREAD_CALLS[0].store(33, Ordering::Relaxed);
+        PER_THREAD_CALLS[1].store(33, Ordering::Relaxed);
+        PER_THREAD_CALLS[2].store(33, Ordering::Relaxed);
+
+        // 1st request from this thread: global becomes 99 + 1 = 100 <= 100.
+        assert_eq!(tracker.check_and_count(), QuotaResult::Allowed);
+
+        // 2nd request: global would be 99 + 2 = 101 > 100 => MUST be Rejected.
+        // Under the bug this thread only saw `self.calls(0) + my_count(2) = 2`
+        // and returned Allowed, serving past the hard limit.
+        assert_eq!(tracker.check_and_count(), QuotaResult::Rejected);
+        assert_eq!(tracker.rejected.load(Ordering::Relaxed), 1);
+
+        // This thread's own slot (index 3) is rolled back to 1 after the
+        // rejection; the sibling slots are untouched. Live global stays 100.
+        assert_eq!(PER_THREAD_CALLS[3].load(Ordering::Relaxed), 1);
+        assert_eq!(aggregate_per_thread_calls(), 100);
     }
 
     // ===================================================================
@@ -1185,26 +1282,36 @@ mod tests {
     // ===================================================================
 
     #[tokio::test]
-    async fn flush_updates_cached_aggregate_for_per_thread() {
+    async fn flush_preserves_baseline_for_per_thread() {
+        // Regression guard for the live-aggregate fix: in PerThread mode,
+        // `self.calls` is the period BASELINE (prior usage not held in any
+        // slot). flush() must persist `baseline + live slot sum` to the DB
+        // WITHOUT overwriting the baseline. The old code did
+        // `self.calls.store(aggregate)`, dropping the baseline ~30s after
+        // boot and re-opening the Free-tier overshoot.
         let _lock = lock_tests();
         reset_globals();
         set_counter_strategy(CounterStrategy::PerThread);
 
-        let tracker = make_tracker(PlanTier::Free, 1_000_000, 0);
+        // Non-zero baseline (e.g. DB-seeded prior usage this period).
+        let tracker = make_tracker(PlanTier::Free, 1_000_000, 500_000);
 
-        // Simulate per-thread counts.
+        // Simulate live per-thread counts from two worker threads.
         THREAD_SLOT_COUNT.store(2, Ordering::Relaxed);
         PER_THREAD_CALLS[0].store(30, Ordering::Relaxed);
         PER_THREAD_CALLS[1].store(70, Ordering::Relaxed);
 
-        // Before flush, the shared `calls` atomic is 0.
-        assert_eq!(tracker.calls.load(Ordering::Relaxed), 0);
+        // Before flush, the baseline is intact.
+        assert_eq!(tracker.calls.load(Ordering::Relaxed), 500_000);
 
         tracker.flush().await;
 
-        // After flush, the shared `calls` atomic should be updated to the
-        // aggregate (30 + 70 = 100).
-        assert_eq!(tracker.calls.load(Ordering::Relaxed), 100);
+        // After flush, the baseline must be UNCHANGED (not clobbered with the
+        // bare slot aggregate of 100).
+        assert_eq!(tracker.calls.load(Ordering::Relaxed), 500_000);
+
+        // The reported total is baseline + live slots = 500_000 + 100.
+        assert_eq!(tracker.snapshot().calls_total, 500_100);
     }
 
     #[tokio::test]
@@ -1279,14 +1386,14 @@ mod tests {
         reset_globals();
         set_counter_strategy(CounterStrategy::PerThread);
 
-        // cached_aggregate = 99, limit = 100.
+        // baseline = 99, limit = 100.
         let tracker = make_tracker(PlanTier::Free, 100, 99);
 
-        // First call: cached_aggregate(99) + my_count(1) = 100 <= 100 => Allowed.
+        // First call: baseline(99) + live_sum(1) = 100 <= 100 => Allowed.
         let result = tracker.check_and_count();
         assert_eq!(result, QuotaResult::Allowed);
 
-        // Second call: cached_aggregate(99) + my_count(2) = 101 > 100 => Rejected.
+        // Second call: baseline(99) + live_sum(2) = 101 > 100 => Rejected.
         let result2 = tracker.check_and_count();
         assert_eq!(result2, QuotaResult::Rejected);
     }

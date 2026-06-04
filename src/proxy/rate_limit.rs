@@ -31,18 +31,29 @@
 //!
 //! All four algorithms are supported and switchable at runtime:
 //!
-//! | Algorithm       | Best for                        | Burst tolerance |
-//! |----------------|---------------------------------|-----------------|
-//! | Token bucket   | API rate limits, steady rate    | Configurable    |
-//! | Sliding window | Smooth rate enforcement         | Low             |
-//! | Fixed window   | Simple counting (HAProxy default)| Window-edge spike |
-//! | Leaky bucket   | Queue-based shaping             | None            |
+//! | Algorithm       | Best for                        | Burst tolerance | Min tier |
+//! |----------------|---------------------------------|-----------------|----------|
+//! | Fixed window   | Simple counting (HAProxy default)| Window-edge spike | Starter |
+//! | Leaky bucket   | Queue-based shaping             | None            | Starter  |
+//! | Token bucket   | API rate limits, steady rate    | Configurable    | Growth   |
+//! | Sliding window | Smooth rate enforcement         | Low             | Pro      |
+//!
+//! # Subscription tiers
+//!
+//! Which strategies are *available* is gated by the subscription
+//! [`Tier`]. A single binary ships every algorithm; the tier decides
+//! which ones a deployment may select. Requesting a strategy above the
+//! current tier is *locked down* — it falls back to the best strategy
+//! the tier allows (see [`RateLimitStrategy::resolve_for_tier`]) and
+//! logs a warning rather than failing the request.
 
 use std::collections::HashMap;
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use algorithms::backbone::Tier;
 
 type FastHasher = ahash::RandomState;
 
@@ -75,6 +86,71 @@ impl RateLimitStrategy {
             2 => Self::FixedWindow,
             3 => Self::LeakyBucket,
             _ => Self::TokenBucket,
+        }
+    }
+
+    /// Parse a strategy from its config string (e.g. `"sliding_window"`).
+    /// Accepts both snake_case and kebab-case. Returns `None` for unknown
+    /// names so callers can fall back to a default.
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().replace('-', "_").as_str() {
+            "token_bucket" | "token" => Some(Self::TokenBucket),
+            "sliding_window" | "sliding" => Some(Self::SlidingWindow),
+            "fixed_window" | "fixed" => Some(Self::FixedWindow),
+            "leaky_bucket" | "leaky" => Some(Self::LeakyBucket),
+            _ => None,
+        }
+    }
+
+    /// Stable identifier for logs and admin output.
+    pub fn as_name(self) -> &'static str {
+        match self {
+            Self::TokenBucket => "token_bucket",
+            Self::SlidingWindow => "sliding_window",
+            Self::FixedWindow => "fixed_window",
+            Self::LeakyBucket => "leaky_bucket",
+        }
+    }
+
+    /// Minimum subscription tier required to use this strategy.
+    ///
+    /// Strategy is a traffic-shaping *choice*, not a performance grade,
+    /// so the gating reflects sophistication/cost rather than raw speed:
+    /// the cheap counters are available to everyone, the configurable
+    /// and smooth limiters unlock higher up.
+    pub fn min_tier(self) -> Tier {
+        match self {
+            Self::FixedWindow => Tier::Starter,
+            Self::LeakyBucket => Tier::Starter,
+            Self::TokenBucket => Tier::Growth,
+            Self::SlidingWindow => Tier::Pro,
+        }
+    }
+
+    /// Whether `tier` is permitted to use this strategy.
+    pub fn allowed_at(self, tier: Tier) -> bool {
+        tier >= self.min_tier()
+    }
+
+    /// The best (most capable) strategy a given tier may use. Used as the
+    /// fallback when a requested strategy is locked down.
+    pub fn best_for_tier(tier: Tier) -> Self {
+        match tier {
+            Tier::Starter => Self::LeakyBucket,
+            Tier::Growth => Self::TokenBucket,
+            Tier::Pro => Self::SlidingWindow,
+        }
+    }
+
+    /// Resolve the effective strategy for `tier`. If `requested` is
+    /// permitted, it is returned unchanged. Otherwise it is *locked down*
+    /// to [`best_for_tier`](Self::best_for_tier) and the boolean flags
+    /// that a downgrade occurred (so callers can log/observe it).
+    pub fn resolve_for_tier(requested: Self, tier: Tier) -> (Self, bool) {
+        if requested.allowed_at(tier) {
+            (requested, false)
+        } else {
+            (Self::best_for_tier(tier), true)
         }
     }
 }
@@ -514,6 +590,38 @@ impl RateLimiter {
 
     pub fn with_defaults() -> Self {
         Self::new(StickTableConfig::default(), RateLimiterConfig::default())
+    }
+
+    /// Build a rate limiter whose strategy is gated by the subscription
+    /// `tier`. The strategy in `limiter_config` is treated as the
+    /// *requested* strategy; if the tier doesn't permit it, the limiter
+    /// is locked down to the best strategy the tier allows and a warning
+    /// is logged. Everything else in `limiter_config` is preserved.
+    ///
+    /// This is the tier-aware counterpart to [`RateLimiter::new`] and is
+    /// how the live `rate-limit` plugin constructs its engine.
+    pub fn for_tier(
+        tier: Tier,
+        table_config: StickTableConfig,
+        mut limiter_config: RateLimiterConfig,
+    ) -> Self {
+        let requested = limiter_config.strategy;
+        let (effective, locked_down) = RateLimitStrategy::resolve_for_tier(requested, tier);
+        if locked_down {
+            tracing::warn!(
+                requested = requested.as_name(),
+                effective = effective.as_name(),
+                tier = tier.as_str(),
+                "rate-limit strategy not available on subscription tier; locked down"
+            );
+        }
+        limiter_config.strategy = effective;
+        Self::new(table_config, limiter_config)
+    }
+
+    /// The strategy this limiter is currently configured to use.
+    pub fn strategy(&self) -> RateLimitStrategy {
+        self.config.strategy
     }
 
     /// Check if a request for `key` is allowed. Uses `Instant::now()`.
@@ -1200,6 +1308,126 @@ mod tests {
     #[test]
     fn rate_limiting_enabled_by_default() {
         assert!(is_rate_limiting_enabled());
+    }
+
+    // ── Tier gating ──
+
+    #[test]
+    fn strategy_min_tier_assignments() {
+        assert_eq!(RateLimitStrategy::FixedWindow.min_tier(), Tier::Starter);
+        assert_eq!(RateLimitStrategy::LeakyBucket.min_tier(), Tier::Starter);
+        assert_eq!(RateLimitStrategy::TokenBucket.min_tier(), Tier::Growth);
+        assert_eq!(RateLimitStrategy::SlidingWindow.min_tier(), Tier::Pro);
+    }
+
+    #[test]
+    fn strategy_allowed_at_respects_tier_order() {
+        // Starter: only the two cheap counters.
+        assert!(RateLimitStrategy::FixedWindow.allowed_at(Tier::Starter));
+        assert!(RateLimitStrategy::LeakyBucket.allowed_at(Tier::Starter));
+        assert!(!RateLimitStrategy::TokenBucket.allowed_at(Tier::Starter));
+        assert!(!RateLimitStrategy::SlidingWindow.allowed_at(Tier::Starter));
+
+        // Growth: adds token bucket, still no sliding window.
+        assert!(RateLimitStrategy::TokenBucket.allowed_at(Tier::Growth));
+        assert!(!RateLimitStrategy::SlidingWindow.allowed_at(Tier::Growth));
+
+        // Pro: everything.
+        assert!(RateLimitStrategy::SlidingWindow.allowed_at(Tier::Pro));
+        assert!(RateLimitStrategy::TokenBucket.allowed_at(Tier::Pro));
+        assert!(RateLimitStrategy::FixedWindow.allowed_at(Tier::Pro));
+        assert!(RateLimitStrategy::LeakyBucket.allowed_at(Tier::Pro));
+    }
+
+    #[test]
+    fn strategy_best_for_tier() {
+        assert_eq!(
+            RateLimitStrategy::best_for_tier(Tier::Starter),
+            RateLimitStrategy::LeakyBucket
+        );
+        assert_eq!(
+            RateLimitStrategy::best_for_tier(Tier::Growth),
+            RateLimitStrategy::TokenBucket
+        );
+        assert_eq!(
+            RateLimitStrategy::best_for_tier(Tier::Pro),
+            RateLimitStrategy::SlidingWindow
+        );
+    }
+
+    #[test]
+    fn resolve_for_tier_passes_through_when_allowed() {
+        // SlidingWindow on Pro is allowed — unchanged, not locked down.
+        let (eff, locked) =
+            RateLimitStrategy::resolve_for_tier(RateLimitStrategy::SlidingWindow, Tier::Pro);
+        assert_eq!(eff, RateLimitStrategy::SlidingWindow);
+        assert!(!locked);
+    }
+
+    #[test]
+    fn resolve_for_tier_locks_down_when_too_high() {
+        // SlidingWindow requested on Starter → locked down to LeakyBucket.
+        let (eff, locked) =
+            RateLimitStrategy::resolve_for_tier(RateLimitStrategy::SlidingWindow, Tier::Starter);
+        assert_eq!(eff, RateLimitStrategy::LeakyBucket);
+        assert!(locked);
+
+        // TokenBucket requested on Starter → locked down to LeakyBucket.
+        let (eff, locked) =
+            RateLimitStrategy::resolve_for_tier(RateLimitStrategy::TokenBucket, Tier::Starter);
+        assert_eq!(eff, RateLimitStrategy::LeakyBucket);
+        assert!(locked);
+
+        // SlidingWindow requested on Growth → locked down to TokenBucket.
+        let (eff, locked) =
+            RateLimitStrategy::resolve_for_tier(RateLimitStrategy::SlidingWindow, Tier::Growth);
+        assert_eq!(eff, RateLimitStrategy::TokenBucket);
+        assert!(locked);
+    }
+
+    #[test]
+    fn for_tier_locks_down_strategy_in_built_limiter() {
+        // Ask for SlidingWindow but on a Starter tier — the built limiter
+        // must report the locked-down strategy, not the requested one.
+        let limiter = RateLimiter::for_tier(
+            Tier::Starter,
+            StickTableConfig::default(),
+            RateLimiterConfig {
+                strategy: RateLimitStrategy::SlidingWindow,
+                ..Default::default()
+            },
+        );
+        assert_eq!(limiter.strategy(), RateLimitStrategy::LeakyBucket);
+    }
+
+    #[test]
+    fn for_tier_preserves_allowed_strategy() {
+        let limiter = RateLimiter::for_tier(
+            Tier::Pro,
+            StickTableConfig::default(),
+            RateLimiterConfig {
+                strategy: RateLimitStrategy::SlidingWindow,
+                ..Default::default()
+            },
+        );
+        assert_eq!(limiter.strategy(), RateLimitStrategy::SlidingWindow);
+    }
+
+    #[test]
+    fn strategy_from_name_parses_aliases() {
+        assert_eq!(
+            RateLimitStrategy::from_name("sliding-window"),
+            Some(RateLimitStrategy::SlidingWindow)
+        );
+        assert_eq!(
+            RateLimitStrategy::from_name("TOKEN_BUCKET"),
+            Some(RateLimitStrategy::TokenBucket)
+        );
+        assert_eq!(
+            RateLimitStrategy::from_name("leaky"),
+            Some(RateLimitStrategy::LeakyBucket)
+        );
+        assert_eq!(RateLimitStrategy::from_name("nonsense"), None);
     }
 
     // ── Per-key isolation ──
