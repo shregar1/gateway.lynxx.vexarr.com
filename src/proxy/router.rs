@@ -564,6 +564,12 @@ pub struct RouteTable {
     /// When true, full match results are cached in `route_result_cache`.
     /// Default: true.
     use_route_cache: AtomicBool,
+    /// True when at least one route matches on headers or query params. The
+    /// `route_result_cache` is keyed only by (host, path, method) and so
+    /// cannot represent header/query-gated routing; when this is set, the
+    /// result cache is bypassed entirely so such routes are never confused.
+    /// Recomputed by `rebuild_route_indexes`.
+    has_constrained_routes: AtomicBool,
     /// When true, host lookups use the ArcSwap snapshot (`host_index_fast`)
     /// instead of the DashMap (`host_index`). Default: true.
     use_sharded_hosts: AtomicBool,
@@ -589,6 +595,7 @@ impl RouteTable {
             path_strategy: AtomicU8::new(PathMatchStrategy::Trie as u8),
             use_regex_set: AtomicBool::new(true),
             use_route_cache: AtomicBool::new(true),
+            has_constrained_routes: AtomicBool::new(false),
             use_sharded_hosts: AtomicBool::new(true),
         }
     }
@@ -776,6 +783,17 @@ impl RouteTable {
         self.rebuild_regex_set_index();
         self.regex_match_cache.clear();
         self.route_result_cache.clear();
+        // The result cache key (host, path, method) cannot represent header or
+        // query-param matching, so if any route gates on those, disable the
+        // cache to keep routing correct (and to avoid bypassing those gates).
+        // Recomputed here because every route mutation funnels through this
+        // method.
+        let constrained = self
+            .routes
+            .iter()
+            .any(|r| !r.value().headers.is_empty() || !r.value().query_params.is_empty());
+        self.has_constrained_routes
+            .store(constrained, Ordering::Relaxed);
     }
 
     /// Rebuild all host-related indexes. Called after any service mutation.
@@ -1057,7 +1075,15 @@ impl RouteTable {
         query_string: Option<&str>,
     ) -> Option<(Arc<Route>, Service)> {
         // ── Route result cache fast path ──
-        let cache_key = if self.use_route_cache.load(Ordering::Relaxed) {
+        // Bypass the cache entirely when any route is header/query gated: the
+        // cache key (host, path, method) can't represent those dimensions, so a
+        // cached entry for one request would be wrongly served to another that
+        // differs only by header/query — a correctness and security bug
+        // (header/query-based gating, e.g. API-version or canary routing, would
+        // be silently bypassed for subsequent same-(host,path,method) requests).
+        let cache_key = if self.use_route_cache.load(Ordering::Relaxed)
+            && !self.has_constrained_routes.load(Ordering::Relaxed)
+        {
             let key = RouteResultCache::hash_request(host, path, method);
             if let Some((route_id, service_id)) = self.route_result_cache.lookup(key) {
                 if let (Some(route), Some(service)) =
@@ -1791,6 +1817,50 @@ mod tests {
         table.set_use_route_cache(false);
         // Disabling clears the cache.
         assert!(table.route_result_cache.lookup(1).is_none());
+    }
+
+    #[test]
+    fn header_or_query_gated_route_disables_result_cache() {
+        // Regression: the result cache is keyed by (host, path, method) only,
+        // so caching a header/query-gated route silently served the wrong route
+        // to a later request differing only by header/query. Adding any gated
+        // route must disable the cache.
+        let table = RouteTable::new();
+
+        // Plain routes keep the cache enabled.
+        table.add_route(make_test_route(Uuid::new_v4(), Uuid::new_v4()));
+        assert!(
+            !table.has_constrained_routes.load(Ordering::Relaxed),
+            "plain routes must not disable the result cache"
+        );
+
+        // A header-gated route flips the flag.
+        let mut gated = make_test_route(Uuid::new_v4(), Uuid::new_v4());
+        gated
+            .headers
+            .insert("X-Api-Version".to_string(), "v2".to_string());
+        let gated_id = gated.id;
+        table.add_route(gated);
+        assert!(
+            table.has_constrained_routes.load(Ordering::Relaxed),
+            "a header-gated route must disable the result cache"
+        );
+
+        // Removing it re-enables the cache.
+        table.remove_route(&gated_id);
+        assert!(
+            !table.has_constrained_routes.load(Ordering::Relaxed),
+            "removing the gated route should re-enable the result cache"
+        );
+
+        // A query-param-gated route also disables it.
+        let mut q = make_test_route(Uuid::new_v4(), Uuid::new_v4());
+        q.query_params.insert("v".to_string(), "2".to_string());
+        table.add_route(q);
+        assert!(
+            table.has_constrained_routes.load(Ordering::Relaxed),
+            "a query-gated route must disable the result cache"
+        );
     }
 
     // ── Host sharding ──

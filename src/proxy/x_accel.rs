@@ -160,11 +160,23 @@ pub fn parse_buffering(value: &str) -> Option<bool> {
 /// - Starts with `/`
 /// - Does not contain `..` path traversal segments
 /// - Is not an absolute URL (no `://`)
+/// - Is not a scheme-relative / network-path reference (no leading `//`
+///   or `/\`) — these resolve to an external authority and are rejected.
 pub fn validate_redirect_path(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
     if !path.starts_with('/') {
+        return false;
+    }
+    // BUG FIX: a leading `//` (or its `/\` backslash variant that some
+    // clients normalize to `//`) is an RFC 3986 network-path reference,
+    // i.e. a scheme-relative absolute URL pointing at an external host
+    // (`//evil.com/payload`). It passes `starts_with('/')` and contains no
+    // `://`, so the old checks accepted it — letting the redirect escape to
+    // an attacker-controlled authority. Reject it before the bare `/` root
+    // and traversal checks below.
+    if path.starts_with("//") || path.starts_with("/\\") {
         return false;
     }
     if path.contains("://") {
@@ -496,6 +508,23 @@ mod tests {
         assert!(!validate_redirect_path("http://evil.com/payload"));
         assert!(!validate_redirect_path("https://evil.com/payload"));
         assert!(!validate_redirect_path("ftp://evil.com/file"));
+    }
+
+    // ── validate_redirect_path: rejects protocol-relative / network-path URLs ──
+
+    #[test]
+    fn validate_path_rejects_network_path_reference() {
+        // Regression: a leading `//host` (or `/\host`) is a scheme-relative
+        // absolute URL to an external authority; it passes starts_with('/')
+        // and has no `://`, so it was wrongly accepted before the fix.
+        assert!(!validate_redirect_path("//evil.com/payload"));
+        assert!(!validate_redirect_path("//evil.com"));
+        assert!(!validate_redirect_path("/\\evil.com"));
+        assert!(!validate_redirect_path("//"));
+        // Legitimate single-slash paths must still be accepted.
+        assert!(validate_redirect_path("/"));
+        assert!(validate_redirect_path("/internal/path"));
+        assert!(validate_redirect_path("/path?a=b"));
     }
 
     // ── validate_redirect_path: rejects empty ──

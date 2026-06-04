@@ -391,7 +391,14 @@ pub fn parse_minimal_request(buf: &[u8]) -> Result<MinimalRequest, ParseError> {
     let header_bytes = &buf[..header_end];
 
     // Parse request line.
-    let request_line_end = memchr_newline(header_bytes).ok_or(ParseError::InvalidRequestLine)?;
+    // BUG FIX: For a header-less request (e.g. "GET / HTTP/1.1\r\n\r\n"), the
+    // \r\n\r\n run begins at the request line's OWN terminating CRLF, so
+    // `header_bytes = &buf[..header_end]` contains no CRLF and scanning it for
+    // the request-line terminator returned None -> InvalidRequestLine. The
+    // request-line CRLF always lies at or before `header_end`, so scan the full
+    // `buf` (which includes that CRLF) to locate it. `request_line_end` is then
+    // <= header_end, keeping the slice below in bounds.
+    let request_line_end = memchr_newline(buf).ok_or(ParseError::InvalidRequestLine)?;
     let request_line = &header_bytes[..request_line_end];
 
     // Split request line: METHOD SP PATH SP VERSION
@@ -904,6 +911,28 @@ mod tests {
         let req = parse_minimal_request(raw).unwrap();
         // Headers end at the \r\n\r\n. Body starts after.
         assert_eq!(&raw[req.header_end_offset..], b"body");
+    }
+
+    #[test]
+    fn parse_header_less_request() {
+        // Regression: a well-formed request with NO headers must parse Ok.
+        // Previously the request-line terminator was searched inside
+        // &buf[..header_end], which for a header-less request excludes the
+        // request line's own CRLF, yielding Err(InvalidRequestLine).
+        let raw = b"GET /index.html HTTP/1.1\r\n\r\n";
+        let req = parse_minimal_request(raw).expect("header-less GET must parse");
+        assert_eq!(req.method, RequestMethod::Get);
+        assert_eq!(req.path, "/index.html");
+        assert!(req.host.is_none());
+        assert!(req.query.is_none());
+        assert!(req.content_length.is_none());
+
+        // OPTIONS with an asterisk-form target, also header-less.
+        let raw = b"OPTIONS * HTTP/1.1\r\n\r\n";
+        let req = parse_minimal_request(raw).expect("header-less OPTIONS must parse");
+        assert_eq!(req.method, RequestMethod::Options);
+        assert_eq!(req.path, "*");
+        assert!(req.host.is_none());
     }
 
     #[test]

@@ -217,7 +217,15 @@ pub fn linear_regression(samples: &[(u64, f64)]) -> Option<TrendResult> {
         return None;
     }
 
-    let base_t = samples[0].0;
+    // BUG FIX: `samples` arrives in ring/insertion order (not sorted), and
+    // TimeSeriesBuffer::push enforces no monotonicity, so a later-inserted
+    // sample can carry a smaller timestamp than samples[0] (e.g. after an NTP
+    // step or VM clock resync). Using samples[0].0 as the origin then made the
+    // `t - base_t` subtraction below underflow for those out-of-order samples,
+    // which under overflow-checks=false wrapped to ~1.8e19 (and panicked in
+    // debug), poisoning the regression. Anchor on the true minimum timestamp so
+    // every x delta is small and non-negative regardless of insertion order.
+    let base_t = samples.iter().map(|s| s.0).min().unwrap();
     let n_f = n as f64;
 
     let mut sum_x = 0.0_f64;
@@ -226,7 +234,9 @@ pub fn linear_regression(samples: &[(u64, f64)]) -> Option<TrendResult> {
     let mut sum_xx = 0.0_f64;
 
     for &(t, v) in samples {
-        let x = (t - base_t) as f64;
+        // saturating_sub: base_t is now the minimum, but keep the saturating
+        // form as belt-and-suspenders so this can never underflow/panic.
+        let x = t.saturating_sub(base_t) as f64;
         sum_x += x;
         sum_y += v;
         sum_xy += x * v;
@@ -252,7 +262,8 @@ pub fn linear_regression(samples: &[(u64, f64)]) -> Option<TrendResult> {
     let mut ss_res = 0.0_f64;
     let mut ss_tot = 0.0_f64;
     for &(t, v) in samples {
-        let x = (t - base_t) as f64;
+        // saturating_sub for the same underflow safety as the sums loop above.
+        let x = t.saturating_sub(base_t) as f64;
         let predicted = intercept + slope * x;
         ss_res += (v - predicted) * (v - predicted);
         ss_tot += (v - mean_y) * (v - mean_y);
@@ -877,6 +888,44 @@ mod tests {
         // Predict at x=20: should be ~100.
         let predicted = result.predict_at(20, 0);
         assert!((predicted - 100.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn regression_handles_non_monotonic_timestamps() {
+        // Regression: a non-monotonic clock (e.g. NTP step / VM resync) can put
+        // a sample with a SMALLER timestamp later in insertion order, so
+        // samples[0] is no longer the minimum. The old code anchored on
+        // samples[0].0 and did an unchecked `t - base_t`, underflowing u64 for
+        // the out-of-order sample — wrapping to ~1.8e19 under overflow-checks=off
+        // (poisoning slope/intercept/r²) and panicking under overflow-checks=on.
+        //
+        // These five points are a perfect line y = 2*(t - 50), but the true
+        // minimum timestamp (50) is placed LAST in the slice, exactly as a
+        // backward clock step would arrange the ring buffer.
+        let samples: Vec<(u64, f64)> = vec![
+            (60, 20.0),
+            (70, 40.0),
+            (80, 60.0),
+            (90, 80.0),
+            (50, 0.0), // earliest time, but inserted last
+        ];
+
+        let result = linear_regression(&samples).unwrap();
+
+        // With the fix (base_t = min timestamp, saturating_sub) this recovers
+        // the true fit. The buggy version produced a wrapped huge x that drove
+        // the slope to ~0 and r² to garbage (or panicked in debug).
+        assert!(result.slope.is_finite() && result.intercept.is_finite());
+        assert!(
+            (result.slope - 2.0).abs() < 0.001,
+            "slope should be ~2.0, got {}",
+            result.slope
+        );
+        assert!(
+            result.r_squared > 0.99,
+            "r² should be ~1.0 for a perfect line, got {}",
+            result.r_squared
+        );
     }
 
     #[test]

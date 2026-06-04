@@ -615,6 +615,14 @@ impl Orchestrator {
 
         result.scale_action = final_action.clone();
 
+        // Snapshot the phase as it stood coming into the execute step (after
+        // emergency/drain handling). The ScalingUp health-gate logic below
+        // keys off this snapshot so that a ScalingUp transition *set* during
+        // this same tick's execute step is not acted on (and clobbered) until
+        // the NEXT tick — guaranteeing ScalingUp is observable for at least
+        // one full tick. See the FSM-clobber fix at the idle-reset below.
+        let phase_at_tick_start = self.phase;
+
         // ── 4. Execute scaling action ──────────────────────────────────
         if mode != OrchestratorMode::DryRun {
             match &final_action {
@@ -681,9 +689,58 @@ impl Orchestrator {
             }
         }
 
+        // ── ScalingUp progression / exit ───────────────────────────────
+        // BUG FIX (FSM phase clobber): previously the idle-reset below also
+        // matched ScalingUp, so the phase set to ScalingUp in the execute
+        // step above was reset to Steady within the SAME tick (drain count is
+        // 0 on a scale-up), making ScalingUp unobservable and the target_count
+        // payload dead. We now drive newly provisioned nodes through the
+        // health gate and only fall back to Steady once they have passed it —
+        // honouring the documented "waiting for new nodes to provision and
+        // pass health gate" contract.
+        //
+        // We only act on a ScalingUp that was already in effect at the START
+        // of this tick (phase_at_tick_start), never the one just set above, so
+        // ScalingUp survives for at least one full tick before any exit.
+        if let OrchestratorPhase::ScalingUp { target_count } = phase_at_tick_start {
+            if mode != OrchestratorMode::DryRun {
+                // Feed a readiness check for every healthy node that has not
+                // yet cleared the gate. is_ready failures count as a failed
+                // check, keeping the node pending until it actually comes up.
+                let mut tracked_any = false;
+                for node in self.cluster.healthy_nodes() {
+                    tracked_any = true;
+                    if self.health_gate.is_cleared(&node.id) {
+                        continue;
+                    }
+                    let ready = provisioner.is_ready(&node.id).unwrap_or(false);
+                    self.health_gate.record_check(node.id, ready);
+                }
+                // Exit ScalingUp once every tracked node has cleared the gate
+                // and the cluster has reached the target healthy count.
+                if tracked_any
+                    && self.health_gate.pending_count() == 0
+                    && self.cluster.healthy_count() as u32 >= target_count
+                {
+                    self.phase = OrchestratorPhase::Steady;
+                }
+            } else {
+                // DryRun never provisions, so it must not get stuck waiting on
+                // a health gate that will never see real nodes.
+                self.phase = OrchestratorPhase::Steady;
+            }
+        }
+
         // Return to Steady if no active scaling operations.
+        // NOTE: Emergency and ScalingUp are intentionally excluded — Emergency
+        // clears via heartbeat recovery, and ScalingUp has its own gate-driven
+        // exit above. Without the ScalingUp exclusion this block would clobber
+        // the ScalingUp phase in the same tick it was entered (the bug above).
         if self.drain_coordinator.draining_count() == 0
-            && !matches!(self.phase, OrchestratorPhase::Emergency)
+            && !matches!(
+                self.phase,
+                OrchestratorPhase::Emergency | OrchestratorPhase::ScalingUp { .. }
+            )
         {
             self.phase = OrchestratorPhase::Steady;
         }
@@ -1045,6 +1102,109 @@ mod tests {
         let result = orch.tick(&prov, &dns);
 
         assert!(result.nodes_provisioned > 0 || matches!(result.scale_action, ScaleAction::ScaleUp(_)));
+    }
+
+    // ── Orchestrator ScalingUp phase visibility (regression) ───────────
+
+    /// Regression for the FSM phase-clobber bug: on the tick that provisions
+    /// nodes the orchestrator must REPORT `ScalingUp`. Before the fix the
+    /// idle-reset matched ScalingUp and reset the phase to Steady within the
+    /// same tick (drain count is 0 on a scale-up), so this assertion failed.
+    #[test]
+    fn orchestrator_reports_scaling_up_phase_on_provision_tick() {
+        let mut orch = Orchestrator::new(test_config());
+        orch.set_mode_override(OrchestratorMode::Reactive);
+        let prov = MockProvisioner::new();
+        let dns = MockDnsPublisher::new();
+
+        let n1 = ClusterNode::new(Uuid::new_v4(), ip(1));
+        let id1 = n1.id;
+        orch.register_node(n1);
+        orch.heartbeat(&id1, 0.95, 500, 5000.0);
+
+        // First tick arms the sustained-high-load timer.
+        let _ = orch.tick(&prov, &dns);
+        std::thread::sleep(Duration::from_millis(5));
+
+        // Second tick provisions — and must surface ScalingUp, not Steady.
+        let result = orch.tick(&prov, &dns);
+
+        assert!(result.nodes_provisioned > 0, "expected a scale-up to occur");
+        assert!(
+            matches!(result.phase, OrchestratorPhase::ScalingUp { .. }),
+            "provision tick must report ScalingUp, got {:?}",
+            result.phase
+        );
+        assert!(
+            matches!(orch.phase(), OrchestratorPhase::ScalingUp { .. }),
+            "orchestrator must remain in ScalingUp after provisioning"
+        );
+    }
+
+    /// Once provisioned nodes pass the health gate the orchestrator must leave
+    /// ScalingUp and return to Steady (the documented exit), rather than either
+    /// staying stuck in ScalingUp forever or being clobbered to Steady on the
+    /// provision tick.
+    #[test]
+    fn orchestrator_scaling_up_exits_to_steady_after_health_gate() {
+        // Long scale-up cooldown so we provision exactly once and the following
+        // ticks just drive the health gate instead of re-provisioning.
+        let config = OrchestratorConfig {
+            scale_policy: ScalePolicy {
+                scale_up_sustained: Duration::from_millis(1),
+                scale_up_cooldown: Duration::from_secs(60),
+                scale_down_sustained: Duration::from_millis(1),
+                scale_down_cooldown: Duration::from_secs(60),
+                ..Default::default()
+            },
+            min_nodes: 1,
+            max_nodes: 20,
+            ..test_config()
+        };
+        let mut orch = Orchestrator::new(config);
+        orch.set_mode_override(OrchestratorMode::Reactive);
+        let prov = MockProvisioner::new();
+        let dns = MockDnsPublisher::new();
+
+        let n1 = ClusterNode::new(Uuid::new_v4(), ip(1));
+        let id1 = n1.id;
+        orch.register_node(n1);
+        orch.heartbeat(&id1, 0.95, 500, 5000.0);
+
+        // Arm + provision.
+        let _ = orch.tick(&prov, &dns);
+        std::thread::sleep(Duration::from_millis(5));
+        let provision_result = orch.tick(&prov, &dns);
+        assert!(provision_result.nodes_provisioned > 0);
+        assert!(
+            matches!(provision_result.phase, OrchestratorPhase::ScalingUp { .. }),
+            "must enter ScalingUp on provision"
+        );
+
+        // Subsequent ticks drive the (mock-ready) nodes through the gate. The
+        // gate needs `required_passes` (3) passes, so allow a small budget.
+        let mut reached_steady = false;
+        for _ in 0..6 {
+            let r = orch.tick(&prov, &dns);
+            if r.phase == OrchestratorPhase::Steady {
+                reached_steady = true;
+                break;
+            }
+            // Until it clears, it must stay in ScalingUp (no re-provision, no
+            // spurious Steady), never anything else.
+            assert!(
+                matches!(r.phase, OrchestratorPhase::ScalingUp { .. }),
+                "should stay ScalingUp until health gate clears, got {:?}",
+                r.phase
+            );
+            // Cooldown holds — no extra provisioning while waiting.
+            assert_eq!(r.nodes_provisioned, 0, "should not re-provision during cooldown");
+        }
+        assert!(
+            reached_steady,
+            "ScalingUp must exit to Steady once provisioned nodes pass the health gate"
+        );
+        assert_eq!(orch.phase(), OrchestratorPhase::Steady);
     }
 
     // ── Orchestrator scale-down ────────────────────────────────────────

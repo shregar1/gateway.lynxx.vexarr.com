@@ -292,31 +292,49 @@ impl CoalesceEngine {
             return CoalesceResult::NotEligible;
         }
 
-        // Check if there's already an in-flight request for this key.
-        if let Some(mut entry) = self.in_flight.get_mut(&key) {
-            if entry.is_stale() {
-                // Stale entry — remove and become the new leader.
-                drop(entry);
-                self.in_flight.remove(&key);
+        // BUG FIX (TOCTOU / duplicate leaders): the previous implementation
+        // dropped the `get_mut` write-guard and then performed a separate,
+        // unsynchronized `insert`. Two threads racing on the same key could
+        // both observe it as absent (or both as stale), both fall through to
+        // `insert`, and both return `Leader` — the second insert clobbering the
+        // first leader's entry and discarding any waiters already collapsed
+        // onto it. We now use DashMap's `entry` API, which holds the shard's
+        // write lock across the *entire* check-and-claim, so leader election
+        // and waiter accounting are atomic: exactly one leader per key and
+        // waiter counts are never lost.
+        use dashmap::mapref::entry::Entry;
+        match self.in_flight.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                if occupied.get().is_stale() {
+                    // Stale leader (TTL expired without a response) — replace it
+                    // in place under the same lock and become the new leader.
+                    let new_key = occupied.key().clone();
+                    *occupied.get_mut() = InFlightEntry::new(new_key, self.default_ttl);
+                    COALESCE_METRICS
+                        .stale_evictions
+                        .fetch_add(1, Ordering::Relaxed);
+                    COALESCE_METRICS
+                        .cache_misses
+                        .fetch_add(1, Ordering::Relaxed);
+                    CoalesceResult::Leader
+                } else if occupied.get().waiters >= self.max_waiters {
+                    CoalesceResult::CapacityExceeded
+                } else {
+                    let pos = occupied.get_mut().add_waiter();
+                    COALESCE_METRICS.cache_hits.fetch_add(1, Ordering::Relaxed);
+                    CoalesceResult::Waiting { position: pos }
+                }
+            }
+            Entry::Vacant(vacant) => {
+                // No in-flight request — become the leader.
+                let new_key = vacant.key().clone();
+                vacant.insert(InFlightEntry::new(new_key, self.default_ttl));
                 COALESCE_METRICS
-                    .stale_evictions
+                    .cache_misses
                     .fetch_add(1, Ordering::Relaxed);
-            } else if entry.waiters >= self.max_waiters {
-                return CoalesceResult::CapacityExceeded;
-            } else {
-                let pos = entry.add_waiter();
-                COALESCE_METRICS.cache_hits.fetch_add(1, Ordering::Relaxed);
-                return CoalesceResult::Waiting { position: pos };
+                CoalesceResult::Leader
             }
         }
-
-        // No in-flight request — become the leader.
-        self.in_flight
-            .insert(key.clone(), InFlightEntry::new(key, self.default_ttl));
-        COALESCE_METRICS
-            .cache_misses
-            .fetch_add(1, Ordering::Relaxed);
-        CoalesceResult::Leader
     }
 
     /// Complete an in-flight request with its response.
@@ -700,5 +718,96 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         assert!(!entry.is_stale()); // Has response, not stale.
         assert!(entry.is_ready());
+    }
+
+    // ── Concurrency: single-leader invariant (TOCTOU regression) ────────
+
+    /// Regression for the TOCTOU race in `try_coalesce`: with the old
+    /// drop-guard-then-`insert` code, two threads racing on the same key could
+    /// both observe it as absent, both `insert`, and both return `Leader` (the
+    /// second insert clobbering the first leader's entry and its collapsed
+    /// waiters). The `entry`-API fix holds the shard lock across the whole
+    /// check-and-claim, so exactly one leader is elected per key and no waiter
+    /// is lost. This test hammers a single key from many threads released
+    /// simultaneously by a barrier and asserts both invariants. Without the
+    /// fix it reproduces (extra leaders and/or undercounted waiters); with the
+    /// fix it is stable across many iterations.
+    #[test]
+    fn try_coalesce_concurrent_single_leader() {
+        use std::sync::atomic::{AtomicU32, Ordering as AtOrdering};
+        use std::sync::{Arc, Barrier};
+
+        const THREADS: usize = 16;
+        const ROUNDS: usize = 200;
+
+        for round in 0..ROUNDS {
+            // Generous TTL and capacity so nothing goes stale or hits the
+            // capacity cap during the race — we want a clean leader/waiter
+            // split, not evictions.
+            let e = Arc::new(CoalesceEngine::new(
+                Duration::from_secs(60),
+                THREADS as u32 + 8,
+                1024 * 1024,
+            ));
+            // A distinct key per round keeps the map empty at the start of each
+            // race so every round is a fresh thundering herd.
+            let k = key(&format!("/api/race/{round}"));
+
+            let barrier = Arc::new(Barrier::new(THREADS));
+            let leaders = Arc::new(AtomicU32::new(0));
+            let waiters = Arc::new(AtomicU32::new(0));
+
+            let mut handles = Vec::with_capacity(THREADS);
+            for _ in 0..THREADS {
+                let e = Arc::clone(&e);
+                let k = k.clone();
+                let barrier = Arc::clone(&barrier);
+                let leaders = Arc::clone(&leaders);
+                let waiters = Arc::clone(&waiters);
+                handles.push(std::thread::spawn(move || {
+                    // Release all threads at (approximately) the same instant
+                    // to widen the contention window on the shard.
+                    barrier.wait();
+                    match e.try_coalesce(k, "GET", CoalescePolicy::SafeMethods) {
+                        CoalesceResult::Leader => {
+                            leaders.fetch_add(1, AtOrdering::Relaxed);
+                        }
+                        CoalesceResult::Waiting { .. } => {
+                            waiters.fetch_add(1, AtOrdering::Relaxed);
+                        }
+                        other => panic!("unexpected coalesce result: {other:?}"),
+                    }
+                }));
+            }
+            for h in handles {
+                h.join().expect("worker thread panicked");
+            }
+
+            let leader_count = leaders.load(AtOrdering::Relaxed);
+            let waiter_count = waiters.load(AtOrdering::Relaxed);
+
+            // Invariant 1: exactly one leader per key.
+            assert_eq!(
+                leader_count, 1,
+                "round {round}: expected exactly one leader, got {leader_count}"
+            );
+            // Invariant 2: leader + waiters account for every thread.
+            assert_eq!(
+                leader_count + waiter_count,
+                THREADS as u32,
+                "round {round}: leader+waiters ({}) != THREADS ({})",
+                leader_count + waiter_count,
+                THREADS
+            );
+            // Invariant 3: no waiter was clobbered — the surviving entry's
+            // recorded waiter count matches what each waiter observed.
+            assert_eq!(
+                e.total_waiters(),
+                waiter_count,
+                "round {round}: entry waiter count ({}) != observed waiters ({})",
+                e.total_waiters(),
+                waiter_count
+            );
+        }
     }
 }

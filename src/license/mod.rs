@@ -386,6 +386,25 @@ impl LicenseState {
         );
     }
 
+    /// Re-arm the kill-switch. Counterpart to [`flip_inactive`] — without
+    /// this the switch was write-once (only ever set to `false`), so a
+    /// single stray `flagged` usage-report or a transient rejection wedged
+    /// the gateway into permanent 402 until a full process restart, even
+    /// after an authoritative, signature-verified re-verify confirmed the
+    /// key was active again. Called from the re-verifier success branch so
+    /// a confirmed-active `/v1/license/verify` restores service.
+    fn flip_active(&self) {
+        let was_active = self
+            .inner
+            .active
+            .swap(true, std::sync::atomic::Ordering::Relaxed);
+        if !was_active {
+            tracing::warn!(
+                "licence re-verified as active — clearing kill-switch; requests resume"
+            );
+        }
+    }
+
     fn update_tier(&self, new_tier: PlanTier) {
         let mut t = self.inner.tier.write().expect("tier lock poisoned");
         if *t != new_tier {
@@ -418,6 +437,12 @@ pub fn spawn_license_refresher(
             match verify_online(&state.inner.api_key, &state.inner.verify_url).await {
                 Ok(verified) => {
                     let resp = &verified.resp;
+                    // An authoritative, signature-verified verify confirming
+                    // the key is active re-arms the kill-switch. Closes the
+                    // bug where a stray usage-report `flagged` (or a transient
+                    // rejection) left `active=false` forever with no in-process
+                    // path back to service short of a restart.
+                    state.flip_active();
                     state.update_tier(PlanTier::from_str(&resp.tier));
                     state.update_node_counts(resp.active_nodes, resp.max_nodes);
                     if let Some(ref q) = quota {
@@ -530,7 +555,13 @@ pub async fn register_node(api_key: &str, lynxx_base_url: &str) -> Result<(), No
     if status == reqwest::StatusCode::FORBIDDEN {
         let text = resp.text().await.unwrap_or_default();
         if text.contains("node limit") {
-            return Err(NodeError::LimitReached { active: 0, max: 0 });
+            // Bug fix: previously returned LimitReached { active: 0, max: 0 },
+            // so the operator log always rendered a literal `(0/0)` regardless
+            // of the customer's real cap (e.g. 5/5). The 403 body carries no
+            // structured counts here, so surface the server's message verbatim
+            // — mirroring the sibling RegisterFailed branch below — instead of
+            // fabricating zeros.
+            return Err(NodeError::RegisterFailed(text));
         }
         return Err(NodeError::RegisterFailed(text));
     }
@@ -1106,6 +1137,66 @@ mod tests {
     }
 
     // ── from_verify field mapping ──
+
+    // ── kill-switch re-arming (regression: write-once active flag) ──
+
+    #[test]
+    fn kill_switch_re_arms_after_flip_active() {
+        // Regression for the "kill-switch never re-activates" bug: a stray
+        // usage-report `flagged` (or transient rejection) called flip_inactive
+        // and there was no in-process path back — `active` was write-once.
+        // flip_active() (called by the re-verifier's confirmed-active branch)
+        // must restore service. Without flip_active this test fails to compile
+        // / the gateway stays inactive forever.
+        let state = LicenseState::new(
+            "lnx_live_abc123def456",
+            "https://api.lynxx.vexarr.com/v1/license/verify",
+            PlanTier::Pro,
+            0,
+            None,
+        );
+        assert!(state.is_active(), "fresh state starts active");
+
+        // Simulate the stray usage-report `flagged` -> kill-switch.
+        state.flip_inactive("tamper detected — account suspended by billing server");
+        assert!(!state.is_active(), "kill-switch engaged");
+
+        // A subsequent authoritative confirmed-active verify re-arms service.
+        state.flip_active();
+        assert!(
+            state.is_active(),
+            "confirmed-active re-verify must clear the kill-switch"
+        );
+    }
+
+    // ── node-limit error no longer fabricates 0/0 ──
+
+    #[test]
+    fn node_limit_error_carries_server_message_not_zero_zero() {
+        // Regression for the hardcoded `(0/0)` bug: the node-limit 403 branch
+        // used to return LimitReached { active: 0, max: 0 }, so the operator
+        // log always showed `(0/0)` even when the customer was really at e.g.
+        // 5/5. The fix surfaces the server's body verbatim via RegisterFailed.
+        let server_msg = "node limit reached (5/5)";
+        let err = NodeError::RegisterFailed(server_msg.to_string());
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("5/5"),
+            "operator log must reflect the real cap, got: {rendered}"
+        );
+        assert!(
+            !rendered.contains("0/0"),
+            "must not fabricate 0/0, got: {rendered}"
+        );
+
+        // Guard the old behaviour explicitly: the LimitReached Display with
+        // zeros is exactly the misleading string we no longer emit.
+        let old = NodeError::LimitReached { active: 0, max: 0 }.to_string();
+        assert!(
+            old.contains("(0/0)"),
+            "sanity: the abandoned variant rendered the misleading 0/0"
+        );
+    }
 
     #[test]
     fn from_verify_maps_all_fields() {

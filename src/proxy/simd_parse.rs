@@ -523,7 +523,14 @@ pub fn parse_request(buf: &[u8]) -> Result<ParsedRequest, SimdParseError> {
     }
 
     // Parse request line.
-    let first_crlf = find_crlf_scalar(&buf[..header_end]).ok_or(SimdParseError::Incomplete)?;
+    // BUG FIX: previously scanned `buf[..header_end]`, which for a header-less
+    // request (e.g. "GET / HTTP/1.1\r\n\r\n") excludes the request line's own
+    // terminating CRLF (it *is* the start of the \r\n\r\n run at `header_end`),
+    // so find_crlf_scalar found no CRLF and a complete request was wrongly
+    // reported Incomplete (read-loop hang). Scan the whole buffer instead: the
+    // request line's CRLF always precedes (or begins) the \r\n\r\n run, and
+    // find_header_end already guaranteed a terminator exists.
+    let first_crlf = find_crlf_scalar(buf).ok_or(SimdParseError::Incomplete)?;
     let request_line = &buf[..first_crlf];
 
     // METHOD SP
@@ -544,10 +551,15 @@ pub fn parse_request(buf: &[u8]) -> Result<ParsedRequest, SimdParseError> {
     if version.len() < 8 || !version.starts_with(b"HTTP/1.") {
         return Err(SimdParseError::InvalidVersion);
     }
-    let http_minor = version[7] - b'0';
-    if http_minor > 1 {
-        return Err(SimdParseError::InvalidVersion);
-    }
+    // BUG FIX: previously `version[7] - b'0'` underflowed (panic on
+    // overflow-checks builds; wrap otherwise) for a sub-'0' version byte such
+    // as '!' in "HTTP/1.!9". Validate the digit before converting so malformed
+    // versions are rejected cleanly instead of panicking.
+    let http_minor = match version[7] {
+        b'0' => 0u8,
+        b'1' => 1u8,
+        _ => return Err(SimdParseError::InvalidVersion),
+    };
 
     // Parse headers.
     let mut headers = HeaderTable::new();
@@ -986,6 +998,39 @@ mod tests {
     fn parse_invalid_version() {
         let buf = b"GET / HTTP/2.0\r\nHost: x\r\n\r\n";
         assert!(matches!(parse_request(buf), Err(SimdParseError::InvalidVersion)));
+    }
+
+    // Regression: a complete header-less request must parse as Ok, not be
+    // misclassified Incomplete (which caused a read-loop hang). The request
+    // line's terminating CRLF coincides with the start of the \r\n\r\n run.
+    #[test]
+    fn parse_headerless_request_is_complete() {
+        let get = b"GET / HTTP/1.1\r\n\r\n";
+        let req = parse_request(get).expect("header-less GET must parse");
+        assert_eq!(req.method(get), b"GET");
+        assert_eq!(req.path(get), b"/");
+        assert_eq!(req.http_minor, 1);
+        assert_eq!(req.headers.len(), 0);
+        assert_eq!(req.body_offset, get.len());
+
+        let opts = b"OPTIONS * HTTP/1.1\r\n\r\n";
+        let req = parse_request(opts).expect("header-less OPTIONS must parse");
+        assert_eq!(req.method(opts), b"OPTIONS");
+        assert_eq!(req.path(opts), b"*");
+        assert_eq!(req.headers.len(), 0);
+    }
+
+    // Regression: a sub-'0' version byte must yield InvalidVersion rather than
+    // panicking via integer underflow on overflow-checks builds.
+    #[test]
+    fn parse_malformed_version_byte_no_underflow() {
+        let buf = b"GET / HTTP/1.!9\r\nHost: x\r\n\r\n";
+        // `ParsedRequest` derives neither PartialEq nor Debug, so match on the
+        // error variant rather than assert_eq! on the Result.
+        assert!(matches!(
+            parse_request(buf),
+            Err(SimdParseError::InvalidVersion)
+        ));
     }
 
     #[test]
