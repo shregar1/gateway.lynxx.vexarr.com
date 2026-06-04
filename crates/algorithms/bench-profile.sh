@@ -72,9 +72,9 @@ ATS_TARGETS=(
 )
 
 OPT_TARGETS=(
-    # optimized: comparison benchmarks (6)
+    # optimized: comparison benchmarks (7)
     opt_crc32_vs opt_unescape_uri_vs opt_escape_uri_vs
-    opt_base64_decode_vs opt_ja4_vs opt_huff_decode_vs
+    opt_base64_decode_vs opt_ja4_vs opt_huff_decode_vs opt_snowflake_vs
 )
 
 run_bench() {

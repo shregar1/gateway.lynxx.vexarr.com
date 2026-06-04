@@ -5,6 +5,8 @@
 /// Bucket lookup is O(1) via bit manipulation (leading zeros + shift).
 pub struct Histogram {
     buckets: Vec<u64>,
+    /// Prefix sums for O(log n) percentile queries (`cumulative[i]` = sum of buckets[0..=i]).
+    cumulative: Vec<u64>,
     range_bits: u32,
     span_bits: u32,
     total_count: u64,
@@ -20,6 +22,7 @@ impl Histogram {
         let num_buckets = (range_bits as usize) * (1usize << span_bits);
         Self {
             buckets: vec![0u64; num_buckets],
+            cumulative: vec![0u64; num_buckets],
             range_bits,
             span_bits,
             total_count: 0,
@@ -33,6 +36,7 @@ impl Histogram {
     pub fn record(&mut self, value: u64) {
         if value == 0 {
             self.buckets[0] += 1;
+            self.cumulative[0] += 1;
             self.total_count += 1;
             self.min_value = self.min_value.min(0);
             if self.max_value == 0 && self.total_count == 1 {
@@ -45,6 +49,9 @@ impl Histogram {
         let idx = self.bucket_index(value);
         let clamped = idx.min(self.buckets.len() - 1);
         self.buckets[clamped] += 1;
+        for c in &mut self.cumulative[clamped..] {
+            *c += 1;
+        }
         self.total_count += 1;
         self.min_value = self.min_value.min(value);
         self.max_value = self.max_value.max(value);
@@ -57,15 +64,11 @@ impl Histogram {
             return 0;
         }
         let target = ((self.total_count as f64) * p).ceil() as u64;
-        let mut cumulative = 0u64;
-
-        for (idx, &count) in self.buckets.iter().enumerate() {
-            cumulative += count;
-            if cumulative >= target {
-                return self.bucket_lower_bound(idx);
-            }
-        }
-        self.max_value
+        let idx = self
+            .cumulative
+            .partition_point(|&cum| cum < target)
+            .min(self.buckets.len().saturating_sub(1));
+        self.bucket_lower_bound(idx)
     }
 
     pub fn mean(&self) -> f64 {
@@ -96,6 +99,7 @@ impl Histogram {
         for bucket in &mut self.buckets {
             *bucket >>= 1;
         }
+        self.rebuild_cumulative();
         self.total_count = self.buckets.iter().sum();
         self.sum >>= 1;
     }
@@ -104,6 +108,7 @@ impl Histogram {
         for bucket in &mut self.buckets {
             *bucket = 0;
         }
+        self.cumulative.fill(0);
         self.total_count = 0;
         self.min_value = u64::MAX;
         self.max_value = 0;
@@ -119,12 +124,21 @@ impl Histogram {
         for (i, &count) in other.buckets.iter().enumerate() {
             self.buckets[i] += count;
         }
+        self.rebuild_cumulative();
         self.total_count += other.total_count;
         if other.total_count > 0 {
             self.min_value = self.min_value.min(other.min_value);
             self.max_value = self.max_value.max(other.max_value);
         }
         self.sum += other.sum;
+    }
+
+    fn rebuild_cumulative(&mut self) {
+        let mut running = 0u64;
+        for (c, &count) in self.cumulative.iter_mut().zip(self.buckets.iter()) {
+            running += count;
+            *c = running;
+        }
     }
 
     /// Map a value to its bucket index using bit manipulation.
