@@ -63,23 +63,22 @@ where
     /// (the defining ARC insight: any re-access moves from recency to
     /// frequency). Returns `None` on a miss.
     pub fn get(&mut self, key: &K) -> Option<&V> {
-        if let Some((_, loc)) = self.data.get(key) {
-            let loc = *loc;
-            match loc {
-                Location::T1 => {
-                    self.t1.retain(|k| k != key);
-                    self.t2.push_back(key.clone());
-                    self.data.get_mut(key).unwrap().1 = Location::T2;
-                }
-                Location::T2 => {
+        let loc = self.data.get(key).map(|(_, loc)| *loc)?;
+        match loc {
+            Location::T1 => {
+                self.t1.retain(|k| k != key);
+                self.t2.push_back(key.clone());
+                self.data.get_mut(key).unwrap().1 = Location::T2;
+            }
+            Location::T2 => {
+                // Fast path: already MRU in T2 (common on repeated hot keys).
+                if self.t2.back() != Some(key) {
                     self.t2.retain(|k| k != key);
                     self.t2.push_back(key.clone());
                 }
             }
-            Some(&self.data.get(key).unwrap().0)
-        } else {
-            None
         }
+        Some(&self.data.get(key).unwrap().0)
     }
 
     /// Insert or update `key`.

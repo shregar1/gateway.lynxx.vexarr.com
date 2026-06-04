@@ -40,3 +40,8 @@ harness = false
 name = "structures_write_buffer"
 path = "benches/write_buffer.rs"
 harness = false
+
+[[bench]]
+name = "structures_arc_cache_vs"
+path = "benches/arc_cache_vs.rs"
+harness = false
