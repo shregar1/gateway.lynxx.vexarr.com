@@ -9,3 +9,6 @@ pub mod crc32;
 pub mod base64_decode;
 pub mod ja4;
 pub mod escape_uri;
+pub mod snowflake;
+
+pub use snowflake::SnowflakeGeneratorFast;

@@ -302,6 +302,11 @@ name = "opt_huff_decode_vs"
 path = "benches/optimized/huff_decode_vs.rs"
 harness = false
 
+[[bench]]
+name = "opt_snowflake_vs"
+path = "benches/optimized/snowflake_vs.rs"
+harness = false
+
 # ── goals: encoding (9) ──
 [[bench]]
 name = "encoding_escape_html"

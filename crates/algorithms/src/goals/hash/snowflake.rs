@@ -10,14 +10,14 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Custom epoch: 2021-01-01 00:00:00 UTC in milliseconds since Unix epoch.
-const EPOCH: u64 = 1609459200000;
+pub(crate) const EPOCH: u64 = 1609459200000;
 
 const MACHINE_BITS: u32 = 12;
-const SEQUENCE_BITS: u32 = 10;
-const MAX_SEQUENCE: u64 = (1 << SEQUENCE_BITS) - 1;
-const MAX_MACHINE_ID: u64 = (1 << MACHINE_BITS) - 1;
+pub(crate) const SEQUENCE_BITS: u32 = 10;
+pub(crate) const MAX_SEQUENCE: u64 = (1 << SEQUENCE_BITS) - 1;
+pub(crate) const MAX_MACHINE_ID: u64 = (1 << MACHINE_BITS) - 1;
 
-const TIMESTAMP_SHIFT: u32 = MACHINE_BITS + SEQUENCE_BITS;
+pub(crate) const TIMESTAMP_SHIFT: u32 = MACHINE_BITS + SEQUENCE_BITS;
 
 /// Thread-safe Snowflake ID generator.
 pub struct SnowflakeGenerator {
@@ -68,6 +68,16 @@ impl SnowflakeGenerator {
     pub fn generate(&self) -> SnowflakeId {
         let mut state = self.inner.lock().unwrap();
         let mut ts = current_timestamp_ms().saturating_sub(EPOCH);
+
+        // Clock moved backwards (NTP step, chrony/ntpdate, VM live-migration or
+        // snapshot restore, manual clock set): busy-wait until the wall clock
+        // catches back up to the last stamped timestamp. Emitting an ID with a
+        // regressed timestamp could duplicate IDs already issued at
+        // `last_timestamp`. Ensuring `ts >= last_timestamp` here keeps the
+        // equal/forward branches below correct without a separate rollback case.
+        while ts < state.last_timestamp {
+            ts = current_timestamp_ms().saturating_sub(EPOCH);
+        }
 
         if ts == state.last_timestamp {
             state.sequence = (state.sequence + 1) & MAX_SEQUENCE;
@@ -261,5 +271,25 @@ mod tests {
         let ts = id.timestamp();
         assert!(ts <= now_ms, "timestamp should not be in the future");
         assert!(now_ms - ts < 1000, "timestamp should be within 1 second of now");
+    }
+
+    #[test]
+    fn generate_does_not_regress_on_backward_clock() {
+        // Regression: if the wall clock steps backward (NTP/VM migration), the
+        // old `else { sequence = 0 }` branch stamped the smaller timestamp,
+        // which could duplicate IDs already issued at the higher one. Simulate
+        // the clock having been ~5ms ahead by parking `last_timestamp` in the
+        // near future; generate() must busy-wait until the real clock catches
+        // up rather than emitting a regressed (colliding) timestamp.
+        let gen = SnowflakeGenerator::new(1);
+        let future = current_timestamp_ms().saturating_sub(EPOCH) + 5;
+        gen.inner.lock().unwrap().last_timestamp = future;
+        let id = gen.generate();
+        assert!(
+            id.timestamp() >= future,
+            "ID timestamp regressed after backward clock: {} < {}",
+            id.timestamp(),
+            future
+        );
     }
 }
