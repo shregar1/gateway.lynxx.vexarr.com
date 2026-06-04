@@ -104,24 +104,16 @@ impl P2cBalancer {
         (active * 1024) / self.weights[idx] as u64
     }
 
-    /// Xorshift64 PRNG — lock-free via CAS loop on `rng_state`.
+    /// Xorshift64 PRNG — lock-free via `fetch_add` (no CAS retry loop).
     fn next_random(&self) -> u64 {
-        loop {
-            let old = self.rng_state.load(Ordering::Relaxed);
-            let mut s = old;
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            match self.rng_state.compare_exchange_weak(
-                old,
-                s,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return s,
-                Err(_) => continue,
-            }
-        }
+        let old = self
+            .rng_state
+            .fetch_add(0x9E37_79B9_7F4A_7C15, Ordering::Relaxed);
+        let mut s = old;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        s
     }
 }
 
