@@ -2907,6 +2907,8 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
                 stream_timeout_ms: existing.stream_timeout_ms,
                 stream_close_delay_ms: existing.stream_close_delay_ms,
                 pass_host_header: existing.pass_host_header,
+                pool_idle_floor: existing.pool_idle_floor,
+                force_http_version: existing.force_http_version.clone(),
                 drain_timeout_ms: None,
                 project_id: existing.project_id,
                 domain: existing.domain.clone(),
@@ -3161,6 +3163,14 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
             .try_get::<Option<bool>, _>("pass_host_header")
             .ok()
             .flatten(),
+        // Neither `pool_idle_floor` nor `force_http_version` is a
+        // DB-backed column yet — services loaded from config.toml set
+        // them via the [services] TOML table and the resulting `Service`
+        // is updated in-memory but isn't serialised back through this
+        // row decoder. Default to `None` here; a follow-up migration
+        // will add the columns.
+        pool_idle_floor: None,
+        force_http_version: None,
         drain_timeout_ms: row
             .try_get::<Option<i64>, _>("drain_timeout_ms")
             .ok()

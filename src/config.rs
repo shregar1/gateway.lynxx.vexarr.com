@@ -198,6 +198,14 @@ pub struct GatewaySettings {
     /// Idle connection timeout in seconds. Default: 120.
     #[serde(default = "default_pool_idle_timeout")]
     pub pool_idle_timeout_secs: u64,
+    /// Global default for the idle-connection floor the prewarmer
+    /// maintains per upstream host. Per-service `services[].pool_idle_floor`
+    /// overrides this. When neither is set the prewarmer falls back to
+    /// the legacy single-HEAD heartbeat. Matches nginx's `keepalive N`
+    /// directive in role — N idle conns are kept warm even when there's
+    /// no traffic. Default: `None` (off).
+    #[serde(default)]
+    pub pool_idle_floor_per_host: Option<usize>,
     /// HTTP/2 keepalive ping interval in seconds. Default: 10.
     #[serde(default = "default_h2_keepalive")]
     pub h2_keepalive_interval_secs: u64,
@@ -1162,6 +1170,7 @@ fn default_gateway() -> GatewaySettings {
         providers: ProvidersConfig::default(),
         pool_max_idle_per_host: default_pool_max_idle(),
         pool_idle_timeout_secs: default_pool_idle_timeout(),
+        pool_idle_floor_per_host: None,
         h2_keepalive_interval_secs: default_h2_keepalive(),
         max_header_size: default_max_header_size(),
         prewarm_interval_secs: default_prewarm_interval(),

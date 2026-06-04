@@ -284,6 +284,8 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>)
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            pool_idle_floor: None,
+            force_http_version: None,
             drain_timeout_ms: None,
             project_id: None,
             domain: String::new(),
