@@ -85,7 +85,7 @@ algorithms = { path = "crates/algorithms" }
 # PlanTier→runtime Tier mapping stays local (quota::PlanTierAlgo) so utilx has
 # no algorithms dependency. The `[patch]` at the bottom of this file redirects
 # to a local checkout for dev builds; drop it (or omit in CI) to build from git.
-utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["license"] }
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["license", "net"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }
