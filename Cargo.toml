@@ -81,6 +81,11 @@ unused_imports = "warn"
 # subscription `Tier` (resolved from LicenseState.algorithm_tier())
 # selects which one runs at startup.
 algorithms = { path = "crates/algorithms" }
+# Shared vexarr auth/licensing crate (canonical source = git). lynxx's
+# PlanTier→runtime Tier mapping stays local (quota::PlanTierAlgo) so utilx has
+# no algorithms dependency. The `[patch]` at the bottom of this file redirects
+# to a local checkout for dev builds; drop it (or omit in CI) to build from git.
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["license"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }
@@ -335,3 +340,10 @@ codegen-units = 1
 inherits = "release"
 strip = "debuginfo"
 debug = "line-tables-only"
+
+# ── Local dev override for the utilx git dependency ──────────────────────────
+# Declared as a git dep above (canonical). This patch resolves it to the local
+# checkout so the workspace builds without a push, on a full vexarr tree.
+# Remove (or omit in CI) to build purely from the git remote.
+[patch."https://github.com/shregar1/core.utilx.vexarr.com"]
+utilx = { path = "../../../../utilx/core.utilx.vexarr.com" }

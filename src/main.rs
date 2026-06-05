@@ -576,7 +576,10 @@ async fn async_main() -> anyhow::Result<()> {
         license.active_nodes,
         license.max_nodes,
     );
-    crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
+    crate::license::spawn_license_refresher(
+        license_state.clone(),
+        Some(quota.clone() as std::sync::Arc<dyn utilx::license::QuotaControl>),
+    );
 
     // Register this node with the billing API and start heartbeat.
     if let Err(e) = crate::license::register_node(&license_api_key, &lynxx_base_url).await {

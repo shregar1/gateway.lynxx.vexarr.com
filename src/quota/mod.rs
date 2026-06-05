@@ -196,50 +196,23 @@ fn reset_per_thread_calls() {
 // Plan tier
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PlanTier {
-    Free,
-    Pro,
-    Business,
-    Enterprise,
+// `PlanTier` (+ `from_str` / `monthly_limit` / `as_str`) now lives in the
+// shared `utilx` crate. Re-exported so `crate::quota::PlanTier` keeps working.
+pub use utilx::license::PlanTier;
+
+/// Maps a billing [`PlanTier`] onto the runtime algorithm
+/// [`Tier`](algorithms::backbone::Tier).
+///
+/// Lives here (not in `utilx`) so the shared crate stays free of any dependency
+/// on the `algorithms` crate. Import this trait wherever `algorithm_tier()` is
+/// called on a `PlanTier`.
+pub trait PlanTierAlgo {
+    /// Free → Starter, Pro → Growth, Business / Enterprise → Pro.
+    fn algorithm_tier(self) -> algorithms::backbone::Tier;
 }
 
-impl PlanTier {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "pro" => PlanTier::Pro,
-            "business" => PlanTier::Business,
-            "enterprise" => PlanTier::Enterprise,
-            _ => PlanTier::Free,
-        }
-    }
-
-    pub fn monthly_limit(self) -> Option<u64> {
-        match self {
-            PlanTier::Free => Some(1_000_000),
-            PlanTier::Pro => Some(10_000_000),
-            PlanTier::Business => Some(100_000_000),
-            PlanTier::Enterprise => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PlanTier::Free => "free",
-            PlanTier::Pro => "pro",
-            PlanTier::Business => "business",
-            PlanTier::Enterprise => "enterprise",
-        }
-    }
-
-    /// Map a billing `PlanTier` onto the runtime algorithm `Tier`.
-    ///
-    /// Free → Starter, Pro → Growth, Business / Enterprise → Pro. The
-    /// algorithms crate has only three performance tiers; Business and
-    /// Enterprise share the top-tier algorithm set and are distinguished
-    /// purely by quota.
-    pub fn algorithm_tier(self) -> algorithms::backbone::Tier {
+impl PlanTierAlgo for PlanTier {
+    fn algorithm_tier(self) -> algorithms::backbone::Tier {
         use algorithms::backbone::Tier;
         match self {
             PlanTier::Free => Tier::Starter,
@@ -622,6 +595,25 @@ pub struct QuotaSnapshot {
     pub calls_limit: Option<u64>,
     pub calls_remaining: Option<u64>,
     pub allow_overage: bool,
+}
+
+/// Bridge the gateway's `QuotaTracker` to utilx's `QuotaControl`, so the shared
+/// licence refresher / usage-reporter can push server-authoritative limits and
+/// read call counts without utilx depending on this crate.
+impl utilx::license::QuotaControl for QuotaTracker {
+    fn set_limit(&self, limit: Option<u64>) {
+        QuotaTracker::set_limit(self, limit);
+    }
+    fn set_allow_overage(&self, allow: bool) {
+        QuotaTracker::set_allow_overage(self, allow);
+    }
+    fn usage_snapshot(&self) -> utilx::license::UsageSnapshot {
+        let snap = self.snapshot();
+        utilx::license::UsageSnapshot {
+            period: snap.period,
+            calls_total: snap.calls_total,
+        }
+    }
 }
 
 fn current_period() -> String {

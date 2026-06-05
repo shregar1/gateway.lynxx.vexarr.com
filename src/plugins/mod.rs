@@ -66,7 +66,7 @@ pub mod websocket_size_limit;
 
 use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
-use crate::quota::PlanTier;
+use crate::quota::{PlanTier, PlanTierAlgo};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
 use std::collections::HashMap;
