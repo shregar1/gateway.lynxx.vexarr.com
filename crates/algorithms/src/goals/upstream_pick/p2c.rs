@@ -84,7 +84,11 @@ impl P2cBalancer {
 
     /// Record a request completing on backend `idx`.
     pub fn request_end(&self, idx: usize) {
-        self.active_requests[idx].fetch_sub(1, Ordering::Relaxed);
+        // Saturating: an unbalanced end must not underflow to u64::MAX (which
+        // would skew P2C away from this backend forever).
+        let _ = self.active_requests[idx].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
     }
 
     /// Current active request count for backend `idx`.

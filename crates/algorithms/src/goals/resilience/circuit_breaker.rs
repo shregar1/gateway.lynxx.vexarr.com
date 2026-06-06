@@ -64,7 +64,12 @@ impl CircuitBreaker {
         }
     }
 
-    pub fn record_failure(&mut self) {
+    /// Internal: state transition only. NOT public — it cannot set
+    /// `last_failure_ms`, so opening the breaker through this path alone would
+    /// anchor the Open-state timeout at 0 and `allow_request` would immediately
+    /// transition to half-open (defeating the timeout). All failure recording
+    /// must go through `record_failure_at`, which stamps the time first.
+    fn record_failure(&mut self) {
         match self.state {
             State::HalfOpen => {
                 self.state = State::Open;

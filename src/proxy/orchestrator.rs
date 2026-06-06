@@ -662,7 +662,11 @@ impl Orchestrator {
                         // Pick the least-loaded healthy nodes to drain.
                         let mut candidates = self.cluster.healthy_nodes();
                         candidates.sort_by(|a, b| {
-                            a.load_fraction.partial_cmp(&b.load_fraction).unwrap()
+                            // total_cmp: a NaN load_fraction must not panic the
+                            // control loop (partial_cmp returns None → unwrap
+                            // panics). Matches the total_cmp ordering used
+                            // elsewhere on this branch (e.g. cluster.rs).
+                            a.load_fraction.total_cmp(&b.load_fraction)
                         });
 
                         let to_drain: Vec<_> =

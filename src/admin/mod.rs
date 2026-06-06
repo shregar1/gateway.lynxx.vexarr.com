@@ -449,34 +449,6 @@ pub fn admin_router(
             "/services/:id/circuit-breaker",
             patch(routes::patch_service_circuit_breaker),
         )
-        // ── probes (mutations) ──
-        .route("/services/:id/probes", post(probes::create_probe))
-        .route("/probes/:id", patch(probes::patch_probe).delete(probes::delete_probe))
-        // ── snapshots (mutations) ──
-        .route("/services/:id/snapshots", post(snapshots::create_snapshot))
-        .route("/services/:id/snapshots/:sid/diff", get(snapshots::snapshot_diff))
-        .route("/services/:id/snapshots/:sid/rollback", post(snapshots::rollback_snapshot))
-        .route("/services/:id/snapshots/:sid", delete(snapshots::delete_snapshot))
-        // ── alerts (mutations) ──
-        .route("/services/:id/alerts", post(alerts::create_alert_rule))
-        .route("/alerts/:id", patch(alerts::patch_alert_rule).delete(alerts::delete_alert_rule))
-        .route("/alert-events/:id/resolve", post(alerts::resolve_alert_event))
-        .route("/alerts/:id/test", post(alerts::test_alert))
-        // ── ip rules (mutations) ──
-        .route("/services/:id/ip-rules", post(ip_rules::create_ip_rule))
-        .route("/services/:id/ip-rules/bulk", post(ip_rules::bulk_create_ip_rules))
-        .route("/ip-rules/:id", patch(ip_rules::patch_ip_rule).delete(ip_rules::delete_ip_rule))
-        // ── error pages (mutations) ──
-        .route("/services/:id/error-pages", post(error_pages::create_error_page))
-        .route("/error-pages/:id", patch(error_pages::patch_error_page).delete(error_pages::delete_error_page))
-        // ── consumer groups (mutations) ──
-        .route("/services/:id/consumer-groups", post(consumer_groups::create_consumer_group))
-        .route("/consumer-groups/:id", patch(consumer_groups::patch_consumer_group).delete(consumer_groups::delete_consumer_group))
-        .route("/consumer-groups/:id/members", post(consumer_groups::add_member))
-        .route("/consumer-groups/:id/members/:cid", delete(consumer_groups::remove_member))
-        // ── proxy helpers ──
-        .route("/proxy/try", post(docs::proxy_try))
-        .route("/proxy/replay", post(replay::proxy_replay))
         .route_layer(middleware::from_fn(operator));
 
     // ---- token management (admin) ----

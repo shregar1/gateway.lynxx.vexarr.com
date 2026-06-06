@@ -562,6 +562,27 @@ pub fn parse_request(buf: &[u8]) -> Result<ParsedRequest, SimdParseError> {
     };
 
     // Parse headers.
+    // RFC 7230 token bytes, for header-name validation below.
+    fn is_token_byte(b: u8) -> bool {
+        b.is_ascii_alphanumeric()
+            || matches!(
+                b,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    }
     let mut headers = HeaderTable::new();
     let mut pos = first_crlf + 2; // After first \r\n.
 
@@ -597,6 +618,24 @@ pub fn parse_request(buf: &[u8]) -> Result<ParsedRequest, SimdParseError> {
 
         let value_start = (pos + colon + 1 + value_trimmed_start) as u16;
         let value_end = (pos + colon + 1 + value_trimmed_end) as u16;
+
+        // Validate name/value before recording the header. The name must be a
+        // non-empty RFC 7230 token — no whitespace (including none before the
+        // colon, the "Host :" smuggling vector), controls, or separators — and
+        // the value must carry no control bytes (a bare CR/LF/NUL would enable
+        // header injection / request smuggling once this parser is wired into
+        // the live path).
+        let name_bytes = &buf[pos..pos + colon];
+        if name_bytes.is_empty() || !name_bytes.iter().all(|&b| is_token_byte(b)) {
+            return Err(SimdParseError::InvalidHeader);
+        }
+        let value_bytes = &raw_value[value_trimmed_start..value_trimmed_end];
+        if value_bytes
+            .iter()
+            .any(|&b| (b < 0x20 && b != b'\t') || b == 0x7f)
+        {
+            return Err(SimdParseError::InvalidHeader);
+        }
 
         if !headers.push(HeaderOffset {
             name_start,

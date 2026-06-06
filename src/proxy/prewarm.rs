@@ -237,6 +237,14 @@ pub async fn burst_warm(
     let mut all = tokio::task::JoinSet::new();
     let started = Instant::now();
 
+    // GLOBAL ceiling on concurrent prewarm HEADs across ALL services — the
+    // documented "global ceiling" semantics (and parity with the periodic
+    // tick). Previously the semaphore was created per-service inside the loop,
+    // so the cap was per-service and total in-flight HEADs were
+    // (num_services × concurrency) — a startup socket/FD burst. One shared
+    // semaphore bounds the whole burst.
+    let global_sem = Arc::new(Semaphore::new(concurrency_per_service.max(1)));
+
     for svc in services {
         if !should_prewarm(&svc, health) {
             continue;
@@ -250,10 +258,8 @@ pub async fn burst_warm(
             continue;
         };
 
-        // Cap the per-service in-flight HEADs to the configured
-        // concurrency. Without this a floor=4096 service would
-        // briefly hold 4096 sockets open during burst.
-        let sem = Arc::new(Semaphore::new(concurrency_per_service.max(1)));
+        // Share the single global semaphore with this service's HEADs.
+        let sem = global_sem.clone();
         let pool = pool.clone();
         let state = state.clone();
         let svc_arc = Arc::new(svc);

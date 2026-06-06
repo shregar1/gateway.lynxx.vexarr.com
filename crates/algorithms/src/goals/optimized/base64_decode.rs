@@ -116,6 +116,22 @@ fn decode_internal_fast(dst: &mut [u8], src: &[u8], lut: &[u8; 256]) -> isize {
         return -1;
     }
 
+    // Bound the output: every write in the unsafe block below goes through a
+    // raw pointer with NO per-write capacity check, so verify `dst` is large
+    // enough up front. A caller passing a `dst` shorter than the decoded length
+    // would otherwise overrun the buffer (OOB write / memory corruption). This
+    // mirrors the bound-checked contract `huff_decode_fast` already enforces.
+    // Decoded length = 3 bytes per full 4-char group, plus the tail: 1 byte for
+    // a 2-char remainder, 2 bytes for a 3-char remainder (remainder 1 rejected).
+    let required = {
+        let groups = src_len / 4;
+        let rem = src_len % 4;
+        groups * 3 + if rem == 2 { 1 } else if rem == 3 { 2 } else { 0 }
+    };
+    if required > dst.len() {
+        return -1;
+    }
+
     let mut d = 0usize;
     let mut s = 0usize;
 

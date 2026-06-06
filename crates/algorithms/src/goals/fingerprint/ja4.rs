@@ -226,13 +226,19 @@ impl Ja4Fingerprint {
         // the optimized/ja4.rs path) so we never slice at a non-char-boundary.
         let alpn = {
             let b = input.alpn_first.as_deref().unwrap_or("").as_bytes();
+            // Map each ALPN byte to a single ASCII char; replace non-ASCII bytes
+            // with '0' rather than reinterpreting via `byte as char` (which emits
+            // a multi-byte UTF-8 codepoint for bytes >= 0x80, mis-encoding the
+            // fingerprint vs the canonical optimized/ja4.rs path that operates on
+            // raw single bytes). JA4 ALPN IDs are ASCII in practice.
+            let to_ascii = |x: u8| if x.is_ascii_graphic() { x as char } else { '0' };
             match b.len() {
                 0 => "00".to_string(),
-                1 => format!("{}0", b[0] as char),
+                1 => format!("{}0", to_ascii(b[0])),
                 _ => {
                     let mut t = String::with_capacity(2);
-                    t.push(b[0] as char);
-                    t.push(b[1] as char);
+                    t.push(to_ascii(b[0]));
+                    t.push(to_ascii(b[1]));
                     t
                 }
             }

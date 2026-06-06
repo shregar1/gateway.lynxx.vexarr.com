@@ -29,6 +29,17 @@ impl RateLimitPlugin {
     /// `tier` permits. `requested` is the operator's desired strategy
     /// (from config); it is locked down if the tier doesn't allow it.
     pub fn new(requests_per_second: f64, requested: RateLimitStrategy, tier: Tier) -> Self {
+        // A non-finite or negative `requests_per_second` is a misconfiguration
+        // (e.g. admin/lynxfile `requests_per_second: 0` or `-10`). Collapse it
+        // to 0.0 here so the engine never receives a NaN/negative rate — which
+        // would otherwise either bypass limiting or panic the process in
+        // `Duration::from_secs_f64` (panic="abort"). 0.0 admits the initial
+        // burst, then denies.
+        let requests_per_second = if requests_per_second.is_finite() && requests_per_second > 0.0 {
+            requests_per_second
+        } else {
+            0.0
+        };
         // Burst headroom of 2× rps preserves the previous plugin's feel
         // (token bucket capacity was `rps * 2`). Clamp to ≥1 so a sub-1
         // rps config still admits a single request.

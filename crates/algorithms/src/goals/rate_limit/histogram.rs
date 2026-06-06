@@ -19,7 +19,10 @@ impl Histogram {
     /// Create with range_bits R and span_bits S.
     /// Total buckets = R * 2^S.
     pub fn new(range_bits: u32, span_bits: u32) -> Self {
-        let num_buckets = (range_bits as usize) * (1usize << span_bits);
+        // At least one bucket: range_bits == 0 (or the product being 0) would
+        // otherwise allocate empty buckets/cumulative vecs, and record() would
+        // index [0] / compute `len() - 1` → out-of-bounds panic.
+        let num_buckets = ((range_bits as usize) * (1usize << span_bits)).max(1);
         Self {
             buckets: vec![0u64; num_buckets],
             cumulative: vec![0u64; num_buckets],
@@ -35,14 +38,18 @@ impl Histogram {
     /// Record a sample. O(1) via bit manipulation.
     pub fn record(&mut self, value: u64) {
         if value == 0 {
+            // 0 lands in bucket 0, which is ≤ every bucket's upper bound, so it
+            // must increment EVERY cumulative entry (exactly like the non-zero
+            // branch's `cumulative[clamped..]` with clamped == 0). The old code
+            // bumped only cumulative[0], breaking the non-decreasing prefix-sum
+            // invariant so that every percentile() query returned garbage once
+            // any zero sample had been recorded.
             self.buckets[0] += 1;
-            self.cumulative[0] += 1;
-            self.total_count += 1;
-            self.min_value = self.min_value.min(0);
-            if self.max_value == 0 && self.total_count == 1 {
-                self.max_value = 0;
+            for c in self.cumulative.iter_mut() {
+                *c += 1;
             }
-            self.sum += value;
+            self.total_count += 1;
+            self.min_value = 0;
             return;
         }
 

@@ -30,7 +30,14 @@ struct FrequencySketch {
 
 impl FrequencySketch {
     fn new(capacity: usize) -> Self {
-        let table_len = capacity.next_power_of_two().max(16) / 16;
+        // checked_next_power_of_two avoids a debug-mode overflow panic when
+        // capacity is within a factor of two of usize::MAX (the next power of
+        // two would exceed the type). Falls back to usize::MAX on overflow.
+        let table_len = capacity
+            .checked_next_power_of_two()
+            .unwrap_or(usize::MAX)
+            .max(16)
+            / 16;
         let table_len = table_len.max(1);
         Self {
             table: vec![0u64; table_len],
@@ -155,7 +162,7 @@ where
             protected_cap,
             data: HashMap::new(),
             sketch: FrequencySketch::new(capacity),
-            sketch_reset_threshold: capacity * 10,
+            sketch_reset_threshold: capacity.saturating_mul(10),
             sketch_count: 0,
         }
     }

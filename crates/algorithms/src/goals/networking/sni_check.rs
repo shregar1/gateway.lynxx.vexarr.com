@@ -39,9 +39,15 @@ pub fn check_domain_fronting(sni: &str, host_header: &str) -> bool {
     let host = host_header.trim().to_ascii_lowercase();
 
     // Strip port from host header.
-    let host_domain = if let Some(bracket_end) = host.find(']') {
-        // IPv6 literal: [::1]:443
-        &host[..bracket_end + 1]
+    let host_domain = if host.starts_with('[') {
+        // IPv6 literal: "[::1]:443". Strip the brackets so the address compares
+        // against the SNI, which carries the BARE address (no brackets). The old
+        // code returned "[::1]" (brackets kept) while the SNI side is "::1", so
+        // every legitimate bracketed-IPv6 Host mismatched and was wrongly flagged.
+        match host.find(']') {
+            Some(end) => &host[1..end],
+            None => host.as_str(),
+        }
     } else if host.matches(':').count() == 1 {
         // BUG FIX: a bare (unbracketed) IPv6 literal contains multiple colons
         // (e.g. "2001:db8::1"), and its trailing hextet may be all digits — the

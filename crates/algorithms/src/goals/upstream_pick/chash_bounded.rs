@@ -104,7 +104,12 @@ impl BoundedCHash {
 
     /// Release a connection on node `idx`.
     pub fn release(&self, idx: usize) {
-        self.active[idx].fetch_sub(1, Ordering::Relaxed);
+        // Saturating: an unbalanced release (double-release / release without a
+        // matching connect) must not underflow to u64::MAX, which would make the
+        // node look maximally loaded forever and corrupt the cluster-wide bound.
+        let _ = self.active[idx].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
     }
 
     /// Number of nodes.
