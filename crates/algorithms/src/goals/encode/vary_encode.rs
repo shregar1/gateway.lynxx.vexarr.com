@@ -45,7 +45,14 @@ impl VaryKeyBuilder {
     pub fn build(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for (name, &hash) in &self.fields {
+            // The name length is framed as a single u8, so cap the emitted name
+            // at 255 bytes and keep the length byte consistent with the bytes
+            // actually written. A >255-byte name would otherwise truncate the
+            // length field and mis-frame the key (distinct field sets could
+            // collide). HTTP header field-names are short tokens, so in practice
+            // this never triggers.
             let name_bytes = name.as_bytes();
+            let name_bytes = &name_bytes[..name_bytes.len().min(u8::MAX as usize)];
             out.push(name_bytes.len() as u8);
             out.extend_from_slice(name_bytes);
             out.extend_from_slice(&hash.to_le_bytes());

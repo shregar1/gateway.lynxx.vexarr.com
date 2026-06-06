@@ -607,7 +607,17 @@ impl FastPathRouter {
         self.routes.len() < before
     }
 
-    /// Find the first matching route.
+    /// Find the longest-prefix matching route (routes are kept sorted longest
+    /// first by `add`, so the first match is the most specific fast-path route).
+    ///
+    /// SECURITY INVARIANT — a route may be marked eligible for the fast path
+    /// ONLY when no more-specific route under the same prefix requires full-path
+    /// handling (auth, rate-limit, plugins). This table holds only eligible
+    /// routes, so a broad eligible prefix (e.g. `/api`) would otherwise match
+    /// and fast-serve a path belonging to a more-specific auth-required route
+    /// (e.g. `/api/admin`) that is deliberately absent here — bypassing the
+    /// slow-path enforcement. The owner of eligibility must `mark_ineligible`
+    /// any prefix that shadows such a route.
     pub fn lookup(&self, path: &str, host: Option<&str>) -> Option<&FastPathRoute> {
         self.routes.iter().find(|r| r.matches(path, host))
     }

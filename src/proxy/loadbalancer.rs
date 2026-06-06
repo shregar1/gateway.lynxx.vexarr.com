@@ -377,6 +377,14 @@ impl FwrrIndex {
 /// O(10) hash+compare for HRW. The ring wins clearly above ~20 targets.
 const RING_VNODES_PER_UNIT: u32 = 150;
 
+/// Hard ceiling on a single target's vnode/ring-slot count, independent of its
+/// configured `weight`. Bounds both the BTreeMap ring (consistent hash) and the
+/// Vec ring (round-robin) so an unvalidated or hostile admin `weight` — taken
+/// straight from the target API, only floored at 1 — can never exhaust memory
+/// (OOM → process abort) or overflow `RING_VNODES_PER_UNIT * weight`. ~666×
+/// the per-unit fan-out; far above any legitimate relative weight.
+const MAX_RING_VNODES: u32 = 100_000;
+
 struct ConsistentHashRing {
     ring: BTreeMap<u64, usize>,
 }
@@ -393,7 +401,10 @@ impl ConsistentHashRing {
     fn new(targets: &[Arc<TargetState>]) -> Self {
         let mut ring = BTreeMap::new();
         for (idx, t) in targets.iter().enumerate() {
-            let vnodes = RING_VNODES_PER_UNIT * t.target.weight.max(1);
+            // u64 math + hard cap: a huge `weight` must not overflow the u32
+            // multiply or allocate an unbounded ring (OOM DoS).
+            let vnodes = (RING_VNODES_PER_UNIT as u64 * t.target.weight.max(1) as u64)
+                .min(MAX_RING_VNODES as u64) as u32;
             for v in 0..vnodes {
                 let hash = Self::node_hash(&t.target.id, v);
                 ring.insert(hash, idx);
@@ -591,7 +602,9 @@ impl ServiceLoadBalancer {
         let rr_ring = if strategy == LbStrategy::RoundRobinRing {
             let mut ring = Vec::new();
             for (idx, s) in states.iter().enumerate() {
-                let w = s.target.weight.max(1) as usize;
+                // Cap per-target ring slots so a hostile `weight` can't push an
+                // unbounded Vec (OOM DoS). See MAX_RING_VNODES.
+                let w = (s.target.weight.max(1) as usize).min(MAX_RING_VNODES as usize);
                 for _ in 0..w {
                     ring.push(idx);
                 }

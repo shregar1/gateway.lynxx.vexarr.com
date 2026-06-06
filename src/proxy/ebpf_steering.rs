@@ -222,8 +222,11 @@ impl MapDescriptor {
 
     /// Total memory footprint estimate in bytes.
     pub fn estimated_memory(&self) -> u64 {
-        let entry_size = (self.key_size + self.value_size) as u64;
-        entry_size * self.max_entries as u64
+        // Widen before adding/multiplying: `key_size + value_size` is a u32 add
+        // that can wrap before the cast, and the product can exceed u64 for an
+        // absurd config. Saturate instead of wrapping silently in release.
+        let entry_size = self.key_size as u64 + self.value_size as u64;
+        entry_size.saturating_mul(self.max_entries as u64)
     }
 }
 

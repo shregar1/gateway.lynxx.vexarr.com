@@ -197,7 +197,10 @@ impl SlowStartEntry {
     /// the minimum percentage.
     fn min_weight(&self, min_pct: u8) -> u32 {
         let pct = (min_pct as u32).clamp(1, 100);
-        (self.configured_weight * pct / 100).max(1)
+        // u64 intermediate: `configured_weight * pct` overflows u32 for large
+        // weights (> ~42.9M) before the divide. The /100 brings the result back
+        // within u32, so the cast is safe.
+        (((self.configured_weight as u64 * pct as u64) / 100) as u32).max(1)
     }
 }
 

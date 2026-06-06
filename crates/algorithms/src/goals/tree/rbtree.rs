@@ -77,6 +77,14 @@ impl<K: Ord, V> RbTree<K, V> {
             } else {
                 // Key exists — overwrite with the new value. The new node was
                 // just pushed, so it is the last arena slot; pop it back off.
+                // Assert that invariant so a future change to the arena layout
+                // (which would make this pop reclaim the wrong slot) fails loudly
+                // in tests instead of silently corrupting the tree.
+                debug_assert_eq!(
+                    self.nodes.len(),
+                    new_idx,
+                    "insert-overwrite assumes the freshly pushed node is the last arena slot"
+                );
                 self.node_mut(current).value = self.nodes.pop().unwrap().value;
                 return;
             }
@@ -102,9 +110,16 @@ impl<K: Ord, V> RbTree<K, V> {
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let idx = self.find_node(key)?;
-        // For simplicity: mark as removed by swapping to a tombstone approach
-        // Full RB-delete is complex; we do a simplified version that maintains
-        // the tree structure.
+        // NOTE (known limitation): this performs the BST unlink + the single
+        // recolour of a replacement child, but NOT the full red-black
+        // delete-fixup (sibling rotations/recolouring). The tree therefore stays
+        // a correct BST — lookups/inserts/removes return correct results — but
+        // its black-height balance can degrade under heavy delete churn, losing
+        // the strict O(log n) guarantee (worst case toward O(n)). Accepted
+        // trade-off for the insert-heavy use here (timer wheels / routing
+        // tables); a delete-heavy workload that needs guaranteed balance should
+        // swap in a vetted balanced-tree crate rather than hand-roll the
+        // sentinel-less fixup on this arena.
         Some(self.delete_node(idx))
     }
 

@@ -186,7 +186,17 @@ pub fn validate_redirect_path(path: &str) -> bool {
     // Split on `/` and check each segment. We also reject bare `..`
     // anywhere in the path string to be safe.
     let path_part = path.split('?').next().unwrap_or(path);
-    for segment in path_part.split('/') {
+    // Reject percent-encoded traversal primitives. An internal redirect path
+    // should already be decoded; an encoded dot (%2e) or separator (%2f / %5c)
+    // can smuggle a `..` or path separator past the literal segment check below
+    // and re-expand to traversal once the upstream/filesystem decodes it.
+    let lower = path_part.to_ascii_lowercase();
+    if lower.contains("%2e") || lower.contains("%2f") || lower.contains("%5c") {
+        return false;
+    }
+    // Reject `..` as a whole segment, splitting on both `/` and `\` (some
+    // resolvers treat backslash as a separator).
+    for segment in path_part.split(['/', '\\']) {
         if segment == ".." {
             return false;
         }

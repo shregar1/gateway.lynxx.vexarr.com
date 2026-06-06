@@ -45,7 +45,11 @@ impl FwlcSelector {
 
     /// Release a connection on backend `idx`.
     pub fn release(&self, idx: usize) {
-        self.active[idx].fetch_sub(1, Ordering::Relaxed);
+        // Saturating: an unbalanced release must not underflow to u64::MAX,
+        // which would permanently starve this backend (always maximal score).
+        let _ = self.active[idx].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
     }
 
     /// Current active connections for backend `idx`.

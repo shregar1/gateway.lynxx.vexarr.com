@@ -132,7 +132,15 @@ pub async fn proxy_try(
         .unwrap_or_default();
 
     let preview = if resp_body.len() > 4096 {
-        format!("{}...(truncated)", &resp_body[..4096])
+        // Truncate on a UTF-8 char boundary, not a raw byte index: slicing
+        // mid-codepoint panics, and under `panic = "abort"` that aborts the
+        // whole process. The upstream body is attacker-influenceable (this is
+        // an operator SSRF helper), so the byte at 4096 is not trusted.
+        let end = (0..=4096)
+            .rev()
+            .find(|&i| resp_body.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}...(truncated)", &resp_body[..end])
     } else {
         resp_body
     };

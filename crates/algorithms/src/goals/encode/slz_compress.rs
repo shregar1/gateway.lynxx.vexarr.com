@@ -57,7 +57,10 @@ impl SlzCompressor {
                     // Extend match
                     let max_len = MAX_MATCH.min(input.len() - pos);
                     let max_ref = (input.len() - candidate).min(max_len);
-                    let limit = max_len.min(max_ref);
+                    // The match length is emitted as a single u8 below, so cap it
+                    // at 255: a longer match would truncate in `mlen as u8` and
+                    // corrupt the stream (the decoder reads the wrong length).
+                    let limit = max_len.min(max_ref).min(u8::MAX as usize);
                     let mut mlen = MIN_MATCH;
                     while mlen < limit && input[candidate + mlen] == input[pos + mlen] {
                         mlen += 1;

@@ -194,6 +194,14 @@ impl SatisfyEvaluator {
     /// - If all applicable checks are `Denied`, the decision is `Denied`.
     /// - If all checks are `NotApplicable` (or the list is empty), the
     ///   decision is `Allowed`.
+    /// SECURITY NOTE — fail-open on no applicable checks. Both modes return
+    /// `Allowed` when `checks` is empty or every check is `NotApplicable`,
+    /// mirroring Apache's `Satisfy` semantics (no configured requirement ⇒ no
+    /// restriction). This is intentional, but it means a caller that intends to
+    /// GATE access must guarantee at least one applicable (`Allowed`/`Denied`)
+    /// check is present. Handing this an empty / all-`NotApplicable` list when a
+    /// requirement was expected (e.g. a misconfiguration that made every check
+    /// `NotApplicable`) grants access — enforce that invariant upstream, not here.
     pub fn evaluate(mode: SatisfyMode, checks: &[AccessCheck]) -> AccessDecision {
         match mode {
             SatisfyMode::All => Self::evaluate_all(checks),

@@ -103,6 +103,15 @@ impl<T> TimerWheel<T> {
             (num_wheels as u32).saturating_mul(bits_per_wheel) <= 64,
             "num_wheels * bits_per_wheel must be <= 64 (got {num_wheels} * {bits_per_wheel})"
         );
+        // Bound bits_per_wheel on its own too: the product check above still
+        // admits e.g. new(1, 63, ..), and `1usize << 63` slots is a multi-
+        // exabyte allocation (and `1 << bits` is a UB shift for bits >= 64). Cap
+        // per-wheel slots at 2^20 — far above any real wheel (typical wheels use
+        // 6–8 bits) yet safely bounded.
+        assert!(
+            bits_per_wheel <= 20,
+            "bits_per_wheel must be <= 20 (per-wheel slots = 2^bits_per_wheel); got {bits_per_wheel}"
+        );
 
         let slots_per_wheel = 1usize << bits_per_wheel;
         let wheels = (0..num_wheels)

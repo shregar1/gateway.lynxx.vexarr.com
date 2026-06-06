@@ -363,8 +363,32 @@ async fn async_main() -> anyhow::Result<()> {
         }
 
         // --- fluxx exporter (additional, loopback-only) ---
+        // Enforce the loopback-only contract: spans may carry request metadata,
+        // so the fluxx exporter must point at a LOCAL collector. Reject any
+        // non-loopback endpoint (fail closed) rather than silently shipping
+        // telemetry to an arbitrary remote host.
+        fn is_loopback_endpoint(endpoint: &str) -> bool {
+            let after_scheme = endpoint.split("://").nth(1).unwrap_or(endpoint);
+            let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+            // Host part, handling [IPv6]:port and host:port.
+            let host = if let Some(rest) = authority.strip_prefix('[') {
+                rest.split(']').next().unwrap_or(rest)
+            } else {
+                authority.split(':').next().unwrap_or(authority)
+            };
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        }
         if let Some(ref endpoint) = fluxx_endpoint {
-            if let Ok(fluxx_exporter) = opentelemetry_otlp::SpanExporter::builder()
+            if !is_loopback_endpoint(endpoint) {
+                tracing::warn!(
+                    endpoint = %endpoint,
+                    "fluxx telemetry endpoint is not loopback; refusing to enable the loopback-only exporter"
+                );
+            } else if let Ok(fluxx_exporter) = opentelemetry_otlp::SpanExporter::builder()
                 .with_http()
                 .with_endpoint(format!("{endpoint}/v1/traces"))
                 .build()
@@ -576,7 +600,10 @@ async fn async_main() -> anyhow::Result<()> {
         license.active_nodes,
         license.max_nodes,
     );
-    crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
+    crate::license::spawn_license_refresher(
+        license_state.clone(),
+        Some(quota.clone() as std::sync::Arc<dyn utilx::license::QuotaControl>),
+    );
 
     // Register this node with the billing API and start heartbeat.
     if let Err(e) = crate::license::register_node(&license_api_key, &lynxx_base_url).await {

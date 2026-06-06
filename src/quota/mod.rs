@@ -196,50 +196,23 @@ fn reset_per_thread_calls() {
 // Plan tier
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PlanTier {
-    Free,
-    Pro,
-    Business,
-    Enterprise,
+// `PlanTier` (+ `from_str` / `monthly_limit` / `as_str`) now lives in the
+// shared `utilx` crate. Re-exported so `crate::quota::PlanTier` keeps working.
+pub use utilx::license::PlanTier;
+
+/// Maps a billing [`PlanTier`] onto the runtime algorithm
+/// [`Tier`](algorithms::backbone::Tier).
+///
+/// Lives here (not in `utilx`) so the shared crate stays free of any dependency
+/// on the `algorithms` crate. Import this trait wherever `algorithm_tier()` is
+/// called on a `PlanTier`.
+pub trait PlanTierAlgo {
+    /// Free → Starter, Pro → Growth, Business / Enterprise → Pro.
+    fn algorithm_tier(self) -> algorithms::backbone::Tier;
 }
 
-impl PlanTier {
-    pub fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "pro" => PlanTier::Pro,
-            "business" => PlanTier::Business,
-            "enterprise" => PlanTier::Enterprise,
-            _ => PlanTier::Free,
-        }
-    }
-
-    pub fn monthly_limit(self) -> Option<u64> {
-        match self {
-            PlanTier::Free => Some(1_000_000),
-            PlanTier::Pro => Some(10_000_000),
-            PlanTier::Business => Some(100_000_000),
-            PlanTier::Enterprise => None,
-        }
-    }
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            PlanTier::Free => "free",
-            PlanTier::Pro => "pro",
-            PlanTier::Business => "business",
-            PlanTier::Enterprise => "enterprise",
-        }
-    }
-
-    /// Map a billing `PlanTier` onto the runtime algorithm `Tier`.
-    ///
-    /// Free → Starter, Pro → Growth, Business / Enterprise → Pro. The
-    /// algorithms crate has only three performance tiers; Business and
-    /// Enterprise share the top-tier algorithm set and are distinguished
-    /// purely by quota.
-    pub fn algorithm_tier(self) -> algorithms::backbone::Tier {
+impl PlanTierAlgo for PlanTier {
+    fn algorithm_tier(self) -> algorithms::backbone::Tier {
         use algorithms::backbone::Tier;
         match self {
             PlanTier::Free => Tier::Starter,
@@ -342,7 +315,13 @@ impl QuotaTracker {
     }
 
     pub fn set_limit(&self, new_limit: Option<u64>) {
-        let val = new_limit.unwrap_or(0);
+        // Resolve a missing value the same way `load()` does: fall back to the
+        // hardcoded tier limit, NOT 0 (= unlimited). A license/verify refresh
+        // that omits `monthly_call_limit` (contract drift, serde default, or a
+        // backend that doesn't populate it) must never silently DISABLE quota
+        // enforcement for a limited tier. Only Enterprise — whose
+        // `monthly_limit()` is `None` — resolves to 0/unlimited here.
+        let val = new_limit.or_else(|| self.plan.monthly_limit()).unwrap_or(0);
         let old = self.limit.swap(val, Ordering::Relaxed);
         if old != val {
             info!(
@@ -417,7 +396,15 @@ impl QuotaTracker {
                 if n > 0 {
                     batch.set(n - 1);
                 } else {
-                    self.calls.fetch_sub(1, Ordering::Relaxed);
+                    // Saturating: a concurrent period rollover may have reset
+                    // `calls` to 0, and a bare fetch_sub(1) would underflow to
+                    // u64::MAX (rejecting every request for the rest of the
+                    // period).
+                    let _ = self.calls.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |v| if v > 0 { Some(v - 1) } else { None },
+                    );
                 }
             });
             self.rejected.fetch_add(1, Ordering::Relaxed);
@@ -444,7 +431,14 @@ impl QuotaTracker {
         // (>128 threads), fall back to the batched-atomic path.
         let slot_idx = match ensure_thread_slot() {
             Some(idx) => idx,
-            None => return self.check_and_count_batched(),
+            // All MAX_THREAD_SLOTS are taken (host has >128 worker threads). We
+            // must NOT fall back to check_and_count_batched(): under PerThread
+            // `self.calls` is only the period BASELINE, so that path's
+            // `self.calls + batch` total omits every slotted thread's live usage
+            // (aggregate_per_thread_calls()) and lets these overflow threads
+            // under-enforce the quota on >128-core hosts. Use a dedicated
+            // overflow path that enforces against the same total as the slots.
+            None => return self.check_and_count_per_thread_overflow(limit),
         };
 
         // Increment this thread's counter — pure thread-local, no atomic
@@ -487,8 +481,54 @@ impl QuotaTracker {
             self.overage.fetch_add(1, Ordering::Relaxed);
             QuotaResult::Overage
         } else {
-            // Roll back: decrement this thread's slot.
-            PER_THREAD_CALLS[slot_idx].store(my_count - 1, Ordering::Relaxed);
+            // Roll back this thread's increment — but a concurrent period
+            // rollover may have reset our slot to 0 between the increment above
+            // and here. Re-load and skip if so; storing `my_count - 1`
+            // unconditionally would resurrect the pre-rollover count into the
+            // new period. (Only this thread and reset_per_thread_calls() write
+            // this slot, so the live value is either our `my_count` or 0.)
+            let cur = PER_THREAD_CALLS[slot_idx].load(Ordering::Relaxed);
+            if cur > 0 {
+                PER_THREAD_CALLS[slot_idx].store(cur - 1, Ordering::Relaxed);
+            }
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+            QuotaResult::Rejected
+        }
+    }
+
+    /// PerThread overflow path: used when a worker thread cannot get a
+    /// dedicated slot because all `MAX_THREAD_SLOTS` are in use (host has >128
+    /// worker threads). These (rare) threads account through the shared `calls`
+    /// atomic with a real RMW — the cache-line contention PerThread normally
+    /// avoids is irrelevant for the handful of overflow threads — and enforce
+    /// against `calls (baseline + overflow) + live slot sum`, the identical
+    /// total the slotted threads and `flush()`/`snapshot()` compute. This keeps
+    /// enforcement consistent fleet-wide instead of letting overflow threads see
+    /// only a stale partial count (the >128-core under-enforcement bug).
+    fn check_and_count_per_thread_overflow(&self, limit: u64) -> QuotaResult {
+        // Count this request in the shared baseline atomic (also visible to the
+        // slotted threads via `self.calls`).
+        let prev = self.calls.fetch_add(1, Ordering::Relaxed);
+        if limit == 0 {
+            return QuotaResult::Allowed;
+        }
+        // Same check-then-act overshoot bound as the slotted path: up to
+        // ~worker_threads requests may pass concurrently right at the limit —
+        // the accepted accuracy window of the lock-free design.
+        let post_total = (prev + 1) + aggregate_per_thread_calls();
+        if post_total <= limit {
+            QuotaResult::Allowed
+        } else if self.allow_overage.load(Ordering::Relaxed) {
+            self.overage.fetch_add(1, Ordering::Relaxed);
+            QuotaResult::Overage
+        } else {
+            // Roll back our shared increment (saturating against a concurrent
+            // rollover that may have reset `calls` to 0).
+            let _ = self.calls.fetch_update(
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+                |v| if v > 0 { Some(v - 1) } else { None },
+            );
             self.rejected.fetch_add(1, Ordering::Relaxed);
             QuotaResult::Rejected
         }
@@ -622,6 +662,25 @@ pub struct QuotaSnapshot {
     pub calls_limit: Option<u64>,
     pub calls_remaining: Option<u64>,
     pub allow_overage: bool,
+}
+
+/// Bridge the gateway's `QuotaTracker` to utilx's `QuotaControl`, so the shared
+/// licence refresher / usage-reporter can push server-authoritative limits and
+/// read call counts without utilx depending on this crate.
+impl utilx::license::QuotaControl for QuotaTracker {
+    fn set_limit(&self, limit: Option<u64>) {
+        QuotaTracker::set_limit(self, limit);
+    }
+    fn set_allow_overage(&self, allow: bool) {
+        QuotaTracker::set_allow_overage(self, allow);
+    }
+    fn usage_snapshot(&self) -> utilx::license::UsageSnapshot {
+        let snap = self.snapshot();
+        utilx::license::UsageSnapshot {
+            period: snap.period,
+            calls_total: snap.calls_total,
+        }
+    }
 }
 
 fn current_period() -> String {
@@ -1441,8 +1500,15 @@ mod tests {
         tracker.set_limit(Some(200));
         assert_eq!(tracker.limit.load(Ordering::Relaxed), 200);
 
+        // set_limit(None) must FALL BACK to the hardcoded tier limit
+        // (fail-closed), NOT 0 (= unlimited): a license/verify refresh that omits
+        // the limit must never silently disable quota enforcement for a limited
+        // tier. (Regression guard for the fail-open fix.)
         tracker.set_limit(None);
-        assert_eq!(tracker.limit.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            tracker.limit.load(Ordering::Relaxed),
+            PlanTier::Free.monthly_limit().unwrap()
+        );
     }
 
     #[test]

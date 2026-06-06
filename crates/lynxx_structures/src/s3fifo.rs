@@ -116,6 +116,11 @@ enum Location {
 pub struct S3FifoCache<K: Clone + Eq + Hash, V: Clone> {
     small: VecDeque<CacheEntry<K, V>>,
     main: VecDeque<CacheEntry<K, V>>,
+    /// Recently-evicted key *hashes* (not full keys) — the standard space-saving
+    /// ghost-list design. A 64-bit hash collision would cause one spurious
+    /// promotion to `main`; at any realistic cache size the birthday-bound
+    /// probability is negligible, so this is an accepted trade-off vs. storing
+    /// full keys.
     ghost: VecDeque<u64>,
     map: HashMap<K, Location>,
     freq: CountMinSketch,
@@ -201,11 +206,19 @@ impl<K: Clone + Eq + Hash, V: Clone> S3FifoCache<K, V> {
         let is_ghost = self.ghost.contains(&incoming_hash);
 
         if is_ghost {
+            // TinyLFU admission: a ghost hit means this key was recently
+            // evicted. Seed the re-admitted entry's frequency from the Count-Min
+            // Sketch estimate (capped at the freq ceiling of 3) so a genuinely
+            // hot key re-enters `main` with standing and survives more eviction
+            // passes, while a one-hit wonder does not. This is the admission
+            // decision the sketch is maintained for — previously the sketch was
+            // incremented on every access but its estimate was never read.
+            let seed_freq = self.freq.estimate(incoming_hash).min(3) as u8;
             self.main.push_back(CacheEntry {
                 key: key.clone(),
                 value,
                 weight,
-                freq: 0,
+                freq: seed_freq,
             });
             self.map.insert(key, Location::Main);
         } else {

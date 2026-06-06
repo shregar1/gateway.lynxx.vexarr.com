@@ -643,7 +643,19 @@ impl RateLimiter {
 
     fn check_token_bucket(&self, key: &str, now: Instant) -> RateLimitResult {
         let burst = self.config.token_burst;
-        let rate = self.config.token_rate;
+        // A non-finite or non-positive token_rate (operator misconfig) would
+        // feed inf/NaN/negative into Duration::from_secs_f64 in the Deny branch
+        // — a panic that, under `panic = "abort"`, kills the whole process — and
+        // a NaN rate would also corrupt the refill below into an always-allow
+        // bypass. Collapse it to 0.0 ("never refill" → deny after the burst).
+        let rate = {
+            let r = self.config.token_rate;
+            if r.is_finite() && r > 0.0 {
+                r
+            } else {
+                0.0
+            }
+        };
 
         let mut shard = self.table.get_or_create(key, now, |entry| {
             entry.tokens = burst as f64; // Start with full bucket.
@@ -664,9 +676,16 @@ impl RateLimiter {
                 limit: burst,
             }
         } else {
-            let wait = (1.0 - entry.tokens) / rate;
+            // rate is sanitized above; guard the division and the f64→Duration
+            // conversion so a misconfig can never panic. 1h fallback is advisory.
+            let retry_after = if rate > 0.0 {
+                Duration::try_from_secs_f64((1.0 - entry.tokens) / rate)
+                    .unwrap_or_else(|_| Duration::from_secs(3600))
+            } else {
+                Duration::from_secs(3600)
+            };
             RateLimitResult::Deny {
-                retry_after: Duration::from_secs_f64(wait),
+                retry_after,
                 limit: burst,
             }
         }
@@ -758,7 +777,16 @@ impl RateLimiter {
     // ── Leaky bucket ──
 
     fn check_leaky_bucket(&self, key: &str, now: Instant) -> RateLimitResult {
-        let rate = self.config.leak_rate;
+        // See check_token_bucket: sanitize leak_rate so a non-finite/non-positive
+        // config can't panic in Duration::from_secs_f64 (fatal under panic="abort").
+        let rate = {
+            let r = self.config.leak_rate;
+            if r.is_finite() && r > 0.0 {
+                r
+            } else {
+                0.0
+            }
+        };
         let capacity = self.config.leak_capacity;
 
         let mut shard = self.table.get_or_create(key, now, |_| {});
@@ -778,15 +806,26 @@ impl RateLimiter {
                 limit: capacity,
             }
         } else {
-            let wait = (entry.leak_level - capacity as f64 + 1.0) / rate;
+            let retry_after = if rate > 0.0 {
+                Duration::try_from_secs_f64((entry.leak_level - capacity as f64 + 1.0) / rate)
+                    .unwrap_or_else(|_| Duration::from_secs(3600))
+            } else {
+                Duration::from_secs(3600)
+            };
             RateLimitResult::Deny {
-                retry_after: Duration::from_secs_f64(wait),
+                retry_after,
                 limit: capacity,
             }
         }
     }
 
     // ── Counter operations (HAProxy stick-table stores) ──
+    //
+    // NOTE: these counter / TTL-expiry / peer-replication entry points are the
+    // stick-table API surface and are NOT yet consumed by the live rate-limit
+    // plugin, which relies solely on LRU eviction of the table. They are kept
+    // for the forthcoming stick-table wiring; re-audit reachability before any
+    // is exposed on the request hot path.
 
     /// Record a request for a key (increments `http_req_cnt`).
     pub fn record_request(&self, key: &str) {

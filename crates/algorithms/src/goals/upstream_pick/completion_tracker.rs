@@ -33,7 +33,11 @@ impl CompletionTracker {
 
     /// Signal that a request on endpoint `idx` completed.
     pub fn complete(&self, idx: usize, success: bool) {
-        self.in_flight[idx].fetch_sub(1, Ordering::Relaxed);
+        // Saturating: an unbalanced completion must not underflow in_flight to
+        // u64::MAX.
+        let _ = self.in_flight[idx].fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
         if success {
             self.successes[idx].fetch_add(1, Ordering::Relaxed);
         } else {

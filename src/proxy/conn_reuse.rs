@@ -224,8 +224,16 @@ impl ResponseValidator {
                     return ReuseDecision::Reuse;
                 }
 
-                // Must have Content-Length or Transfer-Encoding: chunked
-                // to know the response body boundary.
+                // A response carrying BOTH Content-Length and Transfer-Encoding
+                // has ambiguous framing (a classic request-smuggling vector):
+                // per RFC 7230 §3.3.3 the two disagree on the body boundary.
+                // Never reuse such a connection — close it.
+                if has_content_length(response_headers) && has_chunked_encoding(response_headers) {
+                    return ReuseDecision::Close;
+                }
+
+                // Otherwise must have exactly one of Content-Length or
+                // Transfer-Encoding: chunked to know the response body boundary.
                 if has_content_length(response_headers)
                     || has_chunked_encoding(response_headers)
                 {
@@ -354,7 +362,10 @@ fn has_connection_close(headers: &HeaderMap) -> bool {
     headers
         .get("connection")
         .and_then(|v| v.to_str().ok())
-        .map(|v| v.eq_ignore_ascii_case("close"))
+        // Connection is a comma-separated list of tokens (e.g.
+        // "keep-alive, close"); match the `close` token anywhere in the list,
+        // not just an exact whole-value equality.
+        .map(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case("close")))
         .unwrap_or(false)
 }
 
