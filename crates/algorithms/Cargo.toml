@@ -5,7 +5,10 @@ edition = "2021"
 publish = false
 
 [dependencies]
-lynxx-algo = { path = "/Users/shreyansh/Downloads/nginx-master/nginx-algo" }
+# Vendored in-tree at crates/lynxx-algo (was an absolute ~/Downloads path:
+# unpinned, not in version control, not CI/Docker-buildable, and a build-time
+# code-execution surface outside the repo).
+lynxx-algo = { path = "../lynxx-algo" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

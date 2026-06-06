@@ -4,6 +4,7 @@ members = [
     "bench",
     "crates/algorithms",
     "crates/algorithms/fuzz",
+    "crates/lynxx-algo",
     "crates/lynxx_structures",
 ]
 
@@ -85,7 +86,12 @@ algorithms = { path = "crates/algorithms" }
 # PlanTier→runtime Tier mapping stays local (quota::PlanTierAlgo) so utilx has
 # no algorithms dependency. The `[patch]` at the bottom of this file redirects
 # to a local checkout for dev builds; drop it (or omit in CI) to build from git.
-utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", features = ["license", "net"] }
+# Pinned to an immutable rev so Cargo.lock records a verifiable git source: CI /
+# release builds (where the [patch] below is omitted) resolve EXACTLY this commit
+# instead of a mutable default-branch HEAD that a force-push could swap. This is
+# the licensing/auth trust anchor — bump the rev deliberately when adopting new
+# utilx changes.
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", rev = "8eb34bfbb1ab7b3d9892a12dc411d1f12e4a113a", features = ["license", "net"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }
