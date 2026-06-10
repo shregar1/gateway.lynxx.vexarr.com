@@ -235,8 +235,15 @@ impl RouteTable {
         let services = repo.list_services().await?;
         let routes = repo.list_routes().await?;
 
-        self.services.clear();
-        self.routes.clear();
+        // Upsert-then-prune instead of clear-then-fill: clearing first leaves
+        // the route table momentarily EMPTY mid-reload, 404-ing live traffic
+        // during a FullSync. Insert/overwrite all current entries (the map is a
+        // superset during this window, never empty), then drop only the ids
+        // that no longer exist.
+        let new_service_ids: std::collections::HashSet<Uuid> =
+            services.iter().map(|s| s.id).collect();
+        let new_route_ids: std::collections::HashSet<Uuid> =
+            routes.iter().map(|r| r.id).collect();
 
         for svc in &services {
             self.services.insert(svc.id, Arc::new(svc.clone()));
@@ -244,6 +251,9 @@ impl RouteTable {
         for route in routes.iter() {
             self.routes.insert(route.id, Arc::new(route.clone()));
         }
+        self.services.retain(|id, _| new_service_ids.contains(id));
+        self.routes.retain(|id, _| new_route_ids.contains(id));
+
         self.rebuild_exact_index();
         self.rebuild_host_index();
         self.rebuild_regex_cache();

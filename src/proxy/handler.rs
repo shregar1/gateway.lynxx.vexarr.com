@@ -1206,13 +1206,10 @@ pub async fn proxy_handler(
                         && attempt + 1 < max_attempts
                     {
                         last_err = format!("upstream returned {}", r.status());
-                        if !state.minimal_telemetry {
-                            metrics::counter!(
-                                "lynxx_upstream_retries_total",
-                                "service" => svc_name.clone(),
-                            )
-                            .increment(1);
-                        }
+                        // Do NOT increment lynxx_upstream_retries_total here:
+                        // the retry is counted once at the top of the next loop
+                        // iteration (the `attempt > 0` arm). Incrementing in
+                        // both places double-counted every status-based retry.
                         continue;
                     }
                     upstream_resp = Some(r);
