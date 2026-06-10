@@ -80,23 +80,20 @@ impl Plugin for BasicAuthPlugin {
             .as_ref()
             .ok_or_else(|| PluginError::Internal("basic-auth: no repository".into()))?;
 
-        let consumers = repo
-            .list_consumers()
+        // Indexed lookup via the shared short-TTL consumer cache, then verify
+        // the password — avoids scanning the whole consumers table per request.
+        let consumer = crate::plugins::consumer_cache::by_username(repo, username)
             .await
-            .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?;
-
-        let matched = consumers.into_iter().find(|c| {
-            if c.username != username {
-                return false;
-            }
-            // Priority 1: Argon2id password hash
-            if let Some(ref hash) = c.password_hash {
-                return Self::verify_argon2(hash, password);
-            }
-            // Priority 2: legacy api_key comparison
-            c.api_key.as_deref() == Some(password)
-        });
-        let consumer = matched.ok_or_else(Self::unauthorized)?;
+            .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?
+            .filter(|c| {
+                // Priority 1: Argon2id password hash; priority 2: legacy api_key.
+                if let Some(ref hash) = c.password_hash {
+                    Self::verify_argon2(hash, password)
+                } else {
+                    c.api_key.as_deref() == Some(password)
+                }
+            })
+            .ok_or_else(Self::unauthorized)?;
 
         if let Ok(v) = HeaderValue::from_str(&consumer.username) {
             req.headers_mut().insert("x-consumer-username", v);

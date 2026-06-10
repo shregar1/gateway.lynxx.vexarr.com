@@ -141,7 +141,17 @@ async fn time_travel_capture_list_replay_delete() {
 
     let admin_base = format!("http://127.0.0.1:{admin_port}");
     let proxy_base = format!("http://127.0.0.1:{proxy_port}");
-    let http = reqwest::Client::new();
+    // Admin API now requires auth by default; authenticate with the master
+    // license key the gateway was launched with (LYNXX_API_KEY=lnx_dev_pro).
+    let mut admin_headers = reqwest::header::HeaderMap::new();
+    admin_headers.insert(
+        reqwest::header::AUTHORIZATION,
+        "Bearer lnx_dev_pro".parse().unwrap(),
+    );
+    let http = reqwest::Client::builder()
+        .default_headers(admin_headers)
+        .build()
+        .expect("client");
 
     // 3. Service + route — point at wiremock.
     let svc: Value = http

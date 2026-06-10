@@ -399,6 +399,11 @@ async fn async_main() -> anyhow::Result<()> {
                 from_cache = lic.from_cache,
                 "licence verified"
             );
+            if let Some(days) = lic.days_remaining() {
+                if days <= 14 {
+                    tracing::warn!(days_remaining = days, "licence expires soon — renew to avoid downtime");
+                }
+            }
             config.gateway.plan_tier = lic.tier.as_str().to_string();
             lic
         }
@@ -544,6 +549,7 @@ async fn async_main() -> anyhow::Result<()> {
         plan_tier,
         license.active_nodes,
         license.max_nodes,
+        license.expires_at,
     );
     crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
 

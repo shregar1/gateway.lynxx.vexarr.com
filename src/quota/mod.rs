@@ -135,11 +135,10 @@ impl QuotaTracker {
         repo: Arc<dyn Repository>,
     ) -> Result<Arc<Self>, GatewayError> {
         let period = current_period();
-        let (calls, rejected) = repo
+        let (calls, rejected, overage) = repo
             .get_quota_usage(&period)
             .await?
-            .map(|(c, r)| (c, r))
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0));
 
         let allow_overage = matches!(plan, PlanTier::Pro | PlanTier::Business);
         let effective_limit = server_limit.or_else(|| plan.monthly_limit()).unwrap_or(0);
@@ -150,7 +149,7 @@ impl QuotaTracker {
             period: std::sync::Mutex::new(period.clone()),
             calls: AtomicU64::new(calls),
             rejected: AtomicU64::new(rejected),
-            overage: AtomicU64::new(0),
+            overage: AtomicU64::new(overage),
             allow_overage: AtomicBool::new(allow_overage),
             repo,
         });
@@ -271,7 +270,12 @@ impl QuotaTracker {
         let period = self.period.lock().expect("period mutex").clone();
         let calls = self.calls.load(Ordering::Relaxed);
         let rejected = self.rejected.load(Ordering::Relaxed);
-        if let Err(e) = self.repo.upsert_quota_usage(&period, calls, rejected).await {
+        let overage = self.overage.load(Ordering::Relaxed);
+        if let Err(e) = self
+            .repo
+            .upsert_quota_usage(&period, calls, rejected, overage)
+            .await
+        {
             warn!(error = %e, "quota flush failed");
         }
     }

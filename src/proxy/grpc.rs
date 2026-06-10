@@ -35,6 +35,15 @@ pub fn build_grpc_tls_client() -> GrpcTlsClient {
         .build(https)
 }
 
+/// Process-global HTTPS gRPC client. The TLS config (webpki roots) is static,
+/// so the client — and crucially its connection pool — is built once and
+/// reused. Previously every HTTPS gRPC request built a fresh client, which
+/// meant a brand-new TLS handshake + connection per call (no pooling).
+fn grpc_tls_client() -> &'static GrpcTlsClient {
+    static GRPC_TLS_CLIENT: std::sync::OnceLock<GrpcTlsClient> = std::sync::OnceLock::new();
+    GRPC_TLS_CLIENT.get_or_init(build_grpc_tls_client)
+}
+
 /// Forwards a gRPC request (HTTP/2 + trailers + streaming) to the upstream
 /// without buffering the body. TLS upstreams are out of scope for v1.
 pub async fn handle_grpc(
@@ -55,8 +64,8 @@ pub async fn handle_grpc(
             s
         }
         "https" => {
-            // For HTTPS gRPC, use the TLS-capable client.
-            let tls_client = build_grpc_tls_client();
+            // For HTTPS gRPC, use the shared TLS-capable client (pooled).
+            let tls_client = grpc_tls_client();
             let uri: Uri = upstream_url
                 .parse()
                 .map_err(|e| GatewayError::BadRequest(format!("invalid upstream uri: {e}")))?;

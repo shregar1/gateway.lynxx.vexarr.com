@@ -228,11 +228,10 @@ impl Plugin for HmacAuthPlugin {
         // x-consumer-* headers). In local mode it's mandatory — the
         // consumer's api_key IS the HMAC secret.
         let consumer = if let Some(repo) = self.repo.as_ref() {
-            repo.list_consumers()
+            // Indexed lookup via the shared short-TTL consumer cache.
+            crate::plugins::consumer_cache::by_username(repo, username)
                 .await
                 .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?
-                .into_iter()
-                .find(|c| &c.username == username)
         } else {
             None
         };
@@ -310,10 +309,18 @@ impl Plugin for HmacAuthPlugin {
             }
         }
 
+        // Set the downstream identity from the VERIFIED signer. `username`
+        // was authenticated by the signature check above (remote or local
+        // mode), so it is authoritative even when no local consumer row
+        // exists (the common case in keyx/remote mode). Ingress has already
+        // stripped any client-supplied `x-consumer-*` headers, so this is the
+        // only identity downstream ACL / rate-limit / logging plugins see —
+        // closing the spoofing gap where remote mode previously left the
+        // client's own headers in place.
+        if let Ok(v) = HeaderValue::from_str(username.as_str()) {
+            req.headers_mut().insert("x-consumer-username", v);
+        }
         if let Some(c) = consumer.as_ref() {
-            if let Ok(v) = HeaderValue::from_str(&c.username) {
-                req.headers_mut().insert("x-consumer-username", v);
-            }
             if let Ok(v) = HeaderValue::from_str(&c.id.to_string()) {
                 req.headers_mut().insert("x-consumer-id", v);
             }

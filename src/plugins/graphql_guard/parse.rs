@@ -1,10 +1,12 @@
 //! AST walks: depth, alias count, complexity score, operation summary.
 //!
-//! We deliberately ignore fragments for complexity multiplication in v1 — a
-//! query that re-uses a fragment N times is scored once per inline expansion
-//! site, but the recursive walk does not chase named-fragment definitions.
-//! This is simpler and conservative enough for DoS protection; v2 may add
-//! fragment-aware scoring once we have a real customer asking for it.
+//! Named-fragment spreads ARE resolved: the walk chases each `...Frag`
+//! into its definition and scores/measures its selection set inline at the
+//! spread site. Without this, depth and complexity limits are trivially
+//! bypassed by hiding an expensive or deeply-nested selection inside a
+//! fragment (the spread itself looks like a single cheap field). Fragment
+//! cycles — which are spec-invalid but can be crafted by an attacker to blow
+//! the stack — are broken via a per-path "visiting" set.
 
 use std::collections::{HashMap, HashSet};
 
@@ -40,9 +42,9 @@ pub fn analyze<'q>(
     let doc: Document<'q, String> =
         graphql_parser::parse_query::<String>(query).map_err(|e| e.to_string())?;
 
-    // Pre-collect named fragments so we *could* resolve them — currently
-    // unused but laid out for v2.
-    let _fragments: HashMap<String, &SelectionSet<'q, String>> = doc
+    // Named fragments, resolved during the walk so spreads are scored and
+    // measured as if expanded inline.
+    let fragments: HashMap<String, &SelectionSet<'q, String>> = doc
         .definitions
         .iter()
         .filter_map(|d| {
@@ -110,7 +112,8 @@ pub fn analyze<'q>(
 
     // The walk computes max depth, alias count, total complexity, and a
     // global set of every field referenced (used by per-field rate limits).
-    let depth = walk(selection_set, cfg, 1, &mut summary);
+    let mut visiting: HashSet<String> = HashSet::new();
+    let depth = walk(selection_set, cfg, 1, &mut summary, &fragments, &mut visiting);
     summary.depth = depth;
 
     Ok(summary)
@@ -126,6 +129,8 @@ fn walk<'q>(
     cfg: &GraphqlGuardConfig,
     depth: usize,
     summary: &mut QuerySummary,
+    fragments: &HashMap<String, &SelectionSet<'q, String>>,
+    visiting: &mut HashSet<String>,
 ) -> usize {
     let mut max_depth = depth;
 
@@ -149,7 +154,14 @@ fn walk<'q>(
                 let sub_depth = if field.selection_set.items.is_empty() {
                     depth
                 } else {
-                    walk(&field.selection_set, cfg, depth + 1, &mut sub_summary)
+                    walk(
+                        &field.selection_set,
+                        cfg,
+                        depth + 1,
+                        &mut sub_summary,
+                        fragments,
+                        visiting,
+                    )
                 };
                 if sub_depth > max_depth {
                     max_depth = sub_depth;
@@ -168,17 +180,37 @@ fn walk<'q>(
                 summary.complexity = summary.complexity.saturating_add(scaled);
             }
             Selection::InlineFragment(frag) => {
-                let sub_depth = walk(&frag.selection_set, cfg, depth, summary);
+                let sub_depth =
+                    walk(&frag.selection_set, cfg, depth, summary, fragments, visiting);
                 if sub_depth > max_depth {
                     max_depth = sub_depth;
                 }
             }
-            Selection::FragmentSpread(_) => {
-                // v1: fragment spreads are charged the default field cost
-                // each (so a query fanning out via 50 fragment spreads still
-                // moves the needle on the complexity meter) but we don't
-                // chase the definition. See module docs for v2 plan.
-                summary.complexity = summary.complexity.saturating_add(cfg.default_field_cost);
+            Selection::FragmentSpread(spread) => {
+                // Resolve the named fragment and score its selection set
+                // inline at the spread site (same depth, like an inline
+                // fragment). This is what stops depth/complexity limits from
+                // being bypassed by hiding the payload in a fragment.
+                let name = &spread.fragment_name;
+                if visiting.contains(name) {
+                    // Fragment cycle (spec-invalid). Stop descending to avoid
+                    // unbounded recursion; charge a token cost and move on.
+                    summary.complexity =
+                        summary.complexity.saturating_add(cfg.default_field_cost);
+                    continue;
+                }
+                if let Some(frag_set) = fragments.get(name) {
+                    visiting.insert(name.clone());
+                    let sub_depth = walk(frag_set, cfg, depth, summary, fragments, visiting);
+                    visiting.remove(name);
+                    if sub_depth > max_depth {
+                        max_depth = sub_depth;
+                    }
+                } else {
+                    // Spread of an undefined fragment — charge default cost.
+                    summary.complexity =
+                        summary.complexity.saturating_add(cfg.default_field_cost);
+                }
             }
         }
     }
@@ -252,6 +284,36 @@ mod tests {
     fn list_multiplier_capped_at_100() {
         let s = analyze("{ posts(first: 1000) { id } }", &cfg(), None).unwrap();
         assert_eq!(s.complexity, (3 + 1) * 100);
+    }
+
+    #[test]
+    fn fragment_spread_depth_is_counted() {
+        // Without fragment resolution this query looks shallow (depth ~2);
+        // expanding `F` must reveal the true nesting.
+        let q = "{ a { ...F } } fragment F on T { b { c { d } } }";
+        let s = analyze(q, &cfg(), None).unwrap();
+        // { a } =1, ...F at depth 2 -> b=2, c=3, d=4
+        assert_eq!(s.depth, 4, "fragment contents must contribute to depth");
+    }
+
+    #[test]
+    fn fragment_spread_complexity_is_counted() {
+        // The spread must be charged the cost of the fragment's fields, not
+        // just a single default cost.
+        let q = "{ root { ...Costly } } fragment Costly on T { users { id } posts { id } }";
+        let s = analyze(q, &cfg(), None).unwrap();
+        // root(1) + [users(5)+id(1) + posts(3)+id(1)] = 1 + 10 = 11
+        assert_eq!(s.complexity, 11);
+    }
+
+    #[test]
+    fn fragment_cycle_terminates() {
+        // Spec-invalid self-referential fragments must not hang the walk.
+        let q = "{ ...A } fragment A on T { x ...B } fragment B on T { y ...A }";
+        let s = analyze(q, &cfg(), None).unwrap();
+        // Just assert it returns; field names should include x and y.
+        assert!(s.all_field_names.contains("x"));
+        assert!(s.all_field_names.contains("y"));
     }
 
     #[test]

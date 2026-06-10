@@ -259,6 +259,13 @@ fn deterministic_uuid(seed: &str, kind: &str) -> Uuid {
 
 async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>) {
     for d in discovered {
+        if !crate::discovery::is_safe_upstream_url(&d.url) {
+            tracing::warn!(
+                provider = "redis_kv", service = %d.name, url = %d.url,
+                "skipping discovered service: unsafe upstream url (SSRF guard)"
+            );
+            continue;
+        }
         let service_id = deterministic_uuid(&d.key, "service");
         let route_id = deterministic_uuid(&d.key, "route");
         let now = Utc::now();

@@ -38,11 +38,19 @@ enum KeyStrategy {
     MethodPathQuery,
 }
 
+/// Default ceiling on cached entries. The cache is process-global, so without
+/// a bound a stream of unique URLs would grow it until OOM.
+const DEFAULT_MAX_ENTRIES: usize = 10_000;
+/// Default per-response body ceiling; larger bodies are not cached.
+const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+
 pub struct ProxyCachePlugin {
     ttl: Duration,
     cache_methods: Vec<String>,
     cache_status: Vec<u16>,
     key_strategy: KeyStrategy,
+    max_entries: usize,
+    max_body_bytes: usize,
     cache: Arc<CacheMap>,
 }
 
@@ -79,11 +87,26 @@ impl ProxyCachePlugin {
             _ => KeyStrategy::Uri,
         };
 
+        let max_entries = cfg
+            .get("max_entries")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MAX_ENTRIES);
+        let max_body_bytes = cfg
+            .get("max_body_bytes")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+
         Ok(Self {
             ttl: Duration::from_secs(ttl),
             cache_methods,
             cache_status,
             key_strategy,
+            max_entries,
+            max_body_bytes,
             cache: cache().clone(),
         })
     }
@@ -133,6 +156,12 @@ impl Plugin for ProxyCachePlugin {
                 None
             }
         });
+        if hit.is_none() {
+            // Proactively remove a stale entry so it can't linger forever for
+            // a key that is never re-requested with a fresh value.
+            self.cache
+                .remove_if(&key, |_, e| e.expires_at <= now);
+        }
 
         if let Some(entry) = hit {
             let mut headers = entry.headers.clone();
@@ -207,6 +236,32 @@ impl Plugin for ProxyCachePlugin {
             .map_err(|e| PluginError::Internal(format!("body collect: {e}")))?
             .to_bytes();
         let bytes_vec = collected.to_vec();
+
+        // Don't cache oversized bodies.
+        if bytes_vec.len() > self.max_body_bytes {
+            *resp.body_mut() = Body::from(bytes_vec);
+            resp.headers_mut()
+                .insert("x-cache", axum::http::HeaderValue::from_static("MISS"));
+            return Ok(());
+        }
+
+        // Bound the global cache. When at capacity, first sweep expired
+        // entries; if still full of live entries, skip caching this one rather
+        // than letting the map grow without limit.
+        if self.cache.len() >= self.max_entries {
+            let now = Instant::now();
+            self.cache.retain(|_, e| e.expires_at > now);
+            if self.cache.len() >= self.max_entries {
+                tracing::debug!(
+                    entries = self.cache.len(),
+                    "proxy-cache at capacity; skipping insert"
+                );
+                *resp.body_mut() = Body::from(bytes_vec);
+                resp.headers_mut()
+                    .insert("x-cache", axum::http::HeaderValue::from_static("MISS"));
+                return Ok(());
+            }
+        }
 
         self.cache.insert(
             key,

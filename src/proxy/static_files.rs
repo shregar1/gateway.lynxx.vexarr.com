@@ -16,17 +16,15 @@ fn hashed_re() -> &'static regex::Regex {
 }
 
 /// Default patterns for files that should be hidden from static serving.
-const DEFAULT_HIDDEN: &[&str] = &[
-    ".git",
-    ".env",
-    ".DS_Store",
-    ".htaccess",
-    ".htpasswd",
-    "Thumbs.db",
-    "desktop.ini",
-    ".svn",
-    ".hg",
-];
+/// Non-dotfile names that should never be served from a static root.
+/// Dotfiles/dot-directories are hidden generically (see `is_hidden_path`), so
+/// this list only needs the sensitive names that don't start with `.`.
+const DEFAULT_HIDDEN: &[&str] = &["Thumbs.db", "desktop.ini"];
+
+/// Dot-prefixed path segments that ARE allowed to be served, despite the
+/// blanket dotfile hide. `/.well-known/` carries ACME http-01 challenges and
+/// `security.txt`, so it must stay reachable.
+const DOT_ALLOWLIST: &[&str] = &[".well-known"];
 
 fn mime_for_ext(ext: &str) -> &'static str {
     match ext {
@@ -321,22 +319,48 @@ fn safe_resolve(root: &Path, request_path: &str) -> Option<PathBuf> {
     {
         return None;
     }
+    // Symlink containment: the lexical checks above only catch `..` — a
+    // symlink *inside* `root` pointing at `/etc/passwd` (or anywhere outside)
+    // would otherwise be served. If the target exists, resolve it (following
+    // symlinks) and require it to stay within the canonicalised root. Paths
+    // that don't exist (404s, SPA fallback) canonicalise-fail and fall through
+    // to the lexical candidate, which downstream handles as not-found.
+    if let Ok(real) = std::fs::canonicalize(&candidate) {
+        let real_root = std::fs::canonicalize(root).ok()?;
+        if !real.starts_with(&real_root) {
+            return None;
+        }
+        return Some(real);
+    }
     Some(candidate)
 }
 
-/// Check if a path component is hidden (dotfiles, .env, .git, etc.).
+/// Check if any path segment is hidden (dotfiles, sensitive names, or a
+/// user-configured pattern).
 fn is_hidden_path(request_path: &str, extra_hide: &[String]) -> bool {
     for segment in request_path.split('/') {
         if segment.is_empty() {
             continue;
         }
-        // Check default hidden patterns.
+        // Hide EVERY dotfile / dot-directory by default — `.env`, `.git`,
+        // `.aws`, `.ssh`, `.npmrc`, `.git-credentials`, etc. The previous
+        // fixed 9-name list silently served everything it didn't enumerate.
+        // `.well-known` is allow-listed (ACME / security.txt). `.`/`..` are
+        // left to `safe_resolve` (traversal → 403, not a hidden-file 404).
+        if segment.starts_with('.')
+            && segment != "."
+            && segment != ".."
+            && !DOT_ALLOWLIST.contains(&segment)
+        {
+            return true;
+        }
+        // Non-dotfile sensitive names.
         for pattern in DEFAULT_HIDDEN {
-            if segment == *pattern || segment.starts_with(&format!("{pattern}/")) {
+            if segment == *pattern {
                 return true;
             }
         }
-        // Check user-configured patterns.
+        // User-configured patterns.
         for pattern in extra_hide {
             if segment == pattern.as_str() {
                 return true;
@@ -1208,6 +1232,31 @@ mod tests {
         assert!(!is_hidden_path("/index.html", &[]));
         assert!(!is_hidden_path("/assets/app.js", &[]));
         assert!(is_hidden_path("/secret", &["secret".to_string()]));
+        // Arbitrary sensitive dotfiles must be hidden by default now.
+        assert!(is_hidden_path("/.aws/credentials", &[]));
+        assert!(is_hidden_path("/.ssh/id_rsa", &[]));
+        assert!(is_hidden_path("/.npmrc", &[]));
+        assert!(is_hidden_path("/sub/.git-credentials", &[]));
+        // …but the ACME / security.txt directory stays reachable.
+        assert!(!is_hidden_path("/.well-known/acme-challenge/tok", &[]));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn safe_resolve_blocks_symlink_escape() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("secret.txt");
+        std::fs::write(&secret, b"top secret").unwrap();
+        // A symlink inside the doc root pointing outside it.
+        let link = root.path().join("escape");
+        symlink(&secret, &link).unwrap();
+        // Lexically clean, but resolves outside root → must be rejected.
+        assert!(safe_resolve(root.path(), "/escape").is_none());
+        // A normal file inside the root still resolves.
+        std::fs::write(root.path().join("ok.txt"), b"hi").unwrap();
+        assert!(safe_resolve(root.path(), "/ok.txt").is_some());
     }
 
     #[test]

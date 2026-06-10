@@ -1090,17 +1090,19 @@ impl Repository for SqliteRepository {
 
     // ---------- quota ----------
 
-    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
-        let row =
-            sqlx::query("SELECT calls_total, calls_rejected FROM quota_usage WHERE period = ?")
-                .bind(period)
-                .fetch_optional(&self.pool)
-                .await?;
+    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64, u64)>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT calls_total, calls_rejected, calls_overage FROM quota_usage WHERE period = ?",
+        )
+        .bind(period)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| {
             let calls: i64 = r.get(0);
             let rejected: i64 = r.get(1);
-            (calls.max(0) as u64, rejected.max(0) as u64)
+            let overage: i64 = r.get(2);
+            (calls.max(0) as u64, rejected.max(0) as u64, overage.max(0) as u64)
         }))
     }
 
@@ -1109,18 +1111,21 @@ impl Repository for SqliteRepository {
         period: &str,
         calls_total: u64,
         calls_rejected: u64,
+        calls_overage: u64,
     ) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO quota_usage (period, calls_total, calls_rejected, updated_at) \
-             VALUES (?, ?, ?, ?) \
+            "INSERT INTO quota_usage (period, calls_total, calls_rejected, calls_overage, updated_at) \
+             VALUES (?, ?, ?, ?, ?) \
              ON CONFLICT(period) DO UPDATE SET \
                calls_total    = excluded.calls_total, \
                calls_rejected = excluded.calls_rejected, \
+               calls_overage  = excluded.calls_overage, \
                updated_at     = excluded.updated_at",
         )
         .bind(period)
         .bind(calls_total as i64)
         .bind(calls_rejected as i64)
+        .bind(calls_overage as i64)
         .bind(Utc::now().to_rfc3339())
         .execute(&self.pool)
         .await?;

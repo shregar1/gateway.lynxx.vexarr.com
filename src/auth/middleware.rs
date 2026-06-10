@@ -3,8 +3,12 @@
 //! Two layers compose:
 //!   * [`extract_token`]: looks up the bearer token, attaches an
 //!     `Option<AdminToken>` to request extensions, and 401s on bad tokens.
-//!     If the DB has zero tokens we are in *bootstrap mode* and the request
-//!     is allowed through without an actor (matches Kong's first-run UX).
+//!     When `auth_required` is false (NOT the default), a request with no
+//!     Authorization header is allowed through with `CurrentActor(None)` —
+//!     an explicit "no admin auth" mode for trusted isolated networks. The
+//!     default is `auth_required = true`; first-run setup still works because
+//!     the Lynxx license API key is accepted as a master admin credential
+//!     (see [`resolve_actor`]).
 //!   * [`require_role`]: per-route guard that 403s if the actor's role is
 //!     below the route's minimum.
 

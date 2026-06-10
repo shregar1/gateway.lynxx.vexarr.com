@@ -294,6 +294,7 @@ CREATE TABLE quota_usage (
   period         TEXT    NOT NULL UNIQUE, -- e.g. "2026-05"
   calls_total    INTEGER NOT NULL DEFAULT 0,
   calls_rejected INTEGER NOT NULL DEFAULT 0,
+  calls_overage  INTEGER NOT NULL DEFAULT 0, -- billable paid-tier overage
   updated_at     TEXT    NOT NULL
 );
 

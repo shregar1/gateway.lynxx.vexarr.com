@@ -291,7 +291,7 @@ impl Plugin for LlmGatewayPlugin {
         let dispatch_chain = self.router.dispatch_order(&primary);
 
         // -- Cache lookup ----------------------------------------------
-        let cache_key = self.cache.key(&model, &json);
+        let cache_key = self.cache.key(&consumer, &model, &json);
         if !stream_requested {
             if let Some(hit) = self.cache.get(&cache_key) {
                 metrics::counter!(

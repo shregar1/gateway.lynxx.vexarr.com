@@ -154,11 +154,20 @@ impl RouteTable {
     }
 
     /// Find the best matching route within a specific service.
+    ///
+    /// Enforces the SAME host/header/query-param constraints as
+    /// [`Self::match_route_full`]. The subdomain fast path must not become a
+    /// way to select a route while skipping its `hosts` / `headers` /
+    /// `query_params` gating — otherwise a route intended to apply only when a
+    /// header or query value is present would match unconditionally.
     pub fn match_route_for_service(
         &self,
         service_id: &Uuid,
         path: &str,
         method: &str,
+        host: Option<&str>,
+        req_headers: Option<&axum::http::HeaderMap>,
+        query_string: Option<&str>,
     ) -> Option<Arc<Route>> {
         for entry in self.routes.iter() {
             let route = entry.value();
@@ -171,6 +180,17 @@ impl RouteTable {
             let method_matches =
                 route.methods.is_empty() || route.methods.iter().any(|m| m == method);
             if !method_matches {
+                continue;
+            }
+            let host_matches = route.hosts.is_empty()
+                || host.is_some_and(|h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+            if !host_matches {
+                continue;
+            }
+            if !route.headers.is_empty() && !match_headers(&route.headers, req_headers) {
+                continue;
+            }
+            if !route.query_params.is_empty() && !match_query(&route.query_params, query_string) {
                 continue;
             }
             return Some(Arc::clone(route));

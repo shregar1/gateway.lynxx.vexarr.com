@@ -1,0 +1,14 @@
+# cargo-audit configuration. Keep in sync with deny.toml's [advisories].ignore.
+#
+# The wasmtime 27.x advisories (14, incl. two CRITICAL sandbox escapes
+# RUSTSEC-2026-0095/0096) were FIXED by upgrading to wasmtime 36.x and are
+# intentionally NOT ignored.
+[advisories]
+ignore = [
+  # rsa 0.9 Marvin timing side-channel — no upstream fix available yet.
+  # Transitive (sqlx-mysql); not on an attacker-timed RSA key path.
+  "RUSTSEC-2023-0071",
+  # hickory-proto O(n²) DNS-encoding CPU DoS — fix needs hickory-resolver
+  # 0.24 -> 0.26 (breaking resolver API). Tracked as a separate follow-up.
+  "RUSTSEC-2026-0119",
+]

@@ -22,14 +22,19 @@
 //! `OFFLINE_GRACE_DAYS` provided the api-key hash matches.
 
 use chrono::{DateTime, Utc};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::env;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration as StdDuration;
 
 use crate::integrations::abstraction::{LicenseInfo, LicenseVerifier, VerifierError};
 use crate::quota::PlanTier;
 use std::sync::Arc;
+
+type HmacSha256 = Hmac<Sha256>;
 
 const OFFLINE_GRACE_DAYS: i64 = 7;
 /// How often the running gateway re-validates the api key against keyx.
@@ -58,6 +63,8 @@ pub enum LicenseError {
     Offline(String),
     #[error("cached licence expired (no successful verify in {0} days)")]
     StaleCache(i64),
+    #[error("licence has expired (expired at {0})")]
+    Expired(DateTime<Utc>),
     #[error("licence response malformed: {0}")]
     Malformed(String),
 }
@@ -77,6 +84,54 @@ struct CacheEntry {
     monthly_call_limit: Option<u64>,
     #[serde(default)]
     allow_overage: bool,
+    /// Keyed-MAC over the canonical form of the fields above. Binds the
+    /// cache to this api key + machine so a copied or hand-edited cache is
+    /// rejected. NOTE: this raises the bar against casual tampering but is
+    /// NOT a substitute for a server-issued signature — the key holder can
+    /// in principle recompute it. TODO: verify an ed25519 signature minted by
+    /// the billing server (the gateway already depends on ed25519-dalek).
+    #[serde(default)]
+    mac: String,
+}
+
+impl CacheEntry {
+    /// Canonical bytes the MAC is computed over (everything except `mac`).
+    fn mac_payload(&self) -> Vec<u8> {
+        // Field order is fixed, so this is deterministic.
+        format!(
+            "{}|{}|{}|{:?}|{}|{:?}|{:?}|{:?}|{}",
+            self.api_key_hash,
+            self.customer_id,
+            self.tier,
+            self.expires_at,
+            self.verified_at,
+            self.max_nodes,
+            self.active_nodes,
+            self.monthly_call_limit,
+            self.allow_overage,
+        )
+        .into_bytes()
+    }
+}
+
+/// Per-install MAC key for the offline cache. Derived from the api key and
+/// the machine instance id so the cache is non-portable. Not exported.
+fn cache_mac_key(api_key: &str) -> Vec<u8> {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(b"lynxx-license-cache-mac-v1\x00");
+    h.update(api_key.as_bytes());
+    h.update(b"\x00");
+    h.update(compute_instance_id(api_key).as_bytes());
+    h.finalize().to_vec()
+}
+
+fn compute_cache_mac(api_key: &str, entry: &CacheEntry) -> String {
+    let mut mac = HmacSha256::new_from_slice(&cache_mac_key(api_key))
+        .expect("hmac accepts any key length");
+    mac.update(&entry.mac_payload());
+    let bytes = mac.finalize().into_bytes();
+    hex::encode(bytes)
 }
 
 impl License {
@@ -89,24 +144,43 @@ impl License {
         if key.is_empty() {
             return Err(LicenseError::Missing);
         }
-        let cache_id = key_fingerprint(key);
 
         match verifier.validate_license(key).await {
             Ok(info) => {
                 let lic = License::from_info(&info, false);
-                let _ = write_cache(&cache_id, &info);
+                lic.enforce_not_expired()?;
+                let _ = write_cache(key, &info);
                 Ok(lic)
             }
             Err(VerifierError::Rejected(e)) => Err(LicenseError::Rejected(e)),
             Err(VerifierError::Transport(e)) | Err(VerifierError::Http { body: e, .. }) => {
-                match read_cache(&cache_id)? {
-                    Some(entry) => License::from_cache_entry(entry),
+                match read_cache(key)? {
+                    Some(entry) => {
+                        let lic = License::from_cache_entry(entry)?;
+                        // The cached licence's own expiry is still enforced —
+                        // a stale offline cache cannot outlive the server-set
+                        // expiry even within the offline grace window.
+                        lic.enforce_not_expired()?;
+                        Ok(lic)
+                    }
                     None => Err(LicenseError::Offline(e)),
                 }
             }
             Err(VerifierError::Malformed(e)) => Err(LicenseError::Malformed(e)),
             Err(VerifierError::NotConfigured) => Err(LicenseError::Missing),
         }
+    }
+
+    /// Reject a licence whose server-set expiry has already passed. Called at
+    /// load time; the running gateway keeps enforcing it via
+    /// [`LicenseState::is_active`].
+    fn enforce_not_expired(&self) -> Result<(), LicenseError> {
+        if let Some(exp) = self.expires_at {
+            if Utc::now() >= exp {
+                return Err(LicenseError::Expired(exp));
+            }
+        }
+        Ok(())
     }
 
     fn from_info(info: &LicenseInfo, from_cache: bool) -> Self {
@@ -167,6 +241,10 @@ struct LicenseStateInner {
     active: std::sync::atomic::AtomicBool,
     tier: std::sync::RwLock<PlanTier>,
     node_counts: std::sync::RwLock<(u32, Option<u32>)>,
+    /// Server-set expiry as a unix timestamp; `0` means perpetual. Folded
+    /// into [`LicenseState::is_active`] so an expired licence trips the same
+    /// kill-switch as a revoked one, continuously (not just at boot).
+    expires_at: AtomicI64,
 }
 
 #[derive(Clone)]
@@ -185,6 +263,7 @@ impl LicenseState {
         tier: PlanTier,
         active_nodes: u32,
         max_nodes: Option<u32>,
+        expires_at: Option<DateTime<Utc>>,
     ) -> Self {
         Self {
             inner: std::sync::Arc::new(LicenseStateInner {
@@ -192,14 +271,39 @@ impl LicenseState {
                 active: std::sync::atomic::AtomicBool::new(true),
                 tier: std::sync::RwLock::new(tier),
                 node_counts: std::sync::RwLock::new((active_nodes, max_nodes)),
+                expires_at: AtomicI64::new(expires_at.map(|e| e.timestamp()).unwrap_or(0)),
             }),
         }
     }
 
-    /// Cheap check used in the proxy hot path. `false` only after the
-    /// re-verifier sees a `Rejected` from the backend.
+    /// Cheap check used in the proxy hot path. `false` after the re-verifier
+    /// sees a `Rejected` (revocation) OR once the licence's expiry passes.
     pub fn is_active(&self) -> bool {
-        self.inner.active.load(std::sync::atomic::Ordering::Relaxed)
+        if !self.inner.active.load(Ordering::Relaxed) {
+            return false;
+        }
+        !self.is_expired()
+    }
+
+    /// True once the server-set expiry has passed. Perpetual licences
+    /// (`expires_at == 0`) never expire.
+    pub fn is_expired(&self) -> bool {
+        let exp = self.inner.expires_at.load(Ordering::Relaxed);
+        exp != 0 && Utc::now().timestamp() >= exp
+    }
+
+    /// Refresh the live tier / node caps / expiry from a fresh verify
+    /// response so an upgrade or renewal takes effect without a restart.
+    fn apply_refresh(&self, info: &LicenseInfo) {
+        if let Ok(mut t) = self.inner.tier.write() {
+            *t = PlanTier::from_str(&info.tier);
+        }
+        if let Ok(mut nc) = self.inner.node_counts.write() {
+            *nc = (info.active_nodes, info.max_nodes);
+        }
+        self.inner
+            .expires_at
+            .store(info.expires_at.unwrap_or(0), Ordering::Relaxed);
     }
 
     /// Always `"verified"` now — api-key-only mode has no unverified
@@ -254,7 +358,11 @@ pub fn spawn_license_refresher(
         loop {
             interval.tick().await;
             match refresh.verifier.validate_license(&refresh.api_key).await {
-                Ok(_) => tracing::debug!("licence re-verify ok"),
+                Ok(info) => {
+                    // Pick up tier upgrades / renewals (new expiry) live.
+                    state.apply_refresh(&info);
+                    tracing::debug!("licence re-verify ok");
+                }
                 Err(VerifierError::Rejected(e)) => state.flip_inactive(&e),
                 Err(e) => {
                     tracing::warn!(error = %e, "licence re-verify failed; keeping current state")
@@ -300,12 +408,12 @@ fn key_fingerprint(api_key: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
-fn write_cache(api_key_hash: &str, info: &LicenseInfo) -> Result<(), std::io::Error> {
+fn write_cache(api_key: &str, info: &LicenseInfo) -> Result<(), std::io::Error> {
     let Some(path) = cache_path() else {
         return Ok(());
     };
-    let entry = CacheEntry {
-        api_key_hash: api_key_hash.to_string(),
+    let mut entry = CacheEntry {
+        api_key_hash: key_fingerprint(api_key),
         customer_id: info.customer_urn.clone(),
         tier: info.tier.clone(),
         expires_at: info.expires_at,
@@ -314,12 +422,14 @@ fn write_cache(api_key_hash: &str, info: &LicenseInfo) -> Result<(), std::io::Er
         active_nodes: Some(info.active_nodes),
         monthly_call_limit: info.monthly_call_limit,
         allow_overage: info.allow_overage,
+        mac: String::new(),
     };
+    entry.mac = compute_cache_mac(api_key, &entry);
     let body = serde_json::to_vec_pretty(&entry).unwrap();
     std::fs::write(path, body)
 }
 
-fn read_cache(api_key_hash: &str) -> Result<Option<CacheEntry>, LicenseError> {
+fn read_cache(api_key: &str) -> Result<Option<CacheEntry>, LicenseError> {
     let Some(path) = cache_path() else {
         return Ok(None);
     };
@@ -330,10 +440,38 @@ fn read_cache(api_key_hash: &str) -> Result<Option<CacheEntry>, LicenseError> {
         std::fs::read(&path).map_err(|e| LicenseError::Offline(format!("cache read: {e}")))?;
     let entry: CacheEntry = serde_json::from_slice(&body)
         .map_err(|e| LicenseError::Malformed(format!("cache parse: {e}")))?;
-    if entry.api_key_hash != api_key_hash {
+    if entry.api_key_hash != key_fingerprint(api_key) {
+        return Ok(None);
+    }
+    // Integrity: a cache whose MAC doesn't verify was hand-edited or copied
+    // from another install (the MAC is bound to this api key + machine).
+    // Treat it as no usable cache rather than trusting forged tier/expiry.
+    let expected = compute_cache_mac(api_key, &entry);
+    if !constant_time_eq(entry.mac.as_bytes(), expected.as_bytes()) {
+        tracing::warn!("offline licence cache failed integrity check — ignoring");
+        return Ok(None);
+    }
+    // Clock-rollback: a `verified_at` in the future means the wall clock was
+    // moved backwards to stretch the offline grace window. Refuse it.
+    if Utc::now().timestamp() < entry.verified_at {
+        tracing::warn!(
+            "offline licence cache verified_at is in the future — clock rollback suspected; ignoring"
+        );
         return Ok(None);
     }
     Ok(Some(entry))
+}
+
+/// Length-checked constant-time byte comparison for the cache MAC.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn gethostname() -> String {
@@ -370,9 +508,46 @@ mod tests {
             }
         }
         let v: Arc<dyn LicenseVerifier> = Arc::new(AlwaysOk);
-        let s = LicenseState::new(v, "k".into(), PlanTier::Pro, 0, None);
+        let s = LicenseState::new(v, "k".into(), PlanTier::Pro, 0, None, None);
         assert_eq!(s.mode(), "verified");
         assert!(s.is_active());
+    }
+
+    #[test]
+    fn license_state_inactive_once_expired() {
+        struct AlwaysOk;
+        #[async_trait]
+        impl LicenseVerifier for AlwaysOk {
+            async fn validate_license(&self, _: &str) -> Result<LicenseInfo, VerifierError> {
+                unreachable!()
+            }
+        }
+        let v: Arc<dyn LicenseVerifier> = Arc::new(AlwaysOk);
+        let past = Utc::now() - chrono::Duration::hours(1);
+        let s = LicenseState::new(v, "k".into(), PlanTier::Pro, 0, None, Some(past));
+        assert!(s.is_expired());
+        assert!(!s.is_active(), "an expired licence must not be active");
+    }
+
+    #[tokio::test]
+    async fn load_rejects_expired_license() {
+        struct ExpiredOk;
+        #[async_trait]
+        impl LicenseVerifier for ExpiredOk {
+            async fn validate_license(&self, _: &str) -> Result<LicenseInfo, VerifierError> {
+                Ok(LicenseInfo {
+                    customer_urn: "cus_x".into(),
+                    tier: "pro".into(),
+                    expires_at: Some((Utc::now() - chrono::Duration::days(1)).timestamp()),
+                    max_nodes: None,
+                    active_nodes: 0,
+                    monthly_call_limit: None,
+                    allow_overage: false,
+                })
+            }
+        }
+        let err = License::load("lnx_live_x", &ExpiredOk).await.unwrap_err();
+        assert!(matches!(err, LicenseError::Expired(_)));
     }
 
     #[tokio::test]

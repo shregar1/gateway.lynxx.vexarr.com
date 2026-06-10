@@ -132,11 +132,19 @@ pub struct GatewaySettings {
     #[serde(default = "default_prewarm_concurrency")]
     pub prewarm_concurrency: usize,
 
-    /// When true, admin API requests must always present a valid token
-    /// (no bootstrap mode). Defaults to false: bootstrap mode is allowed
-    /// while `admin_tokens` is empty, and auth turns on automatically as
-    /// soon as any token exists.
-    #[serde(default)]
+    /// When true (the default), admin API requests must present a valid
+    /// token. The Lynxx license API key always works as a master admin
+    /// credential (see `auth::middleware::resolve_actor`), so this does not
+    /// block first-run setup — the operator authenticates with the same key
+    /// they already have from their account dashboard.
+    ///
+    /// This MUST default to true: the admin port binds `0.0.0.0` by default,
+    /// and an earlier "bootstrap mode" that left the admin surface open until
+    /// a token existed was never actually wired up (no code counted tokens
+    /// or flipped the flag), so it amounted to an unauthenticated admin
+    /// plane on every default deployment. Set to `false` only on a trusted,
+    /// isolated network where you explicitly want no admin auth.
+    #[serde(default = "default_true")]
     pub auth_required: bool,
 
     /// When true, the proxy's per-request telemetry (prometheus counter +
@@ -1161,7 +1169,7 @@ fn default_gateway() -> GatewaySettings {
         max_header_size: default_max_header_size(),
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
-        auth_required: false,
+        auth_required: true,
         minimal_telemetry: false,
         stream_response_body: default_stream_response_body(),
         recordings_directory: None,

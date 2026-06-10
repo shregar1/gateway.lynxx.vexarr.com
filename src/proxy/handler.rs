@@ -336,6 +336,27 @@ pub async fn proxy_handler(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, GatewayError> {
     let start = Instant::now();
+
+    // SECURITY: strip any client-supplied identity headers at the very edge,
+    // before routing or any plugin runs. Downstream ACL, per-consumer rate
+    // limiting, anomaly detection, LLM tenant cache keys, and access logs all
+    // trust `x-consumer-*` as the authenticated identity — but auth plugins
+    // (key-auth / basic-auth / hmac-auth) are the ONLY components allowed to
+    // set them. Anything the caller sends is forged and must be removed here,
+    // otherwise an unauthenticated client could impersonate any consumer just
+    // by adding `x-consumer-username: <victim>`.
+    {
+        let forged: Vec<HeaderName> = req
+            .headers()
+            .keys()
+            .filter(|n| n.as_str().starts_with("x-consumer-"))
+            .cloned()
+            .collect();
+        for name in forged {
+            req.headers_mut().remove(&name);
+        }
+    }
+
     // Clone the `Uri` once at the top so `path` / `query_string` can be
     // borrowed `&str` for the rest of the function without holding an
     // immutable borrow on `req` (which is mutated downstream). Internally
@@ -371,7 +392,14 @@ pub async fn proxy_handler(
         let svc = state.route_table.match_by_host(h)?;
         let route = state
             .route_table
-            .match_route_for_service(&svc.id, path, method)
+            .match_route_for_service(
+                &svc.id,
+                path,
+                method,
+                Some(h),
+                Some(req.headers()),
+                query_string,
+            )
             .unwrap_or_else(|| std::sync::Arc::new(crate::models::Route::passthrough(svc.id)));
         Some((route, svc))
     });
