@@ -92,7 +92,10 @@ async fn run_once(
 
         let pool = pool.clone();
         let svc_name = svc.name.clone();
-        let svc_clone = svc.clone();
+        // `svc` is owned by this loop iteration and not used after this point,
+        // so MOVE it into the task rather than cloning the whole Service a
+        // second time (list_services already handed us an owned copy).
+        let svc_clone = svc;
         let permit_owner = sem.clone();
 
         joinset.spawn(async move {
