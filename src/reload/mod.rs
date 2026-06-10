@@ -77,17 +77,36 @@ pub fn spawn_reloader(
     let (tx, mut rx) = mpsc::channel::<Trigger>(8);
 
     tokio::spawn(async move {
+        use futures_util::FutureExt;
         while let Some(resp) = rx.recv().await {
             tracing::info!(path = %config_path, "config reload starting");
-            let result = run_reload(
+            // Isolate each reload behind catch_unwind: a panic in run_reload
+            // would otherwise unwind this task entirely, dropping the receiver
+            // and permanently disabling ALL future config reloads until the
+            // process restarts. Surfacing it as an error result keeps the
+            // reloader alive for the next trigger.
+            let result = match std::panic::AssertUnwindSafe(run_reload(
                 &config_path,
                 &repo,
                 &route_table,
                 &health,
                 &lb,
                 &plugin_exec,
-            )
-            .await;
+            ))
+            .catch_unwind()
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::error!(
+                        "config reload panicked; reloader stays alive for future triggers"
+                    );
+                    ReloadResult {
+                        errors: vec!["config reload panicked".to_string()],
+                        ..Default::default()
+                    }
+                }
+            };
             tracing::info!(?result, "config reload complete");
             if result.errors.is_empty() {
                 if let Err(e) = bus.publish(ChangeEvent::FullSync { origin: node_id }).await {

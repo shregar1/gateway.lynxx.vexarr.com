@@ -422,8 +422,13 @@ impl RouteTable {
 
             let has_hosts = !route.hosts.is_empty();
             if has_hosts && !best_has_hosts {
-                best = Some((Arc::clone(route), self.get_service(&route.service_id)?));
-                best_has_hosts = true;
+                // Use `if let`, NOT `?`: a single route whose service row is
+                // missing must skip that route, not abort the entire scan and
+                // 404 the request when another valid route could still match.
+                if let Some(service) = self.get_service(&route.service_id) {
+                    best = Some((Arc::clone(route), service));
+                    best_has_hosts = true;
+                }
             } else if best.is_none() {
                 if let Some(service) = self.get_service(&route.service_id) {
                     best = Some((Arc::clone(route), service));
