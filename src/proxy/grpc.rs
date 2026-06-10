@@ -148,7 +148,8 @@ pub async fn handle_grpc_web(
     // If it's grpc-web-text, we must decode the base64 body before forwarding
     // as standard application/grpc.
     if is_text {
-        let bytes = axum::body::to_bytes(req.into_body(), 10 * 1024 * 1024)
+        let (mut parts, body) = req.into_parts();
+        let bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
             .await
             .map_err(|e| {
                 GatewayError::BadRequest(format!("failed to buffer grpc-web-text body: {e}"))
@@ -157,12 +158,18 @@ pub async fn handle_grpc_web(
             .map_err(|e| {
                 GatewayError::BadRequest(format!("invalid base64 in grpc-web-text: {e}"))
             })?;
-        req = Request::builder()
-            .method(axum::http::Method::POST)
-            .uri(upstream_url.clone())
-            .header(axum::http::header::CONTENT_TYPE, "application/grpc")
-            .body(Body::from(decoded))
-            .map_err(|e| GatewayError::BadRequest(format!("grpc-web rebuild: {e}")))?;
+        // Preserve the client's headers (Authorization, gRPC metadata, etc.).
+        // Rebuilding the request from scratch previously DROPPED every client
+        // header, breaking auth and metadata propagation to the upstream. Only
+        // override what the grpc-web→grpc translation actually changes.
+        parts.method = axum::http::Method::POST;
+        parts.headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/grpc"),
+        );
+        // Body length changed (base64-decoded); let it be recomputed.
+        parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+        req = Request::from_parts(parts, Body::from(decoded));
     } else {
         // Just change content-type to application/grpc for the upstream.
         req.headers_mut().insert(

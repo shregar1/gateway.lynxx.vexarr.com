@@ -284,6 +284,23 @@ impl QuotaTracker {
         let now = current_period();
         let mut period = self.period.lock().expect("period mutex");
         if *period != now {
+            // Persist the CLOSING period's final counts before zeroing them,
+            // so the last up-to-flush-interval of activity isn't discarded at
+            // the month boundary (the periodic flush() may not have run since).
+            let closing = period.clone();
+            let calls = self.calls.load(Ordering::Relaxed);
+            let rejected = self.rejected.load(Ordering::Relaxed);
+            let overage = self.overage.load(Ordering::Relaxed);
+            let repo = self.repo.clone();
+            tokio::spawn(async move {
+                if let Err(e) = repo
+                    .upsert_quota_usage(&closing, calls, rejected, overage)
+                    .await
+                {
+                    warn!(error = %e, period = %closing, "failed to flush closing quota period at rollover");
+                }
+            });
+
             info!(old = %period, new = %now, "quota period rollover — resetting counters");
             *period = now;
             self.calls.store(0, Ordering::Relaxed);

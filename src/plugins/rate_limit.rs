@@ -37,6 +37,10 @@ impl TokenBucket {
     }
 }
 
+/// Above this many tracked clients we sweep idle (fully-refilled) buckets so a
+/// flood of distinct client keys can't grow the map without bound.
+const MAX_BUCKETS: usize = 100_000;
+
 pub struct RateLimitPlugin {
     buckets: DashMap<String, TokenBucket>,
     requests_per_second: f64,
@@ -60,6 +64,19 @@ impl RateLimitPlugin {
         Ok(Self::new(rps))
     }
 
+    /// Drop fully-refilled (idle) buckets. A bucket that has refilled back to
+    /// capacity carries no state — recreating it on the next request yields an
+    /// identical full bucket — so evicting it is semantically free and bounds
+    /// memory to the set of currently-active clients.
+    fn evict_idle(&self) {
+        let now = Instant::now();
+        self.buckets.retain(|_, b| {
+            let elapsed = now.duration_since(b.last_refill).as_secs_f64();
+            let refilled = (b.tokens + elapsed * b.refill_rate).min(b.capacity);
+            refilled < b.capacity
+        });
+    }
+
     fn get_client_id(req: &Request<axum::body::Body>) -> String {
         req.headers()
             .get("x-forwarded-for")
@@ -81,6 +98,11 @@ impl Plugin for RateLimitPlugin {
 
     async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         let client_id = Self::get_client_id(req);
+        // Bound memory: sweep idle buckets when the map gets large (e.g. a
+        // flood of spoofed/unique client keys).
+        if self.buckets.len() > MAX_BUCKETS {
+            self.evict_idle();
+        }
         let mut bucket = self
             .buckets
             .entry(client_id)
