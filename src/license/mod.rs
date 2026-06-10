@@ -245,6 +245,11 @@ struct LicenseStateInner {
     /// into [`LicenseState::is_active`] so an expired licence trips the same
     /// kill-switch as a revoked one, continuously (not just at boot).
     expires_at: AtomicI64,
+    /// Unix timestamp of the last SUCCESSFUL keyx verification. The
+    /// re-verifier flips the kill-switch once this falls outside the offline
+    /// grace window, so persistently blocking gateway→keyx traffic can no
+    /// longer keep a revoked licence alive indefinitely.
+    last_verified_at: AtomicI64,
 }
 
 #[derive(Clone)]
@@ -272,6 +277,7 @@ impl LicenseState {
                 tier: std::sync::RwLock::new(tier),
                 node_counts: std::sync::RwLock::new((active_nodes, max_nodes)),
                 expires_at: AtomicI64::new(expires_at.map(|e| e.timestamp()).unwrap_or(0)),
+                last_verified_at: AtomicI64::new(Utc::now().timestamp()),
             }),
         }
     }
@@ -304,6 +310,16 @@ impl LicenseState {
         self.inner
             .expires_at
             .store(info.expires_at.unwrap_or(0), Ordering::Relaxed);
+        self.inner
+            .last_verified_at
+            .store(Utc::now().timestamp(), Ordering::Relaxed);
+    }
+
+    /// True once we've gone longer than the offline grace window without a
+    /// successful keyx verification.
+    fn offline_grace_exceeded(&self) -> bool {
+        let last = self.inner.last_verified_at.load(Ordering::Relaxed);
+        Utc::now().timestamp() - last > OFFLINE_GRACE_DAYS * 86_400
     }
 
     /// Always `"verified"` now — api-key-only mode has no unverified
@@ -365,7 +381,18 @@ pub fn spawn_license_refresher(
                 }
                 Err(VerifierError::Rejected(e)) => state.flip_inactive(&e),
                 Err(e) => {
-                    tracing::warn!(error = %e, "licence re-verify failed; keeping current state")
+                    // Network/transport failure. Tolerate it WITHIN the offline
+                    // grace window, but fail closed once we've gone that long
+                    // with no successful verify — otherwise an attacker who can
+                    // block gateway→keyx traffic keeps a revoked licence alive
+                    // forever, defeating the kill-switch.
+                    if state.offline_grace_exceeded() {
+                        state.flip_inactive(&format!(
+                            "no successful licence verify in {OFFLINE_GRACE_DAYS} days ({e})"
+                        ));
+                    } else {
+                        tracing::warn!(error = %e, "licence re-verify failed; within offline grace, keeping current state");
+                    }
                 }
             }
         }

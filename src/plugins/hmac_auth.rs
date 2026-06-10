@@ -34,6 +34,10 @@ pub struct HmacAuthPlugin {
     algorithms: Vec<String>,
     clock_skew: i64,
     validate_body: bool,
+    /// Require `date` to be among the signed headers. Default true: otherwise
+    /// a client can simply omit `date` from the signing set and the clock-skew
+    /// check never runs, making every signed request infinitely replayable.
+    require_signed_date: bool,
     remote: Option<RemoteBackend>,
 }
 
@@ -70,6 +74,10 @@ impl HmacAuthPlugin {
             .get("validate_request_body")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        let require_signed_date = cfg
+            .get("require_signed_date")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         let remote = build_remote_backend(cfg, ctx)?;
 
         Ok(Self {
@@ -77,6 +85,7 @@ impl HmacAuthPlugin {
             algorithms,
             clock_skew,
             validate_body,
+            require_signed_date,
             remote,
         })
     }
@@ -201,11 +210,21 @@ impl Plugin for HmacAuthPlugin {
             .decode(provided_sig)
             .map_err(|_| unauthorized("signature not valid base64"))?;
 
-        // Clock-skew check on Date if present in the signed list.
-        if signed_headers
+        // Replay protection is mandatory by default: `date` must be signed so
+        // the clock-skew check below actually runs. Without this a client could
+        // omit `date` from the signed set and replay a captured signature
+        // forever.
+        let date_signed = signed_headers
             .iter()
-            .any(|h| h.eq_ignore_ascii_case("date"))
-        {
+            .any(|h| h.eq_ignore_ascii_case("date"));
+        if self.require_signed_date && !date_signed {
+            return Err(unauthorized(
+                "`date` must be among the signed headers (replay protection)",
+            ));
+        }
+
+        // Clock-skew check on Date if present in the signed list.
+        if date_signed {
             let date_raw = req
                 .headers()
                 .get("date")

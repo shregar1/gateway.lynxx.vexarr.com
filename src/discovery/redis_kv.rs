@@ -193,7 +193,27 @@ async fn poll_keys(
     conn: &mut ConnectionManager,
 ) -> Result<Vec<DiscoveredService>, Box<dyn std::error::Error + Send + Sync>> {
     let pattern = format!("{}*", config.prefix);
-    let keys: Vec<String> = redis::cmd("KEYS").arg(&pattern).query_async(conn).await?;
+    // Use cursor-based SCAN, not KEYS: KEYS does an O(N) sweep over the entire
+    // keyspace and blocks the single-threaded Redis server for every other
+    // client for the duration — a well-known production footgun. SCAN yields
+    // in bounded COUNT-sized batches without blocking.
+    let mut keys: Vec<String> = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(256)
+            .query_async(conn)
+            .await?;
+        keys.extend(batch);
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
 
     let mut discovered: Vec<DiscoveredService> = Vec::new();
 
