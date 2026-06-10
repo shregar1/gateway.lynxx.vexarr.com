@@ -190,6 +190,12 @@ fn parse_tick_string(input: &str) -> Result<(String, &str)> {
 
 /// Maximum bytes we peek at to find the SNI extension in a TLS ClientHello.
 const MAX_PEEK: usize = 16384;
+/// Max time to wait for a TLS ClientHello before giving up on the SNI peek —
+/// bounds slowloris clients that connect but never send.
+const SNI_PEEK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Cap on concurrent L4 connections this listener services at once, to bound
+/// FD / task usage under a connection flood.
+const MAX_TCP_CONNECTIONS: usize = 8192;
 
 /// Peek at the beginning of a TLS stream and try to extract the SNI hostname
 /// from the ClientHello. Returns `None` for non-TLS connections, plaintext
@@ -199,7 +205,12 @@ const MAX_PEEK: usize = 16384;
 /// handshake can proceed normally when forwarded to the upstream.
 async fn peek_sni(stream: &TcpStream) -> Result<Option<String>> {
     let mut buf = vec![0u8; MAX_PEEK];
-    let n = stream.peek(&mut buf).await?;
+    // Bound the wait for the ClientHello: a slowloris client that connects but
+    // never sends would otherwise hang this task (and hold the FD) forever.
+    let n = match tokio::time::timeout(SNI_PEEK_TIMEOUT, stream.peek(&mut buf)).await {
+        Ok(r) => r?,
+        Err(_) => return Ok(None),
+    };
     if n < 5 {
         return Ok(None);
     }
@@ -423,10 +434,23 @@ async fn handle_tcp_conn(
 pub async fn serve_tcp(addr: SocketAddr, router: Arc<TcpRouter>) -> Result<()> {
     let listener = TcpListener::bind(addr).await?;
     tracing::info!(%addr, "tcp proxy listening");
+    let conn_limit = Arc::new(tokio::sync::Semaphore::new(MAX_TCP_CONNECTIONS));
     loop {
         let (stream, peer) = listener.accept().await?;
+        // Bound concurrent connections: under a connection flood / slowloris,
+        // drop the new connection rather than spawning unboundedly until we run
+        // out of file descriptors or memory.
+        let permit = match conn_limit.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(%peer, "tcp proxy at connection cap; dropping connection");
+                drop(stream);
+                continue;
+            }
+        };
         let router = router.clone();
         tokio::spawn(async move {
+            let _permit = permit; // released when the connection task ends
             if let Err(e) = handle_tcp_conn(stream, peer, &router).await {
                 tracing::debug!(error = %e, "tcp proxy connection error");
             }
