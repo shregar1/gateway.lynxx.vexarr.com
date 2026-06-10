@@ -250,11 +250,19 @@ async fn run_once(
     }
 
     // Drop entries for services that no longer exist.
+    //
+    // Re-read the CURRENT service set: `current_ids` was snapshotted at the top
+    // of the tick, but the probe loop above awaits one HTTP probe per service
+    // and can run for seconds. A service added (via admin API / reload) during
+    // that window is absent from `current_ids` and would be wrongly removed as
+    // "stale" immediately after being registered. Only treat an entry as stale
+    // if it's missing from BOTH the tick snapshot and the live set.
+    let live_ids: HashSet<_> = route_table.list_services().iter().map(|s| s.id).collect();
     let stale: Vec<_> = registry
         .list()
         .into_iter()
         .map(|h| h.service_id)
-        .filter(|id| !current_ids.contains(id))
+        .filter(|id| !current_ids.contains(id) && !live_ids.contains(id))
         .collect();
 
     for id in stale {
