@@ -225,30 +225,41 @@ impl Plugin for RequestTransformerPlugin {
 
     async fn on_request(&self, req: &mut Request<axum::body::Body>) -> Result<(), PluginError> {
         // Expand placeholders in add/replace header values before applying.
-        let expanded_add: Vec<(HeaderName, HeaderValue)> = self
-            .add
-            .iter()
-            .filter_map(|(n, v)| {
+        // Skip the whole block — two Vec allocations + HeaderName clones — when
+        // no header transforms are configured (the common case). And within a
+        // configured value, skip the expand+rebuild when it has no placeholder.
+        if !self.add.is_empty() || !self.replace.is_empty() || !self.remove.is_empty() {
+            // `req` is passed in (not captured) so no immutable borrow is held
+            // across the `req.headers_mut()` mutable borrow below.
+            fn expand_one(
+                n: &HeaderName,
+                v: &HeaderValue,
+                req: &Request<axum::body::Body>,
+            ) -> Option<(HeaderName, HeaderValue)> {
                 let raw = v.to_str().ok()?;
+                if !raw.contains('{') {
+                    return Some((n.clone(), v.clone()));
+                }
                 let expanded = expand_placeholders(raw, req);
                 Some((n.clone(), HeaderValue::from_str(&expanded).ok()?))
-            })
-            .collect();
-        let expanded_replace: Vec<(HeaderName, HeaderValue)> = self
-            .replace
-            .iter()
-            .filter_map(|(n, v)| {
-                let raw = v.to_str().ok()?;
-                let expanded = expand_placeholders(raw, req);
-                Some((n.clone(), HeaderValue::from_str(&expanded).ok()?))
-            })
-            .collect();
-        apply_transforms(
-            req.headers_mut(),
-            &expanded_add,
-            &self.remove,
-            &expanded_replace,
-        );
+            }
+            let expanded_add: Vec<(HeaderName, HeaderValue)> = self
+                .add
+                .iter()
+                .filter_map(|(n, v)| expand_one(n, v, req))
+                .collect();
+            let expanded_replace: Vec<(HeaderName, HeaderValue)> = self
+                .replace
+                .iter()
+                .filter_map(|(n, v)| expand_one(n, v, req))
+                .collect();
+            apply_transforms(
+                req.headers_mut(),
+                &expanded_add,
+                &self.remove,
+                &expanded_replace,
+            );
+        }
 
         // --- body transforms ---
         if !self.has_body_transforms() || !is_json_content_type(req.headers()) {
