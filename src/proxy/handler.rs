@@ -1163,8 +1163,17 @@ pub async fn proxy_handler(
 
     if max_attempts <= 1 && !force_buffer {
         let upstream_req = Request::from_parts(parts, body);
+        let upstream_start = Instant::now();
         match client.request(upstream_req).await {
-            Ok(r) => upstream_resp = Some(r),
+            Ok(r) => {
+                // Feed the EWMA that the LeastTime LB strategy depends on. This
+                // was never recorded on the request path, so LeastTime silently
+                // degraded to least-connections.
+                if let Some(ref ts) = picked {
+                    ts.record_response_time(upstream_start.elapsed().as_micros() as u64);
+                }
+                upstream_resp = Some(r);
+            }
             Err(e) => {
                 let kind = if e.is_connect() { "connect" } else { "other" };
                 if !state.minimal_telemetry {
@@ -1198,6 +1207,7 @@ pub async fn proxy_handler(
 
             let retry_body = Body::from(body_bytes.clone());
             let upstream_req = Request::from_parts(parts.clone(), retry_body);
+            let upstream_start = Instant::now();
             match client.request(upstream_req).await {
                 Ok(r) => {
                     // Check if we should retry based on status code.
@@ -1211,6 +1221,12 @@ pub async fn proxy_handler(
                         // iteration (the `attempt > 0` arm). Incrementing in
                         // both places double-counted every status-based retry.
                         continue;
+                    }
+                    // Accepted response — record the upstream latency for the
+                    // LeastTime LB EWMA. (All attempts in this loop hit the same
+                    // picked target, so `picked` is the serving target.)
+                    if let Some(ref ts) = picked {
+                        ts.record_response_time(upstream_start.elapsed().as_micros() as u64);
                     }
                     upstream_resp = Some(r);
                     break;
@@ -1296,12 +1312,17 @@ pub async fn proxy_handler(
                         "deploy-aware retry"
                     );
 
+                    let upstream_start = Instant::now();
                     match client.request(retry_req).await {
                         Ok(r) => {
                             if r.status().as_u16() == 502 {
                                 last_err = "deploy retry: upstream 502".to_string();
                                 continue;
                             }
+                            // Record latency on the target that actually served.
+                            retry_ts.record_response_time(
+                                upstream_start.elapsed().as_micros() as u64,
+                            );
                             upstream_resp = Some(r);
                             picked_target_id = Some(retry_ts.target.id);
                             target_label = retry_ts.target.url.clone();
