@@ -206,7 +206,11 @@ async fn resolve_actor(
     // Fast path: the Lynxx license API key is always a valid master admin
     // credential. Customers can use the same key they got from their account
     // dashboard at lynxx.vexarr.com — no separate token creation needed.
-    if !state.license_api_key.is_empty() && raw == state.license_api_key {
+    // Constant-time compare so the master key can't be recovered byte-by-byte
+    // via response timing.
+    if !state.license_api_key.is_empty()
+        && crate::utilities::constant_time_eq(raw.as_bytes(), state.license_api_key.as_bytes())
+    {
         return Ok(Some(AdminToken {
             id: uuid::Uuid::nil(),
             name: "license-key".to_string(),

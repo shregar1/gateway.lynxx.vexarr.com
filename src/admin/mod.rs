@@ -51,7 +51,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use rust_embed::RustEmbed;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 #[derive(RustEmbed)]
@@ -689,16 +689,29 @@ async fn api_envelope(req: Request, next: Next) -> Response {
 }
 
 fn admin_cors() -> CorsLayer {
-    CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::PATCH,
-            Method::OPTIONS,
-        ])
-        .allow_headers(Any)
-        .allow_origin(Any)
-        .expose_headers(Any)
+    let base = CorsLayer::new().allow_methods([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+        Method::OPTIONS,
+    ]);
+
+    // SECURITY: `allow_origin(Any)` let ANY website read admin API responses
+    // cross-origin. The bundled dashboard is served same-origin from the admin
+    // port and needs no CORS at all, so default to NO cross-origin access.
+    // Operators running a separately-hosted dashboard set
+    // `LYNXX_ADMIN_CORS_ORIGINS` to an explicit comma-separated allowlist.
+    match std::env::var("LYNXX_ADMIN_CORS_ORIGINS") {
+        Ok(v) if !v.trim().is_empty() => {
+            let origins: Vec<HeaderValue> = v
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            base.allow_origin(origins)
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        }
+        _ => base,
+    }
 }

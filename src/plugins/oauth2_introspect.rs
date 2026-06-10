@@ -152,11 +152,25 @@ impl Oauth2IntrospectPlugin {
             .unwrap_or(false);
         let sub = body.get("sub").and_then(|v| v.as_str()).map(String::from);
         let scope = body.get("scope").and_then(|v| v.as_str()).map(String::from);
+
+        // Cap the cache entry at the token's own `exp` (RFC 7662) so an
+        // expired token is never served as active for the full cache TTL. The
+        // cache TTL only bounds *revocation* staleness for still-valid tokens.
+        let mut expires_at = Instant::now() + self.cache_ttl;
+        if let Some(exp_ts) = body.get("exp").and_then(|v| v.as_i64()) {
+            let secs_until_exp = exp_ts - chrono::Utc::now().timestamp();
+            if secs_until_exp <= 0 {
+                expires_at = Instant::now();
+            } else if (secs_until_exp as u64) < self.cache_ttl.as_secs() {
+                expires_at = Instant::now() + Duration::from_secs(secs_until_exp as u64);
+            }
+        }
+
         Ok(CacheEntry {
             sub,
             scope,
             active,
-            expires_at: Instant::now() + self.cache_ttl,
+            expires_at,
         })
     }
 

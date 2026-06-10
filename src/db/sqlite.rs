@@ -32,8 +32,26 @@ impl SqliteRepository {
     pub async fn new(database_url: &str) -> Result<Self, GatewayError> {
         let pool = SqlitePoolOptions::new()
             .max_connections(8)
+            // Bound how long a request waits for a free connection instead of
+            // hanging indefinitely when the pool is saturated.
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .after_connect(|conn, _meta| {
                 Box::pin(async move {
+                    // WAL allows concurrent readers alongside a single writer
+                    // (the default rollback journal serialises everything), and
+                    // busy_timeout makes a contended writer WAIT rather than
+                    // immediately failing with SQLITE_BUSY — which previously
+                    // caused best-effort audit-log appends to be silently
+                    // dropped under concurrent admin writes.
+                    sqlx::query("PRAGMA journal_mode = WAL")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA busy_timeout = 5000")
+                        .execute(&mut *conn)
+                        .await?;
+                    sqlx::query("PRAGMA synchronous = NORMAL")
+                        .execute(&mut *conn)
+                        .await?;
                     sqlx::query("PRAGMA foreign_keys = ON")
                         .execute(&mut *conn)
                         .await?;

@@ -550,7 +550,13 @@ pub async fn proxy_handler(
         .get::<std::net::SocketAddr>()
         .map(|a| a.ip());
     let trust_headers = if state.trusted_proxies.is_empty() {
-        true // no allowlist → trust unconditionally (backward compat)
+        // SECURITY: with no trusted-proxy allowlist configured, do NOT trust
+        // client-supplied X-Forwarded-For / X-Real-IP — any caller could spoof
+        // its source IP to bypass IP ACLs / per-IP rate limits or poison access
+        // logs. Fall back to the real socket peer address. Deployments behind a
+        // load balancer must list it in `trusted_proxies` for XFF to be honoured
+        // (same model as nginx `set_real_ip_from` / Caddy `trusted_proxies`).
+        false
     } else {
         peer_ip
             .map(|ip| state.trusted_proxies.iter().any(|net| net.contains(&ip)))

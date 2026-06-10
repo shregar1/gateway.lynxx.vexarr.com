@@ -32,8 +32,15 @@ pub struct PostgresRepository {
 
 impl PostgresRepository {
     pub async fn new(database_url: &str) -> Result<Self, GatewayError> {
+        // Scale the pool with the runtime's worker threads instead of a flat
+        // 8 — under load on a many-core box a hardcoded 8 becomes the
+        // bottleneck. Bound to a sane ceiling so we don't exhaust Postgres's
+        // own connection limit. acquire_timeout stops a request hanging
+        // forever when the pool is saturated.
+        let max_conns = ((num_cpus::get() as u32) * 2).clamp(8, 32);
         let pool = PgPoolOptions::new()
-            .max_connections(8)
+            .max_connections(max_conns)
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .connect(database_url)
             .await?;
 

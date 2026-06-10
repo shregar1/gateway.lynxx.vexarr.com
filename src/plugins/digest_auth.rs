@@ -240,7 +240,7 @@ impl DigestAuthPlugin {
             ha1, nonce, nc, cnonce, qop, ha2
         ));
 
-        if expected == *response {
+        if crate::utilities::constant_time_eq(expected.as_bytes(), response.as_bytes()) {
             // Commit the new high-water mark only on success so a failed
             // guess can't burn a counter value.
             entry.max_nc = nc_val;
