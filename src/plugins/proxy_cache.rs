@@ -12,7 +12,10 @@ use std::time::{Duration, Instant};
 struct CacheEntry {
     status: u16,
     headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    // `Bytes`, not `Vec<u8>`: the cache-hit path clones the whole entry while
+    // holding the DashMap shard read lock, so the body clone must be O(1)
+    // (refcount bump) rather than a full copy of the response body under lock.
+    body: bytes::Bytes,
     expires_at: Instant,
 }
 
@@ -169,7 +172,7 @@ impl Plugin for ProxyCachePlugin {
             return Err(PluginError::ShortCircuit {
                 status: entry.status,
                 headers,
-                body: entry.body.into(),
+                body: Body::from(entry.body).into(),
             });
         }
 
@@ -235,11 +238,12 @@ impl Plugin for ProxyCachePlugin {
             .await
             .map_err(|e| PluginError::Internal(format!("body collect: {e}")))?
             .to_bytes();
-        let bytes_vec = collected.to_vec();
 
-        // Don't cache oversized bodies.
-        if bytes_vec.len() > self.max_body_bytes {
-            *resp.body_mut() = Body::from(bytes_vec);
+        // Don't cache oversized bodies. `collected` is `Bytes`, so every clone
+        // below is an O(1) refcount bump — no full body copy (and none under
+        // the cache lock on the hit path).
+        if collected.len() > self.max_body_bytes {
+            *resp.body_mut() = Body::from(collected);
             resp.headers_mut()
                 .insert("x-cache", axum::http::HeaderValue::from_static("MISS"));
             return Ok(());
@@ -256,7 +260,7 @@ impl Plugin for ProxyCachePlugin {
                     entries = self.cache.len(),
                     "proxy-cache at capacity; skipping insert"
                 );
-                *resp.body_mut() = Body::from(bytes_vec);
+                *resp.body_mut() = Body::from(collected);
                 resp.headers_mut()
                     .insert("x-cache", axum::http::HeaderValue::from_static("MISS"));
                 return Ok(());
@@ -268,13 +272,13 @@ impl Plugin for ProxyCachePlugin {
             CacheEntry {
                 status,
                 headers,
-                body: bytes_vec.clone(),
+                body: collected.clone(),
                 expires_at: Instant::now() + self.ttl,
             },
         );
 
         // Restore the body and add MISS marker.
-        *resp.body_mut() = Body::from(bytes_vec);
+        *resp.body_mut() = Body::from(collected);
         resp.headers_mut()
             .insert("x-cache", axum::http::HeaderValue::from_static("MISS"));
         Ok(())
