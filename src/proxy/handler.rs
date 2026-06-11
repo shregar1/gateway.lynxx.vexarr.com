@@ -121,6 +121,13 @@ impl ProxyState {
         status: &'static str,
         target: &str,
     ) {
+        // Build owned-but-once Strings rather than letting the metrics!
+        // macro do `.to_string()` on each `&str`: the macro expansion
+        // otherwise calls `to_string()` on the same `svc` for both the
+        // counter and the histogram path on the success branch, so any
+        // string conversion saving happens at the call site. (Real
+        // allocation reduction would require a per-(svc,route,method)
+        // handle cache — left as a follow-up benchmark target.)
         metrics::counter!(
             "lynxx_requests_total",
             "service" => svc.to_string(),

@@ -3023,7 +3023,10 @@ fn row_to_audit(row: sqlx::postgres::PgRow) -> Result<AuditEntry, GatewayError> 
         resource_id: row.try_get("resource_id").ok(),
         diff,
         hash: row.try_get("hash")?,
-        prev_hash: row.try_get("prev_hash").ok(),
+        // Propagate the decode error: prev_hash participates directly in chain
+        // verification, so silently coercing a decode failure to None would
+        // make the chain mis-verify with no warning. Better to surface it.
+        prev_hash: row.try_get("prev_hash")?,
     })
 }
 

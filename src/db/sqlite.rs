@@ -3369,7 +3369,10 @@ fn row_to_audit(row: sqlx::sqlite::SqliteRow) -> Result<AuditEntry, GatewayError
         resource_id: row.try_get("resource_id").ok(),
         diff,
         hash: row.try_get("hash")?,
-        prev_hash: row.try_get("prev_hash").ok(),
+        // Propagate the decode error: prev_hash participates directly in the
+        // audit hash-chain verification, so silently coercing a decode failure
+        // to None would make the chain mis-verify with no warning.
+        prev_hash: row.try_get("prev_hash")?,
     })
 }
 

@@ -100,6 +100,21 @@ pub async fn proxy_try(
 ) -> Result<Json<TryItResponse>, GatewayError> {
     let start = std::time::Instant::now();
 
+    // SECURITY: this endpoint is behind admin auth but it's an
+    // operator-controlled HTTP fetcher — an admin (or a stolen admin token)
+    // could otherwise use it to reach the cloud metadata endpoint
+    // (169.254.169.254), loopback services bound to 127.0.0.1, or escape via a
+    // non-http scheme like file://. Reuse the discovery SSRF allowlist
+    // (rejects non-http(s), loopback, link-local, unspecified, localhost,
+    // metadata domains). Private/mesh IPs stay allowed because operators
+    // legitimately try-it against internal upstreams.
+    if !crate::discovery::is_safe_upstream_url(&body.url) {
+        return Err(GatewayError::BadRequest(format!(
+            "url rejected by SSRF guard: {}",
+            body.url
+        )));
+    }
+
     let method = reqwest::Method::from_bytes(body.method.as_bytes())
         .map_err(|_| GatewayError::BadRequest("invalid HTTP method".into()))?;
 
