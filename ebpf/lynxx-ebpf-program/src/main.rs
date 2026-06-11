@@ -205,16 +205,28 @@ fn try_xdp_ratelimit(ctx: &XdpContext) -> Result<u32, ()> {
     }
 
     // Ethertype is at offset 12. Only handle IPv4.
-    let eth_proto: u16 = unsafe { *((data + 12) as *const u16) };
+    // Use read_unaligned: packet field offsets are not guaranteed to satisfy
+    // the alignment of u16/u32, and dereferencing a misaligned raw pointer is
+    // UB in Rust regardless of what the BPF JIT tolerates at runtime.
+    let eth_proto: u16 = unsafe { core::ptr::read_unaligned((data + 12) as *const u16) };
     if eth_proto != ETH_P_IPV4 {
         return Ok(xdp_action::XDP_PASS);
     }
 
     // Source IPv4 is at offset 12 inside the IP header.
-    let src: u32 = unsafe { *((data + ETH_HDR_LEN + 12) as *const u32) };
+    let src: u32 =
+        unsafe { core::ptr::read_unaligned((data + ETH_HDR_LEN + 12) as *const u32) };
 
     let now = unsafe { bpf_ktime_get_ns() };
 
+    // TODO(ratelimit-race): this get→mutate→insert is a non-atomic
+    // read-modify-write on a plain HashMap. XDP runs concurrently per RX
+    // queue/CPU, so two packets from the same source on different CPUs can both
+    // read the same token count and the second insert clobbers the first
+    // (lost decrement), letting an attacker exceed the per-IP budget by ~#CPUs.
+    // Fix is to make the bucket map a PerCpuHashMap (aggregating in userspace)
+    // or guard the value with bpf_spin_lock — both require coordinated changes
+    // in lynxx-ebpf-userspace and must be validated with the BPF toolchain.
     let mut bucket = unsafe { XDP_BUCKETS.get(&src) }
         .copied()
         .unwrap_or(TokenBucket {
