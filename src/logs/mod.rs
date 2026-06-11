@@ -1,6 +1,6 @@
 use crate::db::Repository;
 use crate::models::LogEntry;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -41,6 +41,49 @@ impl LogWriter {
         let nil = Uuid::nil();
         let route_id_val = route_id.filter(|id| *id != nil);
         let now = Utc::now();
+        self.send(LogEntry {
+            id: Uuid::new_v4(),
+            urn: Uuid::new_v4().to_string(),
+            ts: now,
+            level: level.to_string(),
+            message: message.to_string(),
+            service_id,
+            route_id: route_id_val,
+            project_id,
+            method: Some(method.to_string()),
+            path: Some(path.to_string()),
+            status: status.map(|s| s as i32),
+            duration_ms: Some(duration_ms),
+            client_ip: if client_ip.is_empty() {
+                None
+            } else {
+                Some(client_ip.to_string())
+            },
+            metadata: None,
+            created_at: now,
+            updated_at: now,
+        });
+    }
+
+    /// Like [`log`], but uses a caller-supplied timestamp instead of
+    /// `Utc::now()`. The handler hot path caches `Utc::now()` once per
+    /// request and passes it here so we avoid a second syscall.
+    pub fn log_at(
+        &self,
+        now: DateTime<Utc>,
+        method: &str,
+        path: &str,
+        client_ip: &str,
+        service_id: Option<Uuid>,
+        route_id: Option<Uuid>,
+        project_id: Option<Uuid>,
+        status: Option<u16>,
+        duration_ms: i64,
+        level: &str,
+        message: &str,
+    ) {
+        let nil = Uuid::nil();
+        let route_id_val = route_id.filter(|id| *id != nil);
         self.send(LogEntry {
             id: Uuid::new_v4(),
             urn: Uuid::new_v4().to_string(),

@@ -28,6 +28,12 @@ tokio = { version = "1", features = ["full"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "json"] }
 hdrhistogram = "7"
 anyhow = "1"
+# Lock-free MPMC channel for ticket distribution. The previous design
+# wrapped `tokio::sync::mpsc::Receiver` in `Arc<Mutex<...>>` and made
+# all workers (`connections` of them — up to 4096) compete for the same
+# mutex on every recv. At 100k+ RPS that mutex was the dominant
+# bench-client cost. `flume::Receiver` is cloneable and lock-free.
+flume = "0.11"
 axum = { version = "0.7", features = ["macros", "ws"] }
 tokio-tungstenite = "0.24"
 tracing = "0.1"

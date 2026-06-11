@@ -1,0 +1,4 @@
+/target/
+/flamegraph.svg
+/samply-profile.json.gz
+Cargo.lock

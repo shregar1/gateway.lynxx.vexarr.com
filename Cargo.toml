@@ -1,5 +1,12 @@
 [workspace]
-members = [".", "bench"]
+members = [
+    ".",
+    "bench",
+    "crates/algorithms",
+    "crates/algorithms/fuzz",
+    "crates/lynxx-algo",
+    "crates/lynxx_structures",
+]
 
 [package]
 name = "lynxx-gateway"
@@ -71,6 +78,20 @@ doc_lazy_continuation = "allow" # markdown list indentation in rustdoc
 unused_imports = "warn"
 
 [dependencies]
+# Single-binary algorithm dispatch: every adapter compiles in, and the
+# subscription `Tier` (resolved from LicenseState.algorithm_tier())
+# selects which one runs at startup.
+algorithms = { path = "crates/algorithms" }
+# Shared vexarr auth/licensing crate (canonical source = git). lynxx's
+# PlanTier→runtime Tier mapping stays local (quota::PlanTierAlgo) so utilx has
+# no algorithms dependency. The `[patch]` at the bottom of this file redirects
+# to a local checkout for dev builds; drop it (or omit in CI) to build from git.
+# Pinned to an immutable rev so Cargo.lock records a verifiable git source: CI /
+# release builds (where the [patch] below is omitted) resolve EXACTLY this commit
+# instead of a mutable default-branch HEAD that a force-push could swap. This is
+# the licensing/auth trust anchor — bump the rev deliberately when adopting new
+# utilx changes.
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", rev = "8eb34bfbb1ab7b3d9892a12dc411d1f12e4a113a", features = ["license", "net"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }
@@ -99,6 +120,12 @@ tracing-opentelemetry = "0.28"
 uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 dashmap = "5"
+# Lock-free RCU for the per-service load-balancer state. The hot path
+# (request_handler → LoadBalancerRegistry::pick) is read-only and dwarfs
+# the rare writes from health checks / config reloads, so an `ArcSwap`
+# replace beats `RwLock` by a large margin — no cache-line ping-pong on
+# the read lock at 100k RPS on a multi-core box.
+arc-swap = "1"
 # ahash is 2-5× faster than the default SipHash that std + dashmap
 # pick to be DoS-resistant. For INTERNAL-only maps (route table,
 # admin-token cache, etc.) where the keys are server-generated UUIDs
@@ -245,7 +272,10 @@ wiremock = "0.6"
 wat = "1"
 # cache-bust: 1778248579
 
-# Faster allocator — disabled on Windows where the C source doesn't
+# Faster allocator. mimalloc wins here: jemalloc + background_threads
+# was tested on the 8-core bench rig and regressed p99 from 15 ms to
+# ~185 ms at saturation (the background threads compete with tokio
+# workers for cores). Disabled on Windows where the C source doesn't
 # cross-compile cleanly via zig.
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 mimalloc = { version = "0.1", default-features = false }
@@ -304,3 +334,27 @@ panic = "abort"
 strip = "symbols"
 debug = false
 overflow-checks = false
+
+# Benchmark profile — applies to `cargo bench` for the algorithms crate.
+# Must live at the workspace root (profiles in member crates are ignored).
+[profile.bench]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+# Variant of `release` that keeps the symbol table and DWARF line tables
+# so `perf record --call-graph dwarf` resolves Rust function names
+# instead of showing `[lynxx-gateway]` for every frame. Identical
+# codegen to `release` (same LTO, codegen-units, panic strategy) so
+# perf numbers translate 1:1.
+[profile.release-debug]
+inherits = "release"
+strip = "debuginfo"
+debug = "line-tables-only"
+
+# ── Local dev override for the utilx git dependency ──────────────────────────
+# Declared as a git dep above (canonical). This patch resolves it to the local
+# checkout so the workspace builds without a push, on a full vexarr tree.
+# Remove (or omit in CI) to build purely from the git remote.
+[patch."https://github.com/shregar1/core.utilx.vexarr.com"]
+utilx = { path = "../../../../utilx/core.utilx.vexarr.com" }

@@ -56,7 +56,14 @@ pub async fn proxy_replay(
 
     let resp_body = resp.text().await.unwrap_or_default();
     let preview = if resp_body.len() > 8192 {
-        format!("{}...(truncated)", &resp_body[..8192])
+        // Char-boundary-safe truncation — see docs::proxy_try. Raw byte slicing
+        // panics mid-codepoint (fatal under `panic = "abort"`); the body is
+        // attacker-influenceable via this operator SSRF helper.
+        let end = (0..=8192)
+            .rev()
+            .find(|&i| resp_body.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}...(truncated)", &resp_body[..end])
     } else {
         resp_body
     };

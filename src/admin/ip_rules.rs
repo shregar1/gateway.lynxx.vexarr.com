@@ -21,9 +21,7 @@ pub struct CreateIpRuleBody {
     pub route_id: Option<Uuid>,
 }
 
-fn default_action() -> String {
-    "deny".into()
-}
+fn default_action() -> String { "deny".into() }
 
 #[derive(Deserialize)]
 pub struct PatchIpRuleBody {
@@ -81,21 +79,11 @@ pub async fn patch_ip_rule(
         .await?
         .ok_or(GatewayError::NotFound("ip rule not found".into()))?;
 
-    if let Some(v) = body.cidr {
-        rule.cidr = v;
-    }
-    if let Some(v) = body.action {
-        rule.action = v;
-    }
-    if let Some(v) = body.description {
-        rule.description = v;
-    }
-    if let Some(v) = body.priority {
-        rule.priority = v;
-    }
-    if let Some(v) = body.enabled {
-        rule.enabled = v;
-    }
+    if let Some(v) = body.cidr { rule.cidr = v; }
+    if let Some(v) = body.action { rule.action = v; }
+    if let Some(v) = body.description { rule.description = v; }
+    if let Some(v) = body.priority { rule.priority = v; }
+    if let Some(v) = body.enabled { rule.enabled = v; }
 
     state.repo.update_ip_rule(&id, &rule).await?;
     Ok(Json(rule))

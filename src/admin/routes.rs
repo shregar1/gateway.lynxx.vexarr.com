@@ -476,6 +476,8 @@ pub async fn update_service(
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
+        pool_idle_floor: existing.pool_idle_floor,
+        force_http_version: existing.force_http_version.clone(),
         drain_timeout_ms: existing.drain_timeout_ms,
         project_id: input.project_id.or(existing.project_id),
         domain: input.domain.unwrap_or_else(|| existing.domain.clone()),
@@ -904,6 +906,8 @@ pub async fn patch_service(
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
+        pool_idle_floor: existing.pool_idle_floor,
+        force_http_version: existing.force_http_version.clone(),
         drain_timeout_ms: existing.drain_timeout_ms,
         project_id: input.project_id.or(existing.project_id),
         domain: input.domain.unwrap_or_else(|| existing.domain.clone()),
@@ -1007,6 +1011,7 @@ pub async fn create_plugin(
         &input.config,
         Some(state.repo.clone()),
         state.plugin_exec.context(),
+        state.plugin_exec.algorithm_tier(),
     )?;
     let now = Utc::now();
     let plugin = PluginInstance {
@@ -1074,6 +1079,7 @@ pub async fn update_plugin(
         &input.config,
         Some(state.repo.clone()),
         state.plugin_exec.context(),
+        state.plugin_exec.algorithm_tier(),
     )?;
 
     let updated = PluginInstance {

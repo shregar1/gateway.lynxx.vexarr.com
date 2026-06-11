@@ -1,0 +1,53 @@
+[package]
+name = "lynxx-algo"
+version = "0.2.0"
+edition = "2021"
+description = "Lynxx core algorithms — exact semantics, optimized Rust, C parity tests, flamegraph-ready"
+license = "BSD-2-Clause"
+readme = "README.md"
+
+[lib]
+name = "lynxx_algo"
+path = "src/lib.rs"
+
+[[bench]]
+name = "algorithms"
+harness = false
+
+[[bench]]
+name = "vs_nginx_c"
+harness = false
+# Compares Rust against the NGINX C oracle — needs the C toolchain, so it is
+# only built when the `c-parity` feature is enabled.
+required-features = ["c-parity"]
+
+# Rust-vs-NGINX-C parity test suite (tests/parity.rs). Built only with the
+# `c-parity` feature, which turns on the C-oracle compilation in build.rs.
+# (tests/crc32fast_parity.rs is C-free and is always built.)
+[[test]]
+name = "parity"
+required-features = ["c-parity"]
+
+[[bin]]
+name = "profile-hot"
+path = "src/bin/profile_hot.rs"
+
+[features]
+# Off by default: builds, release artifacts, Docker and CI gateway builds need
+# NO C toolchain and run NO build-time C. Enable to compile the NGINX C oracle
+# and run the Rust-vs-C parity tests/benches: `cargo test --features c-parity`.
+c-parity = []
+
+[dependencies]
+crc32fast = "1.5"
+memchr = "2.8"
+
+[build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# NOTE: per-package [profile.*] sections were removed on vendoring. As a
+# workspace member, lynxx-algo inherits the workspace-root profiles; cargo
+# ignores (and warns about) profiles declared on a non-root member.

@@ -31,9 +31,7 @@ pub async fn get_plugin(
         .repo
         .get_marketplace_plugin(&id)
         .await?
-        .ok_or(GatewayError::NotFound(
-            "marketplace plugin not found".into(),
-        ))?;
+        .ok_or(GatewayError::NotFound("marketplace plugin not found".into()))?;
     Ok(Json(plugin))
 }
 
@@ -60,9 +58,7 @@ pub async fn install_plugin(
         .repo
         .get_marketplace_plugin(&plugin_id)
         .await?
-        .ok_or(GatewayError::NotFound(
-            "marketplace plugin not found".into(),
-        ))?;
+        .ok_or(GatewayError::NotFound("marketplace plugin not found".into()))?;
 
     // Increment download count
     let mut updated = mp.clone();

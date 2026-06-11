@@ -73,14 +73,18 @@ use std::sync::Arc;
 ///   lookup, etc.). Plugins that don't need it ignore it.
 /// * `ctx` — shared service handles (currently just an optional keyx
 ///   client). Plugins that don't need anything from the context ignore it.
+/// * `tier` — the deployment's subscription tier. Plugins that gate their
+///   algorithm by tier (currently `rate-limit`) consult it; the rest
+///   ignore it.
 pub fn build(
     name: &str,
     config: &serde_json::Value,
     repo: Option<Arc<dyn Repository>>,
     ctx: &crate::plugins::PluginContext,
+    tier: algorithms::backbone::Tier,
 ) -> Result<Arc<dyn Plugin>, GatewayError> {
     let plugin: Arc<dyn Plugin> = match name {
-        "rate-limit" => Arc::new(RateLimitPlugin::from_config(config)?),
+        "rate-limit" => Arc::new(RateLimitPlugin::from_config(config, tier)?),
         "cors" => Arc::new(CorsPlugin::from_config(config)?),
         "logging" => Arc::new(LoggingPlugin::from_config(config)?),
         "auth" => Arc::new(AuthPlugin::from_config(config)?),

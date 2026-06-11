@@ -125,6 +125,29 @@ pub struct Service {
     /// upstream URI. Useful for upstreams that perform virtual-host routing.
     #[serde(default)]
     pub pass_host_header: Option<bool>,
+    /// Floor for the upstream idle-connection pool — the number of
+    /// keep-alive sockets the gateway tries to keep warm for this
+    /// service at all times. Matches nginx's `keepalive N` directive.
+    /// When unset, the global `[gateway].pool_idle_floor_per_host`
+    /// applies; when neither is set, the prewarmer treats this as
+    /// "feature off" (single-HEAD heartbeat, original behaviour).
+    ///
+    /// The floor is independent of `[gateway].pool_max_idle_per_host`
+    /// (which is the hyper-util CAP). Setting `pool_idle_floor` higher
+    /// than `pool_max_idle_per_host` is harmless — hyper-util will
+    /// drop the extra to the cap and our prewarmer rediscovers a new
+    /// floor on the next tick.
+    #[serde(default)]
+    pub pool_idle_floor: Option<usize>,
+    /// Force the HTTP version used on the outbound (upstream-facing)
+    /// request. Accepts `"1.1"`, `"2"`, or `"auto"`. Default is `"1.1"` —
+    /// hyper-util's H1 idle pool is meaningfully bigger than its H2
+    /// stream pool for plaintext upstreams. Set to `"2"` to insist on
+    /// h2 (cleartext h2c won't negotiate via ALPN; for h2 you need
+    /// `https://` upstream). `"auto"` falls back to whatever the
+    /// connector negotiates via ALPN.
+    #[serde(default)]
+    pub force_http_version: Option<String>,
     #[serde(default)]
     pub drain_timeout_ms: Option<u64>,
     #[serde(default)]
@@ -435,6 +458,8 @@ impl Service {
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            pool_idle_floor: None,
+            force_http_version: None,
             drain_timeout_ms: None,
             project_id: None,
             domain: String::new(),

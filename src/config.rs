@@ -61,6 +61,11 @@ pub struct TelemetrySettings {
     /// Env override: `OTEL_SERVICE_NAME`.
     #[serde(default = "default_telemetry_service_name")]
     pub service_name: String,
+    /// Optional secondary endpoint (e.g. Fluxx sidecar). When set, spans
+    /// are exported to both endpoints.
+    /// Env override: `FLUXX_OTEL_ENDPOINT`.
+    #[serde(default)]
+    pub fluxx_endpoint: String,
 }
 
 fn default_telemetry_service_name() -> String {
@@ -201,6 +206,14 @@ pub struct GatewaySettings {
     /// Idle connection timeout in seconds. Default: 120.
     #[serde(default = "default_pool_idle_timeout")]
     pub pool_idle_timeout_secs: u64,
+    /// Global default for the idle-connection floor the prewarmer
+    /// maintains per upstream host. Per-service `services[].pool_idle_floor`
+    /// overrides this. When neither is set the prewarmer falls back to
+    /// the legacy single-HEAD heartbeat. Matches nginx's `keepalive N`
+    /// directive in role — N idle conns are kept warm even when there's
+    /// no traffic. Default: `None` (off).
+    #[serde(default)]
+    pub pool_idle_floor_per_host: Option<usize>,
     /// HTTP/2 keepalive ping interval in seconds. Default: 10.
     #[serde(default = "default_h2_keepalive")]
     pub h2_keepalive_interval_secs: u64,
@@ -1165,6 +1178,7 @@ fn default_gateway() -> GatewaySettings {
         providers: ProvidersConfig::default(),
         pool_max_idle_per_host: default_pool_max_idle(),
         pool_idle_timeout_secs: default_pool_idle_timeout(),
+        pool_idle_floor_per_host: None,
         h2_keepalive_interval_secs: default_h2_keepalive(),
         max_header_size: default_max_header_size(),
         prewarm_interval_secs: default_prewarm_interval(),
@@ -1715,6 +1729,7 @@ where
 ///   * `LYNXX_MINIMAL_TELEMETRY` overrides `gateway.minimal_telemetry`
 ///     (legacy alias: `LYNXX_BENCH_MODE`)
 ///   * `LYNXX_API_KEY`           overrides `license.api_key` (vexarr api key)
+///   * `FLUXX_OTEL_ENDPOINT`     overrides `telemetry.fluxx_endpoint`
 pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
@@ -1785,6 +1800,11 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(k) = std::env::var("LYNXX_API_KEY") {
         if !k.trim().is_empty() {
             config.license.api_key = k;
+        }
+    }
+    if let Ok(url) = std::env::var("FLUXX_OTEL_ENDPOINT") {
+        if !url.is_empty() {
+            config.telemetry.fluxx_endpoint = url;
         }
     }
 }

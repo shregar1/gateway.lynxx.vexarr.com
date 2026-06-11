@@ -2867,6 +2867,10 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
             .try_get::<Option<bool>, _>("pass_host_header")
             .ok()
             .flatten(),
+        // `pool_idle_floor` + `force_http_version` mirror the sqlite
+        // path — not DB columns yet, default to `None`.
+        pool_idle_floor: None,
+        force_http_version: None,
         drain_timeout_ms: row
             .try_get::<Option<i64>, _>("drain_timeout_ms")
             .ok()
