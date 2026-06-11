@@ -177,6 +177,18 @@ pub async fn send_fastcgi(
     document_root: &str,
     script_name: &str,
 ) -> Result<Response<Body>, FastcgiError> {
+    // SECURITY: SCRIPT_FILENAME below is `document_root + "/" + script_name`,
+    // handed to the FastCGI backend (e.g. PHP-FPM) as the file to execute or
+    // serve. A `script_name` containing `..` would escape the document root —
+    // letting an attacker disclose source (`....//etc/passwd`) or execute an
+    // unintended script — and a NUL byte can truncate the path on the backend.
+    // Reject both before constructing any params.
+    if script_name.contains("..") || script_name.contains('\0') {
+        return Err(FastcgiError::Body(format!(
+            "rejected script_name with path traversal or NUL: {script_name:?}"
+        )));
+    }
+
     let request_id: u16 = 1;
 
     // Extract request metadata (all owned so we can consume the body)
@@ -373,6 +385,15 @@ mod tests {
     fn encode_short_param() {
         let encoded = encode_param(b"A", b"B");
         assert_eq!(encoded, vec![1, 1, b'A', b'B']);
+    }
+
+    #[tokio::test]
+    async fn rejects_script_name_traversal() {
+        // The traversal guard returns before any backend connection, so this
+        // resolves immediately without a live FastCGI server.
+        let req = Request::builder().uri("/x").body(Body::empty()).unwrap();
+        let res = send_fastcgi(req, "tcp://127.0.0.1:1", "/var/www", "../../etc/passwd").await;
+        assert!(res.is_err(), "path traversal in script_name must be rejected");
     }
 
     #[test]
