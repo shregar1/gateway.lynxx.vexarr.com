@@ -1,0 +1,24 @@
+[package]
+name = "algorithms-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+algorithms = { path = ".." }
+
+[[bin]]
+name = "fuzz_range_slicer"
+path = "fuzz_targets/fuzz_range_slicer.rs"
+
+[[bin]]
+name = "fuzz_base64"
+path = "fuzz_targets/fuzz_base64.rs"
+
+[[bin]]
+name = "fuzz_siphash"
+path = "fuzz_targets/fuzz_siphash.rs"

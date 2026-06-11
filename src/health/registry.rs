@@ -104,7 +104,17 @@ impl HealthRegistry {
         self.entries.iter().map(|e| e.clone()).collect()
     }
 
-    pub fn record_success(&self, service_id: &Uuid, service_name: &str) {
+    /// Cached-timestamp variant for the proxy hot path. The handler captures
+    /// a single `Utc::now()` per request at entry and passes the same
+    /// `DateTime` through every per-request consumer (this, the quota
+    /// tracker, and the access log), eliminating ~3 of the ~8
+    /// `clock_gettime` syscalls the flamegraph showed at 100k RPS.
+    pub fn record_success_at(
+        &self,
+        service_id: &Uuid,
+        service_name: &str,
+        now: DateTime<Utc>,
+    ) {
         let success_threshold = self.config.success_threshold;
         let (circuit, status) = {
             let mut entry = self
@@ -115,7 +125,7 @@ impl HealthRegistry {
             entry.status = HealthStatus::Healthy;
             entry.consecutive_failures = 0;
             entry.consecutive_successes = entry.consecutive_successes.saturating_add(1);
-            entry.last_check_at = Some(Utc::now());
+            entry.last_check_at = Some(now);
             entry.last_error = None;
             entry.total_checks = entry.total_checks.saturating_add(1);
 
@@ -136,7 +146,22 @@ impl HealthRegistry {
             .set(crate::metrics::health_status_value(status));
     }
 
-    pub fn record_failure(&self, service_id: &Uuid, service_name: &str, err: String) {
+    /// Convenience: calls `record_success_at(Utc::now())`. Background
+    /// callers (active health checker, tests) use this; the proxy hot
+    /// path uses `record_success_at` directly with its cached timestamp.
+    pub fn record_success(&self, service_id: &Uuid, service_name: &str) {
+        self.record_success_at(service_id, service_name, Utc::now());
+    }
+
+    /// Cached-timestamp variant for the proxy hot path. See
+    /// [`Self::record_success_at`].
+    pub fn record_failure_at(
+        &self,
+        service_id: &Uuid,
+        service_name: &str,
+        err: String,
+        now: DateTime<Utc>,
+    ) {
         let failure_threshold = self.config.failure_threshold;
         let (circuit, status, opened_transition) = {
             let mut entry = self
@@ -147,7 +172,7 @@ impl HealthRegistry {
             entry.status = HealthStatus::Unhealthy;
             entry.consecutive_successes = 0;
             entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
-            entry.last_check_at = Some(Utc::now());
+            entry.last_check_at = Some(now);
             entry.last_error = Some(err);
             entry.total_checks = entry.total_checks.saturating_add(1);
             entry.total_failures = entry.total_failures.saturating_add(1);
@@ -161,13 +186,13 @@ impl HealthRegistry {
                         "circuit breaker opened"
                     );
                     entry.circuit = CircuitState::Open;
-                    entry.opened_at = Some(Utc::now());
+                    entry.opened_at = Some(now);
                     transitioned_to_open = true;
                 }
                 CircuitState::HalfOpen => {
                     tracing::warn!(service_id = %service_id, "circuit breaker re-opened from half-open");
                     entry.circuit = CircuitState::Open;
-                    entry.opened_at = Some(Utc::now());
+                    entry.opened_at = Some(now);
                 }
                 _ => {}
             }
@@ -187,6 +212,11 @@ impl HealthRegistry {
             .set(crate::metrics::circuit_state_value(circuit));
         metrics::gauge!("lynxx_service_health", "service" => service_name.to_string())
             .set(crate::metrics::health_status_value(status));
+    }
+
+    /// Convenience: calls `record_failure_at(Utc::now())`.
+    pub fn record_failure(&self, service_id: &Uuid, service_name: &str, err: String) {
+        self.record_failure_at(service_id, service_name, err, Utc::now());
     }
 
     pub fn reset_circuit(&self, service_id: &Uuid) -> Option<()> {

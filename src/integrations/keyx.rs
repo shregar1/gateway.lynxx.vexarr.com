@@ -176,6 +176,8 @@ async fn validate_license_against(
                 active_nodes: envelope.data.active_nodes,
                 monthly_call_limit: envelope.data.monthly_call_limit,
                 allow_overage: envelope.data.allow_overage,
+                is_admin: false,
+                scopes: Vec::new(),
             })
         }
         EnvelopeStatus::Failed => Err(KeyxError::Rejected(envelope.response_message)),

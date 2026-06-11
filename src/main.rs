@@ -1,9 +1,12 @@
 #![allow(dead_code)]
 
-// `mimalloc` cuts the long tail on busy proxy workloads. The system
-// allocator on macOS in particular fragments under bursty alloc/free
-// patterns; switching to mimalloc shaves 20-40% off p99/p99.9 in our
-// bench rig and compiles cleanly on aarch64-apple-darwin.
+// `mimalloc` is the allocator on the proxy hot path. We tried switching
+// to jemalloc with `background_threads` expecting smoother tail
+// behavior; in practice on the 8-core bench rig (8 tokio workers +
+// 1-2 jemalloc background threads = oversubscribed) p99 went from
+// 15 ms to ~185 ms at saturation and throughput dropped from 76k → 65k
+// RPS. mimalloc's inline page-reclamation pass is the lesser evil
+// here. See the journal entry on commit 45bd5cb for the test numbers.
 #[cfg(not(target_os = "windows"))]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -305,8 +308,9 @@ async fn async_main() -> anyhow::Result<()> {
 
     // --- Telemetry init -------------------------------------------------
     // Reads from config.telemetry (populated from TOML + env overrides).
-    // Endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
-    // When unset the OTel layer is omitted entirely.
+    // Primary endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
+    // Fluxx sidecar:    [telemetry].fluxx_endpoint / FLUXX_OTEL_ENDPOINT
+    // When neither is set the OTel layer is omitted entirely.
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("lynxx_gateway=info,tower_http=debug"));
     let fmt_layer = tracing_subscriber::fmt::layer();
@@ -316,13 +320,18 @@ async fn async_main() -> anyhow::Result<()> {
     } else {
         Some(config.telemetry.endpoint.clone())
     };
+    let fluxx_endpoint = if config.telemetry.fluxx_endpoint.is_empty() {
+        None
+    } else {
+        Some(config.telemetry.fluxx_endpoint.clone())
+    };
     let telemetry_api_key = if config.telemetry.api_key.is_empty() {
         None
     } else {
         Some(config.telemetry.api_key.clone())
     };
 
-    if let Some(ref endpoint) = primary_endpoint {
+    if primary_endpoint.is_some() || fluxx_endpoint.is_some() {
         // Inject the telemetry API key via the standard OTEL headers env var
         // so the OTLP HTTP exporter picks it up automatically.
         if let Some(ref key) = telemetry_api_key {
@@ -336,17 +345,59 @@ async fn async_main() -> anyhow::Result<()> {
 
         let svc_name = config.telemetry.service_name.clone();
 
-        let exporter = opentelemetry_otlp::SpanExporter::builder()
-            .with_http()
-            .with_endpoint(format!("{endpoint}/v1/traces"))
-            .build()
-            .expect("otlp exporter");
-        let provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
+        let mut provider_builder = opentelemetry_sdk::trace::TracerProvider::builder()
             .with_resource(opentelemetry_sdk::Resource::new(vec![
                 opentelemetry::KeyValue::new("service.name", svc_name),
-            ]))
-            .with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
-        tracing::info!("otel exporter → {endpoint}");
+            ]));
+
+        // --- primary exporter ---
+        if let Some(ref endpoint) = primary_endpoint {
+            let exporter = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{endpoint}/v1/traces"))
+                .build()
+                .expect("primary otlp exporter");
+            provider_builder =
+                provider_builder.with_batch_exporter(exporter, opentelemetry_sdk::runtime::Tokio);
+            tracing::info!("primary otel exporter → {endpoint}");
+        }
+
+        // --- fluxx exporter (additional, loopback-only) ---
+        // Enforce the loopback-only contract: spans may carry request metadata,
+        // so the fluxx exporter must point at a LOCAL collector. Reject any
+        // non-loopback endpoint (fail closed) rather than silently shipping
+        // telemetry to an arbitrary remote host.
+        fn is_loopback_endpoint(endpoint: &str) -> bool {
+            let after_scheme = endpoint.split("://").nth(1).unwrap_or(endpoint);
+            let authority = after_scheme.split('/').next().unwrap_or(after_scheme);
+            // Host part, handling [IPv6]:port and host:port.
+            let host = if let Some(rest) = authority.strip_prefix('[') {
+                rest.split(']').next().unwrap_or(rest)
+            } else {
+                authority.split(':').next().unwrap_or(authority)
+            };
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .map(|ip| ip.is_loopback())
+                    .unwrap_or(false)
+        }
+        if let Some(ref endpoint) = fluxx_endpoint {
+            if !is_loopback_endpoint(endpoint) {
+                tracing::warn!(
+                    endpoint = %endpoint,
+                    "fluxx telemetry endpoint is not loopback; refusing to enable the loopback-only exporter"
+                );
+            } else if let Ok(fluxx_exporter) = opentelemetry_otlp::SpanExporter::builder()
+                .with_http()
+                .with_endpoint(format!("{endpoint}/v1/traces"))
+                .build()
+            {
+                provider_builder = provider_builder
+                    .with_batch_exporter(fluxx_exporter, opentelemetry_sdk::runtime::Tokio);
+                tracing::info!("fluxx telemetry enabled → {endpoint}");
+            }
+        }
 
         let provider = provider_builder.build();
         opentelemetry::global::set_tracer_provider(provider.clone());
@@ -384,14 +435,14 @@ async fn async_main() -> anyhow::Result<()> {
     }
 
     let keyx_client = Arc::new(crate::integrations::keyx::KeyxClient::new()?);
-    let license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
+    let _license_verifier: Arc<dyn crate::integrations::LicenseVerifier> = keyx_client.clone();
     // Admin tokens (other than the master api key) come from the local
     // `admin_tokens` table; HMAC plugin secrets come from local config.
     // No remote validators in the api-key-only model.
     let token_validator: Option<Arc<dyn crate::integrations::TokenValidator>> = None;
     let hmac_verifier: Option<Arc<dyn crate::integrations::HmacVerifier>> = None;
 
-    let license = match crate::license::License::load(&api_key, license_verifier.as_ref()).await {
+    let license = match crate::license::License::load(Some(&api_key)).await {
         Ok(lic) => {
             tracing::info!(
                 customer_id = %lic.customer_id,
@@ -532,26 +583,48 @@ async fn async_main() -> anyhow::Result<()> {
     quota.set_allow_overage(license.allow_overage);
     crate::quota::spawn_quota_flusher(quota.clone());
 
-    // Live licence state + periodic re-verifier.
-    //
-    // The background refresher re-validates the api key against keyx
-    // every REVERIFY_INTERVAL_SECS and flips a kill-switch on a
-    // confirmed rejection (revocation).
-    //
-    // `license_api_key` is the same value used for licence validation,
-    // also serving as the master admin bearer — one key, one input.
-    let license_api_key = api_key.clone();
-
-    tracing::info!("licence re-verifier in verified mode");
+    // Live licence state + periodic re-verifier. The startup verify
+    // above is hard-fail; this background loop catches mid-run
+    // cancellations within REVERIFY_INTERVAL_SECS instead of waiting
+    // for the offline cache to expire (7 days).
+    let lynxx_base_url = std::env::var("LYNXX_BASE_URL")
+        .or_else(|_| std::env::var("LYNXX_LICENSE_VERIFY_URL").map(|u| {
+            u.trim_end_matches("/v1/license/verify").to_string()
+        }))
+        .unwrap_or_else(|_| "https://api.lynxx.vexarr.com".to_string());
+    let lynxx_base_url = lynxx_base_url.trim_end_matches('/').to_string();
+    let license_api_key = std::env::var("LYNXX_API_KEY")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| config.license.api_key.clone());
+    let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
+    // Note: utilx::license::LicenseState handles expiry internally via its
+    // ed25519-signed verify protocol, so we don't pass `license.expires_at`
+    // here — my interim HMAC-cache hardening in src/license/mod.rs was
+    // superseded by the utilx architecture.
     let license_state = crate::license::LicenseState::new(
-        license_verifier.clone(),
-        api_key.clone(),
+        license_api_key.clone(),
+        license_verify_url,
         plan_tier,
         license.active_nodes,
         license.max_nodes,
-        license.expires_at,
     );
-    crate::license::spawn_license_refresher(license_state.clone(), Some(quota.clone()));
+    crate::license::spawn_license_refresher(
+        license_state.clone(),
+        Some(quota.clone() as std::sync::Arc<dyn utilx::license::QuotaControl>),
+    );
+
+    // Register this node with the billing API and start heartbeat.
+    if let Err(e) = crate::license::register_node(&license_api_key, &lynxx_base_url).await {
+        tracing::error!(error = %e, "node registration failed — gateway may not be tracked for billing");
+    }
+    crate::license::spawn_node_heartbeat(license_api_key.clone(), lynxx_base_url.clone());
+    crate::license::spawn_usage_reporter(
+        license_api_key.clone(),
+        lynxx_base_url.clone(),
+        quota.clone(),
+        license_state.clone(),
+    );
 
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
@@ -564,6 +637,13 @@ async fn async_main() -> anyhow::Result<()> {
 
     let log_writer = crate::logs::LogWriter::new(repo.clone(), 4096);
     crate::logs::spawn_log_pruner(repo.clone(), 30);
+
+    // Active health is effectively disabled when the interval is ≥1 hour
+    // — at that cadence the per-request passive emission isn't being
+    // consumed by anyone with useful freshness, so we can skip it entirely
+    // on the hot path. The flag is sticky for the lifetime of the process;
+    // we'd need to rewire on a runtime reload to flip it back on.
+    let passive_record_disabled = config.gateway.health_check_interval_ms >= 3_600_000;
 
     let proxy_state = ProxyState {
         route_table: route_table.clone(),
@@ -582,19 +662,53 @@ async fn async_main() -> anyhow::Result<()> {
         local_zone: None,
         minimal_telemetry: config.gateway.minimal_telemetry,
         stream_response_body: config.gateway.stream_response_body,
+        passive_record_disabled,
     };
 
     // Background connection pre-warmer. Keeps the upstream pool hot so
     // previously-idle services don't pay a TCP+TLS handshake on the next
     // real request — one of the bigger contributors to the p99.9 long
     // tail. Disabled when `prewarm_interval_secs == 0`.
+    //
+    // The shared `PrewarmState` lets both paths (the startup burst-warm
+    // below and the periodic top-up here) bump the same per-service
+    // idle-conn counters.
+    let prewarm_state = crate::proxy::prewarm::PrewarmState::new();
     let _prewarm_handle = crate::proxy::prewarm::spawn_prewarmer(
         route_table.clone(),
         client_pool.clone(),
         health.clone(),
+        prewarm_state.clone(),
         config.gateway.prewarm_interval_secs,
         config.gateway.prewarm_concurrency,
+        config.gateway.pool_idle_floor_per_host,
     );
+
+    // Startup burst-warm: fill the upstream idle pool to the configured
+    // floor BEFORE we start accepting client traffic. Without this the
+    // first ~`pool_idle_floor` real requests after a fresh start each
+    // pay a TCP+TLS handshake — exactly the gap to nginx that this work
+    // is closing. 5s overall cap; whichever conns came back are in the
+    // pool, the rest the periodic prewarmer will pick up on the next
+    // tick.
+    if config.gateway.pool_idle_floor_per_host.is_some()
+        || route_table
+            .list_services()
+            .iter()
+            .any(|s| s.pool_idle_floor.is_some())
+    {
+        crate::proxy::prewarm::burst_warm(
+            &route_table,
+            &client_pool,
+            &health,
+            &prewarm_state,
+            config.gateway.pool_idle_floor_per_host,
+            config.gateway.prewarm_concurrency,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+    }
 
     // ---------- ACME / cert manager ----------
     // Derive wildcard domains from route hosts so the ACME config doesn't
@@ -699,7 +813,14 @@ async fn async_main() -> anyhow::Result<()> {
             .fallback(proxy_handler)
             .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
             .layer(tower_http::trace::TraceLayer::new_for_http())
-            .with_state(proxy_state);
+            // Wrap in `Arc` so axum's per-request `State` extractor clones
+            // exactly one atomic refcount instead of cloning every one of
+            // ProxyState's ~8 internal `Arc<...>` fields. The symbolized
+            // perf record at 100k RPS / 4096 conns showed `drop_in_place
+            // <ProxyState>` and its child `drop_in_place<Client>` totalling
+            // ~14% of CPU samples — pure cache-line ping-pong from
+            // per-request fan-out clones of state-resident `Arc`s.
+            .with_state(std::sync::Arc::new(proxy_state));
 
         // Mount the install endpoints. Their routes take precedence over the
         // proxy fallback because merge() resolves explicit routes before the
@@ -1280,13 +1401,17 @@ async fn async_main() -> anyhow::Result<()> {
         tracing::warn!(
             "ACME enabled but no certificate available; waiting for background provisioning..."
         );
-        let proxy_serve = axum::serve(proxy_listener, proxy_app);
+        let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
+        let proxy_serve = serve_proxy_plain(proxy_listener, proxy_addr_socket, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     } else {
         tracing::info!("proxy listening on {proxy_addr}");
-        let proxy_serve = axum::serve(proxy_listener, proxy_app);
+        let proxy_addr_socket: std::net::SocketAddr = proxy_addr.parse()?;
+        let proxy_serve = serve_proxy_plain(proxy_listener, proxy_addr_socket, proxy_app);
         run_select!(proxy_serve, None::<axum_server::Handle>);
     }
+
+    crate::license::deregister_node(&license_api_key, &lynxx_base_url).await;
 
     if let Some(h) = acme_http_handle {
         h.abort();
@@ -1296,6 +1421,61 @@ async fn async_main() -> anyhow::Result<()> {
     opentelemetry::global::shutdown_tracer_provider();
 
     Ok(())
+}
+
+/// Serve the proxy on the plain (no TLS) listener path. On Linux this
+/// dispatches to [`crate::proxy::listener::serve_per_worker`], which
+/// fans out N independent `SO_REUSEPORT` listeners across N OS threads
+/// each running a private `current_thread` tokio runtime + `LocalSet`.
+/// The kernel's socket-hash spreads incoming SYN packets across those
+/// listeners, so a connection enters one thread on accept() and stays
+/// there for its whole lifetime — no work-stealing migration, no
+/// cross-worker cache-line traffic.
+///
+/// On non-Linux platforms the fanout is not available (Darwin's
+/// `SO_REUSEPORT` doesn't load-balance; it just lets multiple binds
+/// coexist). We fall back to the single-listener path so contributors
+/// on macOS still get a working `cargo run`.
+///
+/// `proxy_listener` is the resilient-bind socket built in `async_main`
+/// — used as-is on non-Linux. On Linux it's dropped here because each
+/// per-worker thread re-binds its own `SO_REUSEPORT` socket; the brief
+/// drop-then-rebind window (microseconds) is acceptable on a
+/// single-tenant proxy host. `proxy_addr` is the resolved bind address
+/// (after any fallback in resilient_bind), used by the per-worker
+/// path to re-bind.
+async fn serve_proxy_plain(
+    proxy_listener: tokio::net::TcpListener,
+    proxy_addr: std::net::SocketAddr,
+    proxy_app: axum::Router,
+) -> std::io::Result<()> {
+    #[cfg(target_os = "linux")]
+    {
+        // Release the resilient_bind listener so the per-worker
+        // sockets can rebind to the same port. Without this the kernel
+        // would distribute incoming connections across the original
+        // single listener (which we'd never accept from) *and* the
+        // workers, and the orphan listener's share of connections
+        // would time out. Drop is synchronous; the worker rebinds
+        // typically complete within a few microseconds.
+        drop(proxy_listener);
+        let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+        let workers = num_cpus::get().max(1);
+        tracing::info!(
+            workers,
+            cores = core_ids.len(),
+            "proxy: launching per-worker SO_REUSEPORT runtimes"
+        );
+        crate::proxy::listener::serve_per_worker(proxy_addr, proxy_app, workers, core_ids).await
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // proxy_addr is unused on non-Linux; the listener is already
+        // bound. Silence the warning explicitly so the linter stays
+        // useful elsewhere.
+        let _ = proxy_addr;
+        axum::serve(proxy_listener, proxy_app).await
+    }
 }
 
 /// Spawn a task that subscribes to the cluster bus and refreshes local
