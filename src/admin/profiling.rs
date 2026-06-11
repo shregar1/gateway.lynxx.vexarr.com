@@ -169,29 +169,16 @@ fn enumerate_threads() -> Vec<ThreadInfo> {
 /// Get the number of threads for this process on macOS via `proc_pidinfo`.
 #[cfg(not(target_os = "linux"))]
 fn thread_count_macos() -> usize {
-    // Try mach task_info for an accurate thread count.
-    #[cfg(target_os = "macos")]
-    {
-        use std::mem;
-        unsafe {
-            let mut info: libc::mach_task_basic_info_data_t = mem::zeroed();
-            let mut count = (mem::size_of::<libc::mach_task_basic_info_data_t>()
-                / mem::size_of::<libc::natural_t>())
-                as libc::mach_msg_type_number_t;
-            #[allow(deprecated)] // libc deprecated in favor of mach2 crate
-            let task = libc::mach_task_self();
-            let kr = libc::task_info(
-                task,
-                libc::MACH_TASK_BASIC_INFO,
-                &mut info as *mut _ as libc::task_info_t,
-                &mut count,
-            );
-            if kr == libc::KERN_SUCCESS {
-                return info.policy as usize; // policy field — fallback below if nonsensical
-            }
-        }
-    }
-    // Absolute fallback: number of logical CPUs.
+    // Previously called mach `task_info(MACH_TASK_BASIC_INFO)` and returned
+    // `info.policy` — but `policy` is the task's default scheduling policy (a
+    // small enum constant, not a thread count). The correct mach API is
+    // `task_threads`, which returns a thread_act_array_t the caller must
+    // `vm_deallocate`; binding that safely needs the `mach2` crate.
+    //
+    // For now report `num_cpus::get()` as a coarse upper bound rather than a
+    // misleading nonsense value (`thread_count == 1` for every macOS host),
+    // and document the limitation. The `/admin/debug/pprof/threads` endpoint
+    // is diagnostic-only on macOS — Linux uses /proc/self/task and is precise.
     num_cpus::get()
 }
 

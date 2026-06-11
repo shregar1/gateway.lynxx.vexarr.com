@@ -63,14 +63,26 @@ async fn handle_connection(conn: quinn::Connection, state: Arc<ProxyState>) -> a
 
             let (parts, _) = req.into_parts();
 
-            // Collect request body chunks from the stream.
-            let mut body_bytes = Vec::new();
+            // Collect request body chunks from the stream. Two fixes vs. the
+            // previous loop: (1) extend from the chunk slice instead of
+            // pushing one byte at a time (the old code was O(n) syscalls and
+            // realloc churn for a multi-MB upload); (2) cap the total at 64
+            // MiB so a malicious client can't OOM the gateway by streaming an
+            // unbounded body over an HTTP/3 datagram.
+            const H3_MAX_BODY: usize = 64 * 1024 * 1024;
+            let mut body_bytes: Vec<u8> = Vec::new();
+            let mut overflowed = false;
             loop {
                 match stream.recv_data().await {
-                    Ok(Some(mut chunk)) => {
-                        while chunk.has_remaining() {
-                            body_bytes.push(chunk.get_u8());
+                    Ok(Some(chunk)) => {
+                        // `Buf::chunk()` returns the contiguous remaining slice
+                        // of the current Bytes — no per-byte copying.
+                        let slice = chunk.chunk();
+                        if body_bytes.len().saturating_add(slice.len()) > H3_MAX_BODY {
+                            overflowed = true;
+                            break;
                         }
+                        body_bytes.extend_from_slice(slice);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -78,6 +90,13 @@ async fn handle_connection(conn: quinn::Connection, state: Arc<ProxyState>) -> a
                         return;
                     }
                 }
+            }
+            if overflowed {
+                error!(
+                    cap = H3_MAX_BODY,
+                    "H3 request body exceeded cap; aborting stream"
+                );
+                return;
             }
 
             let mut axum_req = Request::from_parts(parts, Body::from(body_bytes));
