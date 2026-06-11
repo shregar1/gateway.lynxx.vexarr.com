@@ -332,9 +332,7 @@ pub struct StatusResponse {
     pub licence_mode: String,
 }
 
-pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Arc<Service>>> {
-    // `Arc<Service>` serialises identically to `Service` (serde `rc` feature),
-    // so the JSON response is unchanged; the route table now hands back Arcs.
+pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Service>> {
     Json(state.route_table.list_services())
 }
 

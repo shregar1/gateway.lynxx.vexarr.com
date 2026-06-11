@@ -19,7 +19,10 @@ use tokio::process::{Child, Command};
 /// Master admin credential the test gateway is launched with (via
 /// `LYNXX_API_KEY`). Used to authenticate admin requests now that
 /// `auth_required` defaults to true.
-const ADMIN_TEST_TOKEN: &str = "admin-test-token";
+// utilx::license validates the API-key shape and requires the `lnx_test_`
+// (or `lnx_live_`) prefix, so this test value must match. Was
+// `admin-test-token` pre-utilx; the gateway rejected it post-merge.
+const ADMIN_TEST_TOKEN: &str = "lnx_test_admin_dummy";
 
 /// Drop guard that kills the gateway subprocess so a panicking test
 /// never leaks a port-bound process.
@@ -175,10 +178,11 @@ async fn launch_gateway(db_url: &str) -> (GatewayGuard, u16) {
     let bin = env!("CARGO_BIN_EXE_lynxx-gateway");
     let child = Command::new(bin)
         .env("LYNXX_CONFIG", &config)
-        // `[keyx]` is unset here, so licence defaults to "unverified"
-        // (Enterprise tier, no kill-switch). LYNXX_API_KEY just acts
-        // as a master admin token shortcut for the admin API.
+        // utilx::license validates the api key against the configured
+        // licence backend. Point at the local keyx stub via LYNXX_BASE_URL
+        // (was the older AUTH_URL → keyx-stub mapping pre-utilx).
         .env("LYNXX_API_KEY", ADMIN_TEST_TOKEN)
+        .env("LYNXX_BASE_URL", "http://127.0.0.1:9100")
         .env("RUST_LOG", "lynxx_gateway=warn")
         .current_dir(&dir_path)
         .stdout(Stdio::null())
