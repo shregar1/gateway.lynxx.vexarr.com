@@ -19,15 +19,36 @@ use crate::error::{GatewayError, PluginError};
 use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response, StatusCode};
+use dashmap::DashMap;
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+/// How long a server-issued nonce stays valid.
+const NONCE_TTL: Duration = Duration::from_secs(300);
+/// Backstop so a flood of challenges can't grow the nonce map without bound
+/// (each entry is also pruned by TTL on every challenge).
+const MAX_NONCES: usize = 8192;
+
+/// Tracks a nonce the server issued: when, and the highest `nc` (request
+/// counter) seen with it. A reused (nonce, nc) pair — i.e. `nc <= max_nc` —
+/// is a replay and is rejected.
+struct NonceEntry {
+    created: Instant,
+    max_nc: u64,
+}
 
 pub struct DigestAuthPlugin {
     /// username → password (or HA1 hex string when `use_ha1` is true).
     users: HashMap<String, String>,
     realm: String,
     use_ha1: bool,
+    /// Nonces this instance has issued. A digest response is only accepted
+    /// if it quotes a nonce we minted (and that is still fresh) — without
+    /// this, any client-chosen nonce would validate, enabling unbounded
+    /// replay.
+    nonces: DashMap<String, NonceEntry>,
 }
 
 /// Stored in request extensions when we need to send a 401 challenge
@@ -70,6 +91,7 @@ impl DigestAuthPlugin {
             users,
             realm,
             use_ha1,
+            nonces: DashMap::new(),
         })
     }
 
@@ -87,13 +109,32 @@ impl DigestAuthPlugin {
         hex::encode(hasher.finalize())
     }
 
-    /// Build the WWW-Authenticate challenge header value.
+    /// Build the WWW-Authenticate challenge header value, recording the
+    /// freshly-minted nonce so a later response quoting it can be accepted.
     fn build_challenge(&self) -> String {
         let nonce = Self::generate_nonce();
+        self.prune_nonces();
+        self.nonces.insert(
+            nonce.clone(),
+            NonceEntry {
+                created: Instant::now(),
+                max_nc: 0,
+            },
+        );
         format!(
             r#"Digest realm="{}", qop="auth", nonce="{}", algorithm=SHA-256"#,
             self.realm, nonce
         )
+    }
+
+    /// Drop expired nonces; clear entirely if a flood pushed us over the cap.
+    fn prune_nonces(&self) {
+        let now = Instant::now();
+        self.nonces
+            .retain(|_, e| now.duration_since(e.created) < NONCE_TTL);
+        if self.nonces.len() > MAX_NONCES {
+            self.nonces.clear();
+        }
     }
 
     /// Compute HA1 = SHA256(username:realm:password).
@@ -130,7 +171,13 @@ impl DigestAuthPlugin {
     }
 
     /// Validate the digest response against the expected value.
-    fn validate(&self, method: &str, params: &HashMap<String, String>) -> bool {
+    ///
+    /// `request_target` is the actual request-target (path + query) the
+    /// gateway received; the digest `uri` parameter MUST equal it. Otherwise
+    /// a client could compute a valid digest over an innocuous path (e.g.
+    /// `/`) and replay it against a protected path — the response hash only
+    /// covers the *claimed* uri, not the request line.
+    fn validate(&self, method: &str, request_target: &str, params: &HashMap<String, String>) -> bool {
         let username = match params.get("username") {
             Some(u) => u,
             None => return false,
@@ -160,6 +207,28 @@ impl DigestAuthPlugin {
             None => return false,
         };
 
+        // Bind the digest to the real request target.
+        if uri != request_target {
+            return false;
+        }
+
+        // The nonce must be one we issued and still fresh, and the request
+        // counter (nc) must strictly increase per nonce to defeat replay.
+        let nc_val = match u64::from_str_radix(nc, 16) {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let mut entry = match self.nonces.get_mut(nonce) {
+            Some(e) => e,
+            None => return false,
+        };
+        if Instant::now().duration_since(entry.created) >= NONCE_TTL {
+            return false;
+        }
+        if nc_val <= entry.max_nc {
+            return false;
+        }
+
         let ha1 = match self.compute_ha1(username) {
             Some(h) => h,
             None => return false,
@@ -171,7 +240,14 @@ impl DigestAuthPlugin {
             ha1, nonce, nc, cnonce, qop, ha2
         ));
 
-        expected == *response
+        if crate::utilities::constant_time_eq(expected.as_bytes(), response.as_bytes()) {
+            // Commit the new high-water mark only on success so a failed
+            // guess can't burn a counter value.
+            entry.max_nc = nc_val;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -207,9 +283,14 @@ impl Plugin for DigestAuthPlugin {
             }
             Some(ref header) => {
                 let params = Self::parse_digest_params(header);
-                let method = req.method().as_str();
+                let method = req.method().as_str().to_string();
+                let request_target = req
+                    .uri()
+                    .path_and_query()
+                    .map(|pq| pq.as_str().to_string())
+                    .unwrap_or_else(|| req.uri().path().to_string());
 
-                if !self.validate(method, &params) {
+                if !self.validate(&method, &request_target, &params) {
                     let challenge = self.build_challenge();
                     req.extensions_mut().insert(DigestChallenge {
                         www_authenticate: challenge,
@@ -242,7 +323,20 @@ mod tests {
             users: HashMap::from([("alice".to_string(), "secret".to_string())]),
             realm: "lynxx".to_string(),
             use_ha1: false,
+            nonces: DashMap::new(),
         }
+    }
+
+    /// Pretend the server already issued `nonce` (as `build_challenge`
+    /// would), so a subsequent valid response can be accepted.
+    fn seed_nonce(plugin: &DigestAuthPlugin, nonce: &str) {
+        plugin.nonces.insert(
+            nonce.to_string(),
+            NonceEntry {
+                created: Instant::now(),
+                max_nc: 0,
+            },
+        );
     }
 
     fn make_request(method: &str, uri: &str) -> Request<Body> {
@@ -306,6 +400,7 @@ mod tests {
             nonce, uri, qop, nc, cnonce, response_hash
         );
 
+        seed_nonce(&plugin, nonce);
         let mut req = Request::builder()
             .method(method)
             .uri(uri)
@@ -318,6 +413,86 @@ mod tests {
         assert!(
             req.extensions().get::<DigestChallenge>().is_none(),
             "valid credentials should not produce a challenge"
+        );
+
+        // Replaying the exact same (nonce, nc) must now fail.
+        let mut replay = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", &auth_header)
+            .body(Body::empty())
+            .unwrap();
+        plugin.on_request(&mut replay).await.unwrap();
+        assert!(
+            replay.extensions().get::<DigestChallenge>().is_some(),
+            "replaying the same nonce+nc must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn unissued_nonce_is_rejected() {
+        let plugin = test_plugin();
+        let method = "GET";
+        let uri = "/protected";
+        let nonce = "attackerchosen0000000000000000ab";
+        let nc = "00000001";
+        let cnonce = "cn";
+        let qop = "auth";
+        let ha1 = DigestAuthPlugin::sha256_hex("alice:lynxx:secret");
+        let ha2 = DigestAuthPlugin::sha256_hex(&format!("{}:{}", method, uri));
+        let response_hash = DigestAuthPlugin::sha256_hex(&format!(
+            "{}:{}:{}:{}:{}:{}",
+            ha1, nonce, nc, cnonce, qop, ha2
+        ));
+        let auth_header = format!(
+            r#"Digest username="alice", realm="lynxx", nonce="{}", uri="{}", qop={}, nc={}, cnonce="{}", response="{}", algorithm=SHA-256"#,
+            nonce, uri, qop, nc, cnonce, response_hash
+        );
+        // NOTE: nonce is NOT seeded — the server never issued it.
+        let mut req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("authorization", &auth_header)
+            .body(Body::empty())
+            .unwrap();
+        plugin.on_request(&mut req).await.unwrap();
+        assert!(
+            req.extensions().get::<DigestChallenge>().is_some(),
+            "a nonce the server never issued must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn uri_mismatch_is_rejected() {
+        let plugin = test_plugin();
+        let method = "GET";
+        let signed_uri = "/public"; // what the digest is computed over
+        let real_target = "/admin"; // the path actually requested
+        let nonce = "fixednonce99999999999999999999ab";
+        let nc = "00000001";
+        let cnonce = "cn";
+        let qop = "auth";
+        let ha1 = DigestAuthPlugin::sha256_hex("alice:lynxx:secret");
+        let ha2 = DigestAuthPlugin::sha256_hex(&format!("{}:{}", method, signed_uri));
+        let response_hash = DigestAuthPlugin::sha256_hex(&format!(
+            "{}:{}:{}:{}:{}:{}",
+            ha1, nonce, nc, cnonce, qop, ha2
+        ));
+        let auth_header = format!(
+            r#"Digest username="alice", realm="lynxx", nonce="{}", uri="{}", qop={}, nc={}, cnonce="{}", response="{}", algorithm=SHA-256"#,
+            nonce, signed_uri, qop, nc, cnonce, response_hash
+        );
+        seed_nonce(&plugin, nonce);
+        let mut req = Request::builder()
+            .method(method)
+            .uri(real_target)
+            .header("authorization", &auth_header)
+            .body(Body::empty())
+            .unwrap();
+        plugin.on_request(&mut req).await.unwrap();
+        assert!(
+            req.extensions().get::<DigestChallenge>().is_some(),
+            "digest signed over a different uri than the request target must be rejected"
         );
     }
 
@@ -408,7 +583,9 @@ mod tests {
             users: HashMap::from([("alice".to_string(), ha1.clone())]),
             realm: "lynxx".to_string(),
             use_ha1: true,
+            nonces: DashMap::new(),
         };
+        seed_nonce(&plugin, nonce);
 
         let ha2 = DigestAuthPlugin::sha256_hex(&format!("{}:{}", method, uri));
         let response_hash = DigestAuthPlugin::sha256_hex(&format!(

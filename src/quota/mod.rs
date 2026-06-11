@@ -275,11 +275,10 @@ impl QuotaTracker {
         repo: Arc<dyn Repository>,
     ) -> Result<Arc<Self>, GatewayError> {
         let period = current_period();
-        let (calls, rejected) = repo
+        let (calls, rejected, overage) = repo
             .get_quota_usage(&period)
             .await?
-            .map(|(c, r)| (c, r))
-            .unwrap_or((0, 0));
+            .unwrap_or((0, 0, 0));
 
         let allow_overage = matches!(plan, PlanTier::Pro | PlanTier::Business);
         let effective_limit = server_limit.or_else(|| plan.monthly_limit()).unwrap_or(0);
@@ -291,7 +290,7 @@ impl QuotaTracker {
             period_string: std::sync::Mutex::new(period.clone()),
             calls: AtomicU64::new(calls),
             rejected: AtomicU64::new(rejected),
-            overage: AtomicU64::new(0),
+            overage: AtomicU64::new(overage),
             allow_overage: AtomicBool::new(allow_overage),
             repo,
         });
@@ -590,7 +589,15 @@ impl QuotaTracker {
             }
         };
         let rejected = self.rejected.load(Ordering::Relaxed);
-        if let Err(e) = self.repo.upsert_quota_usage(&period, calls, rejected).await {
+        // Persist overage too so paid-tier billing survives restarts (migration
+        // 015 added the calls_overage column). Without this it would silently
+        // reset to 0 every redeploy/crash.
+        let overage = self.overage.load(Ordering::Relaxed);
+        if let Err(e) = self
+            .repo
+            .upsert_quota_usage(&period, calls, rejected, overage)
+            .await
+        {
             warn!(error = %e, "quota flush failed");
         }
     }
@@ -799,8 +806,8 @@ mod tests {
         async fn list_audit(&self, _f: &crate::audit::AuditFilter) -> Result<Vec<crate::audit::AuditEntry>, GatewayError> { Ok(vec![]) }
         async fn last_audit_hash(&self) -> Result<Option<String>, GatewayError> { Ok(None) }
         fn cluster_bus(&self) -> Arc<dyn crate::cluster::ClusterBus> { unimplemented!("test stub") }
-        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> { Ok(None) }
-        async fn upsert_quota_usage(&self, _period: &str, _calls_total: u64, _calls_rejected: u64) -> Result<(), GatewayError> { Ok(()) }
+        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64, u64)>, GatewayError> { Ok(None) }
+        async fn upsert_quota_usage(&self, _period: &str, _calls_total: u64, _calls_rejected: u64, _calls_overage: u64) -> Result<(), GatewayError> { Ok(()) }
         async fn append_recording(&self, _row: &crate::recording::RecordingIndexRow) -> Result<(), GatewayError> { Ok(()) }
         async fn list_recordings(&self, _f: &crate::recording::RecordingFilter) -> Result<Vec<crate::recording::RecordingIndexRow>, GatewayError> { Ok(vec![]) }
         async fn get_recording_index(&self, _id: &str) -> Result<Option<crate::recording::RecordingIndexRow>, GatewayError> { Ok(None) }

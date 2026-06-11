@@ -43,6 +43,19 @@ fn pending() -> &'static Arc<DashMap<String, PendingCapture>> {
     PENDING.get_or_init(|| Arc::new(DashMap::new()))
 }
 
+/// A pending capture this old will never be matched by an `on_response` — the
+/// request errored before producing a response, another plugin stripped the
+/// id header, or the client disconnected. Sweep such entries so the map (and
+/// the buffered request bodies it holds) can't grow without bound.
+const PENDING_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+/// Hard backstop on the number of in-flight captures.
+const PENDING_MAX_ENTRIES: usize = 10_000;
+
+/// Drop pending captures older than [`PENDING_MAX_AGE`].
+fn sweep_pending() {
+    pending().retain(|_, p| p.started.elapsed() < PENDING_MAX_AGE);
+}
+
 #[derive(Clone)]
 struct PendingCapture {
     method: String,
@@ -134,19 +147,32 @@ impl Plugin for RequestRecorderPlugin {
             body_bytes.to_vec()
         };
 
+        let content_type = parts
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
         let mut headers: Vec<(String, String)> = parts
             .headers
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
-        redact::redact_headers(&mut headers, &self.cfg.redact_headers);
+        redact::redact_headers_defaulted(&mut headers, &self.cfg.redact_headers);
 
-        // Body redaction only applies to JSON; non-JSON bodies are recorded as-is.
+        // Redact bodies before persisting. JSON is redacted by key name,
+        // form-urlencoded by parameter name; both on top of a built-in
+        // credential denylist so secrets never persist even with empty config.
+        // Anything else is recorded as-is (we can't safely parse it).
         let body_for_record: Vec<u8> = match serde_json::from_slice::<serde_json::Value>(&truncated)
         {
             Ok(mut v) => {
-                redact::redact_body_paths(&mut v, &self.cfg.redact_body_paths);
+                redact::redact_body_paths_defaulted(&mut v, &self.cfg.redact_body_paths);
                 serde_json::to_vec(&v).unwrap_or_else(|_| truncated.clone())
+            }
+            Err(_) if content_type.starts_with("application/x-www-form-urlencoded") => {
+                redact::redact_form_urlencoded(&truncated, &self.cfg.redact_body_paths)
             }
             Err(_) => truncated.clone(),
         };
@@ -185,6 +211,19 @@ impl Plugin for RequestRecorderPlugin {
             upstream_url: mc_upstream,
             consumer: mc_consumer,
         };
+
+        // Bound the pending map before inserting: sweep captures that will
+        // never be matched, and if it is still saturated, skip recording this
+        // request rather than leaking its buffered body.
+        sweep_pending();
+        if pending().len() >= PENDING_MAX_ENTRIES {
+            tracing::warn!(
+                pending = pending().len(),
+                "request-recorder pending map saturated; skipping capture"
+            );
+            *req = Request::from_parts(parts, Body::from(body_bytes));
+            return Ok(());
+        }
 
         // Mint an id, stash the capture, and thread the id forward via a
         // header. The proxy handler copies request headers onto the response
@@ -242,11 +281,34 @@ impl Plugin for RequestRecorderPlugin {
             body_bytes.to_vec()
         };
 
-        let resp_headers: Vec<(String, String)> = parts
+        let mut resp_headers: Vec<(String, String)> = parts
             .headers
             .iter()
             .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
             .collect();
+        // Response headers were previously persisted in the clear — Set-Cookie,
+        // bearer tokens, etc. Redact with the same default-deny set as requests.
+        redact::redact_headers_defaulted(&mut resp_headers, &self.cfg.redact_headers);
+
+        // Redact secrets in JSON response bodies (e.g. access_token / refresh
+        // token in an auth response) before persisting.
+        let resp_content_type = parts
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let resp_body_for_record: Vec<u8> =
+            match serde_json::from_slice::<serde_json::Value>(&truncated) {
+                Ok(mut v) => {
+                    redact::redact_body_paths_defaulted(&mut v, &self.cfg.redact_body_paths);
+                    serde_json::to_vec(&v).unwrap_or_else(|_| truncated.clone())
+                }
+                Err(_) if resp_content_type.starts_with("application/x-www-form-urlencoded") => {
+                    redact::redact_form_urlencoded(&truncated, &self.cfg.redact_body_paths)
+                }
+                Err(_) => truncated.clone(),
+            };
 
         let duration_ms = pending_capture.started.elapsed().as_millis() as u64;
 
@@ -267,7 +329,7 @@ impl Plugin for RequestRecorderPlugin {
             response: RecordedResponse {
                 status,
                 headers: resp_headers,
-                body_b64: STANDARD.encode(&truncated),
+                body_b64: STANDARD.encode(&resp_body_for_record),
             },
             upstream_url: pending_capture.upstream_url.clone(),
             duration_ms,
@@ -563,7 +625,10 @@ mod tests {
         fn cluster_bus(&self) -> Arc<dyn crate::cluster::ClusterBus> {
             unimplemented!("test stub")
         }
-        async fn get_quota_usage(&self, _period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
+        async fn get_quota_usage(
+            &self,
+            _period: &str,
+        ) -> Result<Option<(u64, u64, u64)>, GatewayError> {
             Ok(None)
         }
         async fn upsert_quota_usage(
@@ -571,6 +636,7 @@ mod tests {
             _period: &str,
             _calls_total: u64,
             _calls_rejected: u64,
+            _calls_overage: u64,
         ) -> Result<(), GatewayError> {
             Ok(())
         }

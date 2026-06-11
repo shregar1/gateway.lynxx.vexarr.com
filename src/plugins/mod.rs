@@ -7,6 +7,7 @@ pub mod bot_detection;
 pub mod buffering;
 pub mod canary;
 pub mod client_cert_header;
+pub mod consumer_cache;
 pub mod content_type;
 pub mod correlation_id;
 pub mod cors;

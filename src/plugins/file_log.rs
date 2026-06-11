@@ -343,7 +343,9 @@ async fn writer_task(
                         count += 1;
                         if count >= 256 {
                             let flush_len = buf.len() as u64;
-                            let _ = file.write_all(&buf).await;
+                            if let Err(e) = file.write_all(&buf).await {
+                                tracing::warn!(error = %e, "file-log: write failed; log batch dropped");
+                            }
                             buf.clear();
                             count = 0;
                             // Check rotation after each flush batch.
@@ -364,7 +366,9 @@ async fn writer_task(
                         }
                     }
                     None => {
-                        let _ = file.write_all(&buf).await;
+                        if let Err(e) = file.write_all(&buf).await {
+                            tracing::warn!(error = %e, "file-log: final write failed; log batch dropped");
+                        }
                         let _ = file.flush().await;
                         return;
                     }
@@ -373,7 +377,9 @@ async fn writer_task(
             _ = ticker.tick() => {
                 if !buf.is_empty() {
                     let flush_len = buf.len() as u64;
-                    let _ = file.write_all(&buf).await;
+                    if let Err(e) = file.write_all(&buf).await {
+                        tracing::warn!(error = %e, "file-log: write failed; log batch dropped");
+                    }
                     let _ = file.flush().await;
                     buf.clear();
                     count = 0;

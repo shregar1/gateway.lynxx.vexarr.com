@@ -337,34 +337,56 @@ impl Plugin for ResponseCompressionPlugin {
             return Ok(());
         }
 
-        let (compressed, encoding_name) = match algo {
-            CompressionAlgo::Gzip => {
-                let mut enc = flate2::write::GzEncoder::new(
-                    Vec::with_capacity(bytes.len() / 2),
-                    flate2::Compression::new(self.gzip_level),
-                );
-                enc.write_all(&bytes)
-                    .map_err(|e| PluginError::Internal(format!("gzip compress: {e}")))?;
-                let out = enc
-                    .finish()
-                    .map_err(|e| PluginError::Internal(format!("gzip finish: {e}")))?;
-                (out, "gzip")
-            }
-            CompressionAlgo::Brotli => {
-                let mut out = Vec::with_capacity(bytes.len() / 2);
-                {
-                    let mut writer =
-                        brotli::CompressorWriter::new(&mut out, 4096, self.brotli_level, 22);
-                    writer
-                        .write_all(&bytes)
-                        .map_err(|e| PluginError::Internal(format!("brotli compress: {e}")))?;
+        // Compression is CPU-bound and can take milliseconds on large bodies.
+        // Running it inline blocks the tokio worker (and therefore every other
+        // task scheduled on it). Offload to the blocking pool. Cloning `bytes`
+        // is O(1) — `bytes::Bytes` shares the underlying buffer — so we keep
+        // the original for the "didn't help" comparison below.
+        let input = bytes.clone();
+        let gzip_level = self.gzip_level;
+        let brotli_level = self.brotli_level;
+        let zstd_level = self.zstd_level;
+        let compress_res = tokio::task::spawn_blocking(
+            move || -> Result<(Vec<u8>, &'static str), String> {
+                match algo {
+                    CompressionAlgo::Gzip => {
+                        let mut enc = flate2::write::GzEncoder::new(
+                            Vec::with_capacity(input.len() / 2),
+                            flate2::Compression::new(gzip_level),
+                        );
+                        enc.write_all(&input).map_err(|e| format!("gzip compress: {e}"))?;
+                        let out = enc.finish().map_err(|e| format!("gzip finish: {e}"))?;
+                        Ok((out, "gzip"))
+                    }
+                    CompressionAlgo::Brotli => {
+                        let mut out = Vec::with_capacity(input.len() / 2);
+                        {
+                            let mut writer =
+                                brotli::CompressorWriter::new(&mut out, 4096, brotli_level, 22);
+                            writer
+                                .write_all(&input)
+                                .map_err(|e| format!("brotli compress: {e}"))?;
+                        }
+                        Ok((out, "br"))
+                    }
+                    CompressionAlgo::Zstd => {
+                        let out = zstd::encode_all(input.as_ref(), zstd_level)
+                            .map_err(|e| format!("zstd compress: {e}"))?;
+                        Ok((out, "zstd"))
+                    }
                 }
-                (out, "br")
-            }
-            CompressionAlgo::Zstd => {
-                let out = zstd::encode_all(bytes.as_ref(), self.zstd_level)
-                    .map_err(|e| PluginError::Internal(format!("zstd compress: {e}")))?;
-                (out, "zstd")
+            },
+        )
+        .await;
+        let (compressed, encoding_name) = match compress_res {
+            Ok(Ok(v)) => v,
+            Ok(Err(e)) => return Err(PluginError::Internal(e)),
+            Err(e) => {
+                // Blocking task panicked/cancelled — fall back to the
+                // uncompressed body rather than failing the response.
+                tracing::warn!(error = %e, "compression task failed; sending uncompressed");
+                *resp.body_mut() = Body::from(bytes);
+                return Ok(());
             }
         };
 

@@ -836,18 +836,42 @@ impl RouteTable {
     ///
     /// The scan path uses the `routes_by_service` index to walk only
     /// routes registered for `service_id` — O(R/N) instead of O(R).
+    ///
+    /// Enforces the SAME host/header/query-param constraints as
+    /// [`Self::match_route_full`]: the subdomain fast path must not become a
+    /// way to select a route while skipping its `hosts` / `headers` /
+    /// `query_params` gating — otherwise a route intended to apply only when a
+    /// header or query value is present would match unconditionally.
     pub fn match_route_for_service(
         &self,
         service_id: &Uuid,
         path: &str,
         method: &str,
+        host: Option<&str>,
+        req_headers: Option<&axum::http::HeaderMap>,
+        query_string: Option<&str>,
     ) -> Option<Arc<Route>> {
         let strategy = PathMatchStrategy::from_u8(self.path_strategy.load(Ordering::Relaxed));
         if matches!(strategy, PathMatchStrategy::Scan) {
-            self.match_route_for_service_scan(service_id, path, method)
+            self.match_route_for_service_scan(
+                service_id,
+                path,
+                method,
+                host,
+                req_headers,
+                query_string,
+            )
         } else {
             let candidates = self.gather_indexed_candidates(path);
-            self.match_service_from_candidates(&candidates, service_id, path, method)
+            self.match_service_from_candidates(
+                &candidates,
+                service_id,
+                path,
+                method,
+                host,
+                req_headers,
+                query_string,
+            )
         }
     }
 
@@ -858,6 +882,9 @@ impl RouteTable {
         service_id: &Uuid,
         path: &str,
         method: &str,
+        host: Option<&str>,
+        req_headers: Option<&axum::http::HeaderMap>,
+        query_string: Option<&str>,
     ) -> Option<Arc<Route>> {
         let bucket = self.routes_by_service.get(service_id)?;
         for route_id in bucket.iter() {
@@ -872,6 +899,17 @@ impl RouteTable {
             let method_matches =
                 route.methods.is_empty() || route.methods.iter().any(|m| m == method);
             if !method_matches {
+                continue;
+            }
+            let host_matches = route.hosts.is_empty()
+                || host.is_some_and(|h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+            if !host_matches {
+                continue;
+            }
+            if !route.headers.is_empty() && !match_headers(&route.headers, req_headers) {
+                continue;
+            }
+            if !route.query_params.is_empty() && !match_query(&route.query_params, query_string) {
                 continue;
             }
             return Some(Arc::clone(route));
@@ -1257,6 +1295,9 @@ impl RouteTable {
         service_id: &Uuid,
         path: &str,
         method: &str,
+        host: Option<&str>,
+        req_headers: Option<&axum::http::HeaderMap>,
+        query_string: Option<&str>,
     ) -> Option<Arc<Route>> {
         for &route_id in candidates {
             let route = match self.arc_route(&route_id) {
@@ -1271,9 +1312,24 @@ impl RouteTable {
             }
             let method_matches =
                 route.methods.is_empty() || route.methods.iter().any(|m| m == method);
-            if method_matches {
-                return Some(route);
+            if !method_matches {
+                continue;
             }
+            // SECURITY: enforce the same constraints as the full router so
+            // the subdomain fast path can't bypass `hosts`/`headers`/
+            // `query_params` gating on a matched route.
+            let host_matches = route.hosts.is_empty()
+                || host.is_some_and(|h| route.hosts.iter().any(|rh| rh.eq_ignore_ascii_case(h)));
+            if !host_matches {
+                continue;
+            }
+            if !route.headers.is_empty() && !match_headers(&route.headers, req_headers) {
+                continue;
+            }
+            if !route.query_params.is_empty() && !match_query(&route.query_params, query_string) {
+                continue;
+            }
+            return Some(route);
         }
         None
     }
@@ -1320,8 +1376,13 @@ impl RouteTable {
 
             let has_hosts = !route.hosts.is_empty();
             if has_hosts && !best_has_hosts {
-                best = Some((Arc::clone(route), self.get_service(&route.service_id)?));
-                best_has_hosts = true;
+                // Use `if let`, NOT `?`: a single route whose service row is
+                // missing must skip that route, not abort the entire scan and
+                // 404 the request when another valid route could still match.
+                if let Some(service) = self.get_service(&route.service_id) {
+                    best = Some((Arc::clone(route), service));
+                    best_has_hosts = true;
+                }
             } else if best.is_none() {
                 if let Some(service) = self.get_service(&route.service_id) {
                     best = Some((Arc::clone(route), service));

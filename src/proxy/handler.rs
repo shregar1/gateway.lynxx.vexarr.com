@@ -451,6 +451,26 @@ pub async fn proxy_handler(
     mut req: Request<Body>,
 ) -> Result<Response<Body>, GatewayError> {
     let start = Instant::now();
+    // SECURITY: strip any client-supplied identity headers at the very edge,
+    // before routing or any plugin runs. Downstream ACL, per-consumer rate
+    // limiting, anomaly detection, LLM tenant cache keys, and access logs all
+    // trust `x-consumer-*` as the authenticated identity — but auth plugins
+    // (key-auth / basic-auth / hmac-auth) are the ONLY components allowed to
+    // set them. Anything the caller sends is forged and must be removed here,
+    // otherwise an unauthenticated client could impersonate any consumer just
+    // by adding `x-consumer-username: <victim>`.
+    {
+        let forged: Vec<HeaderName> = req
+            .headers()
+            .keys()
+            .filter(|n| n.as_str().starts_with("x-consumer-"))
+            .cloned()
+            .collect();
+        for name in forged {
+            req.headers_mut().remove(&name);
+        }
+    }
+
     // Cache the wall-clock at request entry and thread the same value through
     // every per-request consumer (health registry, quota tracker, log
     // writer). Each `Utc::now()` is a `clock_gettime` syscall; the
@@ -493,7 +513,14 @@ pub async fn proxy_handler(
         let svc = state.route_table.match_by_host(h)?;
         let route = state
             .route_table
-            .match_route_for_service(&svc.id, path, method)
+            .match_route_for_service(
+                &svc.id,
+                path,
+                method,
+                Some(h),
+                Some(req.headers()),
+                query_string,
+            )
             .unwrap_or_else(|| std::sync::Arc::new(crate::models::Route::passthrough(svc.id)));
         Some((route, svc))
     });
@@ -668,7 +695,13 @@ pub async fn proxy_handler(
         .get::<std::net::SocketAddr>()
         .map(|a| a.ip());
     let trust_headers = if state.trusted_proxies.is_empty() {
-        true // no allowlist → trust unconditionally (backward compat)
+        // SECURITY: with no trusted-proxy allowlist configured, do NOT trust
+        // client-supplied X-Forwarded-For / X-Real-IP — any caller could spoof
+        // its source IP to bypass IP ACLs / per-IP rate limits or poison access
+        // logs. Fall back to the real socket peer address. Deployments behind a
+        // load balancer must list it in `trusted_proxies` for XFF to be honoured
+        // (same model as nginx `set_real_ip_from` / Caddy `trusted_proxies`).
+        false
     } else {
         peer_ip
             .map(|ip| state.trusted_proxies.iter().any(|net| net.contains(&ip)))

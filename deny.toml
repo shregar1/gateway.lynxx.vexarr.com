@@ -12,7 +12,25 @@ feature-depth = 1
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
-ignore = []
+# Each entry is an EXPLICIT, time-bound acceptance with rationale — not a
+# blanket suppression. Re-review on every dependency bump.
+#
+# NOTE: the wasmtime 27.x advisories (14 of them, incl. two CRITICAL sandbox
+# escapes RUSTSEC-2026-0095/0096) were FIXED by upgrading to wasmtime 36.x —
+# they are intentionally NOT ignored here.
+ignore = [
+  # rsa 0.9 "Marvin Attack" timing side-channel. No fixed upstream version
+  # exists yet. Pulled in transitively (sqlx-mysql path); the gateway does not
+  # perform attacker-timed RSA private-key operations on a request path.
+  # TODO: drop the unused sqlx mysql feature / dep chain to remove `rsa`.
+  "RUSTSEC-2023-0071",
+  # hickory-proto O(n²) name-compression CPU DoS during message ENCODING.
+  # Fix requires hickory-proto >=0.26.1, i.e. a two-major-version bump of
+  # hickory-resolver (0.24 -> 0.26) with a breaking resolver-builder API change
+  # in proxy/http_client.rs. Tracked as a dedicated follow-up so the resolver
+  # migration can be tested on its own rather than riding this security batch.
+  "RUSTSEC-2026-0119",
+]
 
 # ── Licenses ──
 # Permissive OSS licenses that ship with rustc + first-party deps. Add

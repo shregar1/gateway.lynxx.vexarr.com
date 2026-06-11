@@ -191,7 +191,12 @@ graphql-parser = "0.4"
 # untrusted module execution. Default features include cranelift, parallel
 # compilation, and the cache; we don't enable wasi to keep the host
 # surface limited to the explicit `lynxx_*` ABI in src/plugins/wasm/host.rs.
-wasmtime = "27"
+#
+# Pinned to the 36.x line: wasmtime 27 is affected by 14 RustSec advisories
+# including two CRITICAL sandbox escapes (RUSTSEC-2026-0095/0096), and lynxx
+# executes untrusted guest modules — so a sandbox escape is directly
+# exploitable. 36.0.7 is the lowest patched line covering all of them.
+wasmtime = "36"
 
 # OpenAPI 3.0 parsing for the `lynxx import` CLI flow and the
 # `openapi-drift` / `openapi-mock` plugins. We deliberately picked

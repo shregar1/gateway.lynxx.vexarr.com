@@ -32,8 +32,15 @@ pub struct PostgresRepository {
 
 impl PostgresRepository {
     pub async fn new(database_url: &str) -> Result<Self, GatewayError> {
+        // Scale the pool with the runtime's worker threads instead of a flat
+        // 8 — under load on a many-core box a hardcoded 8 becomes the
+        // bottleneck. Bound to a sane ceiling so we don't exhaust Postgres's
+        // own connection limit. acquire_timeout stops a request hanging
+        // forever when the pool is saturated.
+        let max_conns = ((num_cpus::get() as u32) * 2).clamp(8, 32);
         let pool = PgPoolOptions::new()
-            .max_connections(8)
+            .max_connections(max_conns)
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .connect(database_url)
             .await?;
 
@@ -1168,17 +1175,19 @@ impl Repository for PostgresRepository {
 
     // ---------- quota ----------
 
-    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
-        let row =
-            sqlx::query("SELECT calls_total, calls_rejected FROM quota_usage WHERE period = $1")
-                .bind(period)
-                .fetch_optional(&self.pool)
-                .await?;
+    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64, u64)>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT calls_total, calls_rejected, calls_overage FROM quota_usage WHERE period = $1",
+        )
+        .bind(period)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| {
             let calls: i64 = r.get(0);
             let rejected: i64 = r.get(1);
-            (calls.max(0) as u64, rejected.max(0) as u64)
+            let overage: i64 = r.get(2);
+            (calls.max(0) as u64, rejected.max(0) as u64, overage.max(0) as u64)
         }))
     }
 
@@ -1187,18 +1196,21 @@ impl Repository for PostgresRepository {
         period: &str,
         calls_total: u64,
         calls_rejected: u64,
+        calls_overage: u64,
     ) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO quota_usage (period, calls_total, calls_rejected, updated_at) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO quota_usage (period, calls_total, calls_rejected, calls_overage, updated_at) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (period) DO UPDATE SET \
                calls_total    = EXCLUDED.calls_total, \
                calls_rejected = EXCLUDED.calls_rejected, \
+               calls_overage  = EXCLUDED.calls_overage, \
                updated_at     = EXCLUDED.updated_at",
         )
         .bind(period)
         .bind(calls_total as i64)
         .bind(calls_rejected as i64)
+        .bind(calls_overage as i64)
         .bind(Utc::now())
         .execute(&self.pool)
         .await?;

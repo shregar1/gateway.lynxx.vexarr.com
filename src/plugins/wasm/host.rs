@@ -27,6 +27,12 @@ const ERR_INVALID_UTF8: i32 = -4;
 const ERR_WRONG_PHASE: i32 = -5;
 const ERR_TOO_LARGE: i32 = -6;
 
+/// Upper bound on a single `lynxx_random_bytes` request. The guest controls
+/// `len`, and the host allocates a buffer of that size BEFORE touching wasm
+/// memory, so an unbounded value (up to i32::MAX ≈ 2 GiB) is a trivial host
+/// OOM. 64 KiB is far more than any legitimate jitter/id use needs.
+const MAX_RANDOM_BYTES: usize = 64 * 1024;
+
 /// Wire up every `lynxx_*` host function on the supplied linker. Called
 /// once per `WasmPlugin` instance; the linker is then reused to
 /// instantiate the module on every request.
@@ -313,6 +319,11 @@ pub fn register(linker: &mut Linker<HostContext>) -> wasmtime::Result<()> {
         |mut caller: Caller<'_, HostContext>, ptr: i32, len: i32| -> i32 {
             if len <= 0 {
                 return 0;
+            }
+            if len as usize > MAX_RANDOM_BYTES {
+                // Guest asked for more than we'll ever allocate for this —
+                // reject before the host-side `vec![0u8; len]` allocation.
+                return ERR_TOO_LARGE;
             }
             // xorshift64 seeded per request from thread_rng. Cheap and
             // good enough for plugin-side jitter / id generation. Guests

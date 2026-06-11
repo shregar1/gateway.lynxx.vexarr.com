@@ -3,8 +3,12 @@
 //! Two layers compose:
 //!   * [`extract_token`]: looks up the bearer token, attaches an
 //!     `Option<AdminToken>` to request extensions, and 401s on bad tokens.
-//!     If the DB has zero tokens we are in *bootstrap mode* and the request
-//!     is allowed through without an actor (matches Kong's first-run UX).
+//!     When `auth_required` is false (NOT the default), a request with no
+//!     Authorization header is allowed through with `CurrentActor(None)` —
+//!     an explicit "no admin auth" mode for trusted isolated networks. The
+//!     default is `auth_required = true`; first-run setup still works because
+//!     the Lynxx license API key is accepted as a master admin credential
+//!     (see [`resolve_actor`]).
 //!   * [`require_role`]: per-route guard that 403s if the actor's role is
 //!     below the route's minimum.
 
@@ -202,7 +206,11 @@ async fn resolve_actor(
     // Fast path: the Lynxx license API key is always a valid master admin
     // credential. Customers can use the same key they got from their account
     // dashboard at lynxx.vexarr.com — no separate token creation needed.
-    if !state.license_api_key.is_empty() && raw == state.license_api_key {
+    // Constant-time compare so the master key can't be recovered byte-by-byte
+    // via response timing.
+    if !state.license_api_key.is_empty()
+        && crate::utilities::constant_time_eq(raw.as_bytes(), state.license_api_key.as_bytes())
+    {
         return Ok(Some(AdminToken {
             id: uuid::Uuid::nil(),
             name: "license-key".to_string(),

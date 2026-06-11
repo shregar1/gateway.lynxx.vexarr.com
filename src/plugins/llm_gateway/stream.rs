@@ -29,6 +29,10 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
+/// Upper bound on the unparsed SSE buffer. Beyond this we drop the partial
+/// frame so a terminator-less stream can't exhaust memory.
+const MAX_STREAM_BUFFER: usize = 1024 * 1024;
+
 /// Output of stream-body analysis.
 #[derive(Debug, Clone, Default)]
 pub struct StreamUsage {
@@ -186,6 +190,18 @@ where
             Poll::Ready(Some(Ok(bytes))) => {
                 self.buffer.extend_from_slice(&bytes);
                 self.process_buffer();
+                // Bound the buffer: a stream that never emits the `\n\n` frame
+                // terminator (malformed SSE, or a single enormous frame) would
+                // otherwise grow `buffer` without limit. The buffer only feeds
+                // token accounting, so dropping an un-terminated partial frame
+                // past the cap is safe (counting for that segment is lost).
+                if self.buffer.len() > MAX_STREAM_BUFFER {
+                    tracing::debug!(
+                        len = self.buffer.len(),
+                        "llm stream buffer exceeded cap with no frame terminator; dropping partial"
+                    );
+                    self.buffer.clear();
+                }
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(axum::Error::new(e)))),
@@ -205,21 +221,27 @@ where
 impl<S> Drop for TokenCountingStream<S> {
     fn drop(&mut self) {
         // Post-hoc quota adjustment.
-        let actual_total = self
-            .usage
-            .upstream_completion_tokens
-            .unwrap_or(self.usage.completion_tokens);
-        // We only adjust if we have a non-zero count. If the stream was
-        // interrupted before any tokens were parsed, we stick with the
-        // initial estimate as a safety measure.
-        if actual_total > 0 {
+        //
+        // `initial_estimate` was charged up-front as (estimated prompt +
+        // estimated completion). To reconcile correctly we must compare it
+        // against the ACTUAL prompt + completion total. The previous code
+        // compared it against the completion count ALONE — which refunds the
+        // prompt tokens too, systematically under-charging every streaming
+        // request.
+        //
+        // We therefore only reconcile when the upstream emitted its full usage
+        // block (prompt + completion are both authoritative). Without it we
+        // can't separate the prompt portion of the estimate, so we keep the
+        // pre-charged estimate rather than risk under-charging.
+        if let (Some(prompt), Some(completion)) = (
+            self.usage.upstream_prompt_tokens,
+            self.usage.upstream_completion_tokens,
+        ) {
+            let actual_total = prompt.saturating_add(completion);
             let delta = (self.initial_estimate as i64) - (actual_total as i64);
             if delta != 0 {
-                // If delta is positive, we over-estimated (refund).
-                // If delta is negative, we under-estimated (charge more).
-                // Note: initial_estimate included prompt tokens, so we should
-                // really compare against (prompt + completion).
-                // TODO: refine this to include actual prompt tokens from upstream usage block.
+                // delta > 0 → over-estimated (refund); delta < 0 → under-
+                // estimated (charge the difference).
                 self.buckets.refund(&self.consumer, delta);
             }
         }

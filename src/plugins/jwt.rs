@@ -98,6 +98,36 @@ impl JwtPlugin {
         // missing claim in the error.
         validation.required_spec_claims.clear();
         validation.validate_exp = true;
+        validation.validate_nbf = cfg
+            .get("validate_nbf")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if let Some(leeway) = cfg.get("leeway_secs").and_then(|v| v.as_u64()) {
+            validation.leeway = leeway;
+        }
+        // Issuer / audience binding. Without these a token minted by the same
+        // IdP (same signing key) for a DIFFERENT service/audience would be
+        // accepted here. Accept a string or an array for each.
+        let str_or_array = |v: &serde_json::Value| -> Vec<String> {
+            if let Some(s) = v.as_str() {
+                vec![s.to_string()]
+            } else if let Some(arr) = v.as_array() {
+                arr.iter().filter_map(|x| x.as_str().map(String::from)).collect()
+            } else {
+                Vec::new()
+            }
+        };
+        match cfg.get("issuer").map(str_or_array) {
+            Some(iss) if !iss.is_empty() => validation.set_issuer(&iss),
+            _ => {}
+        }
+        match cfg.get("audience").map(str_or_array) {
+            Some(aud) if !aud.is_empty() => validation.set_audience(&aud),
+            // No audience configured: don't reject tokens that merely carry an
+            // `aud` claim (preserves existing behaviour). Operators bind it
+            // explicitly via config to enforce.
+            _ => validation.validate_aud = false,
+        }
 
         let claims_required = cfg
             .get("claims_required")

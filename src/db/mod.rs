@@ -157,9 +157,10 @@ pub trait Repository: Send + Sync {
 
     // ---------- quota ----------
 
-    /// Return `(calls_total, calls_rejected)` for `period` ('YYYY-MM'), or
-    /// `None` if no row exists yet for that period.
-    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError>;
+    /// Return `(calls_total, calls_rejected, calls_overage)` for `period`
+    /// ('YYYY-MM'), or `None` if no row exists yet for that period.
+    async fn get_quota_usage(&self, period: &str)
+        -> Result<Option<(u64, u64, u64)>, GatewayError>;
 
     /// Insert or replace the quota row for `period` with the supplied totals.
     async fn upsert_quota_usage(
@@ -167,6 +168,7 @@ pub trait Repository: Send + Sync {
         period: &str,
         calls_total: u64,
         calls_rejected: u64,
+        calls_overage: u64,
     ) -> Result<(), GatewayError>;
 
     // ---------- recordings (Time-Travel Debug) ----------

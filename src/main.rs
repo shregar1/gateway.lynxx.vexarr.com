@@ -450,6 +450,11 @@ async fn async_main() -> anyhow::Result<()> {
                 from_cache = lic.from_cache,
                 "licence verified"
             );
+            if let Some(days) = lic.days_remaining() {
+                if days <= 14 {
+                    tracing::warn!(days_remaining = days, "licence expires soon — renew to avoid downtime");
+                }
+            }
             config.gateway.plan_tier = lic.tier.as_str().to_string();
             lic
         }
@@ -593,6 +598,10 @@ async fn async_main() -> anyhow::Result<()> {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| config.license.api_key.clone());
     let license_verify_url = format!("{}/v1/license/verify", lynxx_base_url);
+    // Note: utilx::license::LicenseState handles expiry internally via its
+    // ed25519-signed verify protocol, so we don't pass `license.expires_at`
+    // here — my interim HMAC-cache hardening in src/license/mod.rs was
+    // superseded by the utilx architecture.
     let license_state = crate::license::LicenseState::new(
         license_api_key.clone(),
         license_verify_url,
