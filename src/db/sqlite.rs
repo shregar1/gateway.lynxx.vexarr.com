@@ -142,7 +142,7 @@ impl Repository for SqliteRepository {
     ) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -159,7 +159,7 @@ impl Repository for SqliteRepository {
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -174,7 +174,7 @@ impl Repository for SqliteRepository {
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -190,7 +190,7 @@ impl Repository for SqliteRepository {
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -206,11 +206,11 @@ impl Repository for SqliteRepository {
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                                   document_root, index_file, spa_fallback, \
+                                   document_root, index_file, spa_fallback, hide_patterns, \
                                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                                    project_id, domain, subdomain, \
                                    enabled, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(svc.id.to_string())
         .bind(&*svc.name)
@@ -222,6 +222,7 @@ impl Repository for SqliteRepository {
         .bind(svc.document_root.as_deref())
         .bind(&svc.index_file)
         .bind(svc.spa_fallback as i64)
+        .bind(serde_json::to_string(&svc.hide_patterns).unwrap_or_else(|_| "[]".to_string()))
         .bind(svc.tls_verify as i64)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -239,7 +240,7 @@ impl Repository for SqliteRepository {
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE services SET name = ?, url = ?, retries = ?, connect_timeout_ms = ?, lb_strategy = ?, service_type = ?, \
-                                 document_root = ?, index_file = ?, spa_fallback = ?, \
+                                 document_root = ?, index_file = ?, spa_fallback = ?, hide_patterns = ?, \
                                  tls_verify = ?, tls_client_cert_path = ?, tls_client_key_path = ?, tls_ca_path = ?, \
                                  project_id = ?, domain = ?, subdomain = ?, \
                                  updated_at = ? \
@@ -254,6 +255,7 @@ impl Repository for SqliteRepository {
         .bind(svc.document_root.as_deref())
         .bind(&svc.index_file)
         .bind(svc.spa_fallback as i64)
+        .bind(serde_json::to_string(&svc.hide_patterns).unwrap_or_else(|_| "[]".to_string()))
         .bind(svc.tls_verify as i64)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -915,6 +917,9 @@ impl Repository for SqliteRepository {
             sql.push_str(" AND ts >= ?");
         }
         sql.push_str(" ORDER BY ts DESC, id DESC LIMIT ?");
+        if let Some(offset) = filter.offset {
+            sql.push_str(" OFFSET ?");
+        }
 
         let mut q = sqlx::query(&sql);
         if let Some(actor) = &filter.actor {
@@ -930,6 +935,9 @@ impl Repository for SqliteRepository {
             q = q.bind(since.to_rfc3339());
         }
         q = q.bind(limit);
+        if let Some(offset) = filter.offset {
+            q = q.bind(offset as i64);
+        }
 
         let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_audit).collect()
@@ -2900,7 +2908,9 @@ pub(crate) async fn seed_from_config_generic<R: Repository + ?Sized>(
     for svc_cfg in &config.services {
         if let Some(existing) = repo.get_service_by_name(&svc_cfg.name).await? {
             // Service exists — update in place, preserving UUID.
-            let updated = Service {
+            let updated = Service { hide_patterns: vec![],
+            
+            
                 id: existing.id,
                 name: svc_cfg.name.clone().into(),
                 url: svc_cfg.url.clone(),
@@ -3142,7 +3152,14 @@ fn row_to_service(row: sqlx::sqlite::SqliteRow) -> Result<Service, GatewayError>
         .ok()
         .flatten();
 
+    let hide_patterns_str: String = row
+        .try_get("hide_patterns")
+        .unwrap_or_else(|_| "[]".to_string());
+    let hide_patterns: Vec<String> =
+        serde_json::from_str(&hide_patterns_str).unwrap_or_default();
+
     Ok(Service {
+        hide_patterns,
         id: parse_uuid(&id)?,
         // sqlx doesn't impl Decode for Arc<str>; decode as String then
         // convert via std `impl From<String> for Arc<str>` (one alloc here

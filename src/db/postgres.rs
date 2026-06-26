@@ -125,7 +125,7 @@ impl Repository for PostgresRepository {
     ) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -142,7 +142,7 @@ impl Repository for PostgresRepository {
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -157,7 +157,7 @@ impl Repository for PostgresRepository {
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -173,7 +173,7 @@ impl Repository for PostgresRepository {
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -189,11 +189,11 @@ impl Repository for PostgresRepository {
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                                   document_root, index_file, spa_fallback, \
+                                   document_root, index_file, spa_fallback, hide_patterns, \
                                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                                    project_id, domain, subdomain, \
                                    enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE, $18, $19)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, TRUE, $19, $20)",
         )
         .bind(svc.id)
         .bind(&*svc.name)
@@ -205,6 +205,7 @@ impl Repository for PostgresRepository {
         .bind(svc.document_root.as_deref())
         .bind(&svc.index_file)
         .bind(svc.spa_fallback)
+        .bind(serde_json::to_value(&svc.hide_patterns).unwrap_or(serde_json::json!([])))
         .bind(svc.tls_verify)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -222,11 +223,11 @@ impl Repository for PostgresRepository {
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, service_type = $6, \
-                                 document_root = $7, index_file = $8, spa_fallback = $9, \
-                                 tls_verify = $10, tls_client_cert_path = $11, tls_client_key_path = $12, tls_ca_path = $13, \
-                                 project_id = $14, domain = $15, subdomain = $16, \
-                                 updated_at = $17 \
-             WHERE id = $18 AND is_deleted = FALSE",
+                                 document_root = $7, index_file = $8, spa_fallback = $9, hide_patterns = $10, \
+                                 tls_verify = $11, tls_client_cert_path = $12, tls_client_key_path = $13, tls_ca_path = $14, \
+                                 project_id = $15, domain = $16, subdomain = $17, \
+                                 updated_at = $18 \
+             WHERE id = $19 AND is_deleted = FALSE",
         )
         .bind(&*svc.name)
         .bind(&svc.url)
@@ -237,6 +238,7 @@ impl Repository for PostgresRepository {
         .bind(svc.document_root.as_deref())
         .bind(&svc.index_file)
         .bind(svc.spa_fallback)
+        .bind(serde_json::to_value(&svc.hide_patterns).unwrap_or(serde_json::json!([])))
         .bind(svc.tls_verify)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -815,6 +817,9 @@ impl Repository for PostgresRepository {
 
     async fn append_audit(&self, entry: &NewAuditEntry) -> Result<AuditEntry, GatewayError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("LOCK TABLE audit_log IN EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
         let prev_hash: Option<String> =
             sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
                 .fetch_optional(&mut *tx)
@@ -901,6 +906,10 @@ impl Repository for PostgresRepository {
             since_param = Some(since);
         }
         sql.push_str(&format!(" ORDER BY ts DESC, id DESC LIMIT ${}", idx));
+        idx += 1;
+        if filter.offset.is_some() {
+            sql.push_str(&format!(" OFFSET ${}", idx));
+        }
 
         let mut q = sqlx::query(&sql);
         if let Some(actor) = &filter.actor {
@@ -920,6 +929,9 @@ impl Repository for PostgresRepository {
             q = q.bind(s);
         }
         q = q.bind(limit);
+        if let Some(offset) = filter.offset {
+            q = q.bind(offset as i64);
+        }
 
         let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_audit).collect()
@@ -2823,7 +2835,13 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         .ok()
         .flatten();
 
+    let hide_patterns_val: Option<serde_json::Value> = row.try_get("hide_patterns").ok().flatten();
+    let hide_patterns: Vec<String> = hide_patterns_val
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
     Ok(Service {
+        hide_patterns,
         id,
         // sqlx doesn't impl Decode for Arc<str>; decode as String then
         // convert via the std `impl From<String> for Arc<str>` (one alloc

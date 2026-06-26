@@ -43,7 +43,7 @@ pub struct LicenseSettings {
     /// Sent as a Bearer token to auth.vexarr.com to look up the
     /// associated licence (tier / expiry / quotas) on boot. Treated as
     /// a secret — prefer `LYNXX_API_KEY` env var over TOML.
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::config::redact_secret_string")]
     pub api_key: String,
 }
 
@@ -55,7 +55,7 @@ pub struct TelemetrySettings {
     pub endpoint: String,
     /// API key / bearer token sent as `Authorization` header on OTLP exports.
     /// Env override: `LYNXX_TELEMETRY_API_KEY`.
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::config::redact_secret_string")]
     pub api_key: String,
     /// Logical service name embedded in every span. Defaults to `lynxx-gateway`.
     /// Env override: `OTEL_SERVICE_NAME`.
@@ -361,6 +361,11 @@ pub struct GatewaySettings {
     pub deploy_health_check_timeout_ms: u64,
     #[serde(default = "default_deploy_hc_threshold")]
     pub deploy_health_check_threshold: u32,
+
+    #[serde(default)]
+    pub userx_url: Option<String>,
+    #[serde(default, serialize_with = "crate::config::redact_secret_option")]
+    pub userx_service_key: Option<String>,
 }
 
 /// Webhook URLs called on upstream health transitions.
@@ -630,7 +635,7 @@ pub struct Dns01Config {
     #[serde(default)]
     pub access_key_id: String,
     /// AWS secret access key. Also reads `AWS_SECRET_ACCESS_KEY`.
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::config::redact_secret_string")]
     pub secret_access_key: String,
     /// Seconds to wait for DNS propagation. Default 120.
     #[serde(default = "default_dns_propagation_timeout")]
@@ -1047,6 +1052,8 @@ pub struct ServiceConfig {
     pub index_file: Option<String>,
     #[serde(default)]
     pub spa_fallback: Option<bool>,
+    #[serde(default)]
+    pub hide_patterns: Vec<String>,
     /// Optional stable identifier for JSON config traversal. When set,
     /// this entry can be looked up via `GET /admin/v1/config/@id/<tag>`
     /// instead of navigating array indices.
@@ -1217,6 +1224,8 @@ fn default_gateway() -> GatewaySettings {
         deploy_health_check_interval_ms: default_deploy_hc_interval(),
         deploy_health_check_timeout_ms: default_deploy_hc_timeout(),
         deploy_health_check_threshold: default_deploy_hc_threshold(),
+        userx_url: None,
+        userx_service_key: None,
     }
 }
 
@@ -1656,6 +1665,26 @@ fn expand_env_vars(input: &str) -> String {
     .into_owned()
 }
 
+/// Serialize a string field as redacted.
+pub fn redact_secret_string<S>(_: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str("***REDACTED***")
+}
+
+/// Serialize an Option<String> field as redacted.
+pub fn redact_secret_option<S>(val: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if val.is_some() {
+        serializer.serialize_some("***REDACTED***")
+    } else {
+        serializer.serialize_none()
+    }
+}
+
 pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
     match std::fs::read_to_string(path) {
         Ok(raw_contents) => {
@@ -1805,6 +1834,16 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("FLUXX_OTEL_ENDPOINT") {
         if !url.is_empty() {
             config.telemetry.fluxx_endpoint = url;
+        }
+    }
+    if let Ok(url) = std::env::var("USERX_GATEWAY_URL").or_else(|_| std::env::var("VEXARR_USERX_URL")) {
+        if !url.trim().is_empty() {
+            config.gateway.userx_url = Some(url);
+        }
+    }
+    if let Ok(key) = std::env::var("USERX_SERVICE_KEY").or_else(|_| std::env::var("VEXARR_SERVICE_API_KEY")) {
+        if !key.trim().is_empty() {
+            config.gateway.userx_service_key = Some(key);
         }
     }
 }

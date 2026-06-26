@@ -517,7 +517,7 @@ impl RouteResultCache {
 }
 
 pub struct RouteTable {
-    services: DashMap<Uuid, Service, FastHasher>,
+    services: DashMap<Uuid, Arc<Service>, FastHasher>,
     /// Routes are stored behind `Arc` so the hot-path lookups
     /// (`match_route`, `match_route_full`, `match_route_for_service`,
     /// `get_route`, `list_routes`) can return cheap refcount bumps
@@ -818,7 +818,7 @@ impl RouteTable {
 
     /// O(1) lookup: does `host` match a service's `subdomain.domain`?
     /// Dispatches to ArcSwap snapshot or DashMap based on configuration.
-    pub fn match_by_host(&self, host: &str) -> Option<Service> {
+    pub fn match_by_host(&self, host: &str) -> Option<Arc<Service>> {
         let key = host.to_ascii_lowercase();
         let svc_id = if self.use_sharded_hosts.load(Ordering::Relaxed) {
             // Zero-cost read: ArcSwap → Arc<HashMap> → get.
@@ -828,7 +828,7 @@ impl RouteTable {
             // DashMap read: still O(1) but involves a shard lock.
             *self.host_index.get(&key)?
         };
-        self.services.get(&svc_id).map(|s| s.clone())
+        self.services.get(&svc_id).map(|s| Arc::clone(s.value()))
     }
 
     /// Find the best matching route within a specific service. Dispatches
@@ -963,7 +963,7 @@ impl RouteTable {
         self.routes.clear();
 
         for svc in &services {
-            self.services.insert(svc.id, svc.clone());
+            self.services.insert(svc.id, Arc::new(svc.clone()));
         }
         for route in routes.iter() {
             self.routes.insert(route.id, Arc::new(route.clone()));
@@ -981,25 +981,25 @@ impl RouteTable {
         if let Some(fqdn) = Self::service_fqdn(&service) {
             self.host_index.insert(fqdn, id);
         }
-        self.services.insert(id, service);
+        self.services.insert(id, Arc::new(service));
         self.rebuild_host_index_fast();
         self.route_result_cache.clear();
         id
     }
 
-    pub fn get_service(&self, id: &Uuid) -> Option<Service> {
-        self.services.get(id).map(|s| s.clone())
+    pub fn get_service(&self, id: &Uuid) -> Option<Arc<Service>> {
+        self.services.get(id).map(|s| Arc::clone(s.value()))
     }
 
-    pub fn get_service_by_name(&self, name: &str) -> Option<Service> {
+    pub fn get_service_by_name(&self, name: &str) -> Option<Arc<Service>> {
         self.services
             .iter()
             .find(|s| s.name == name.into())
-            .map(|s| s.clone())
+            .map(|s| Arc::clone(s.value()))
     }
 
-    pub fn list_services(&self) -> Vec<Service> {
-        self.services.iter().map(|s| s.clone()).collect()
+    pub fn list_services(&self) -> Vec<Arc<Service>> {
+        self.services.iter().map(|s| Arc::clone(s.value())).collect()
     }
 
     pub fn update_service(&self, id: &Uuid, service: Service) -> bool {
@@ -1012,7 +1012,7 @@ impl RouteTable {
             if let Some(fqdn) = Self::service_fqdn(&service) {
                 self.host_index.insert(fqdn, *id);
             }
-            self.services.insert(*id, service);
+            self.services.insert(*id, Arc::new(service));
             self.rebuild_host_index_fast();
             self.route_result_cache.clear();
             true
@@ -1097,7 +1097,7 @@ impl RouteTable {
         path: &str,
         method: &str,
         host: Option<&str>,
-    ) -> Option<(Arc<Route>, Service)> {
+    ) -> Option<(Arc<Route>, Arc<Service>)> {
         self.match_route_full(path, method, host, None, None)
     }
 
@@ -1111,7 +1111,7 @@ impl RouteTable {
         host: Option<&str>,
         req_headers: Option<&axum::http::HeaderMap>,
         query_string: Option<&str>,
-    ) -> Option<(Arc<Route>, Service)> {
+    ) -> Option<(Arc<Route>, Arc<Service>)> {
         // ── Route result cache fast path ──
         // Bypass the cache entirely when any route is header/query gated: the
         // cache key (host, path, method) can't represent those dimensions, so a
@@ -1241,8 +1241,8 @@ impl RouteTable {
         req_headers: Option<&axum::http::HeaderMap>,
         query_string: Option<&str>,
         skip_id: Option<Uuid>,
-    ) -> Option<(Arc<Route>, Service)> {
-        let mut best: Option<(Arc<Route>, Service)> = None;
+    ) -> Option<(Arc<Route>, Arc<Service>)> {
+        let mut best: Option<(Arc<Route>, Arc<Service>)> = None;
         let mut best_has_hosts = false;
 
         for &route_id in candidates {
@@ -1344,8 +1344,8 @@ impl RouteTable {
         host: Option<&str>,
         req_headers: Option<&axum::http::HeaderMap>,
         query_string: Option<&str>,
-    ) -> Option<(Arc<Route>, Service)> {
-        let mut best: Option<(Arc<Route>, Service)> = None;
+    ) -> Option<(Arc<Route>, Arc<Service>)> {
+        let mut best: Option<(Arc<Route>, Arc<Service>)> = None;
         let mut best_has_hosts = false;
 
         for entry in self.routes.iter() {

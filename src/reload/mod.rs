@@ -62,6 +62,12 @@ impl ReloadHandle {
             .await
             .map_err(|_| GatewayError::Internal("reload task dropped response".into()))
     }
+
+    #[cfg(test)]
+    pub fn dummy() -> Self {
+        let (tx, _) = mpsc::channel(1);
+        Self { tx }
+    }
 }
 
 pub fn spawn_reloader(
@@ -214,7 +220,9 @@ async fn diff_services(
                     || cur.connect_timeout_ms != svc_cfg.connect_timeout_ms
                 {
                     let url_changed = cur.url != svc_cfg.url;
-                    let updated = Service {
+                    let updated = Service { hide_patterns: vec![],
+            
+            
                         id: cur.id,
                         name: cur.name.clone(),
                         url: svc_cfg.url.clone(),
