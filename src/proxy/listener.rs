@@ -55,6 +55,8 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
+
 
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
@@ -310,6 +312,121 @@ pub async fn serve_per_worker(
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+// ── Fast path per-connection intercept ───────────────────────────────────
+
+/// Maximum bytes to peek for HTTP header parsing on the fast path.
+const FAST_PATH_PEEK_SIZE: usize = 8192;
+
+/// Outcome of `try_fast_path_intercept`.
+pub enum FastPathOutcome {
+    /// Connection was handled by the fast path. Caller drops the socket.
+    Handled,
+    /// Connection should be forwarded to the normal Hyper/Axum path.
+    /// The `PrefixedStream` re-plays the already-read header bytes.
+    Normal(crate::proxy::fast_path::PrefixedStream),
+    /// Fast path disabled or parse error — fall through to normal path
+    /// without consuming any bytes. The original socket is returned.
+    PassThrough(tokio::net::TcpStream),
+}
+
+/// Called after every successful `accept()` in the proxy listener loop.
+///
+/// If the fast path is globally enabled and the route table contains a
+/// matching eligible entry, the connection is forwarded directly to the
+/// upstream via `forward_split` (splice/copy). Otherwise, the connection
+/// is wrapped in `PrefixedStream` (bytes already read are replayed) and
+/// returned to the caller for normal Hyper/Axum processing.
+pub async fn try_fast_path_intercept(
+    stream: tokio::net::TcpStream,
+    connect_timeout: Duration,
+    proxy_timeout: Duration,
+) -> FastPathOutcome {
+    use crate::proxy::fast_path::{
+        self, PrefixedStream, global_lookup,
+        is_fast_path_enabled, get_fast_path_mode,
+    };
+
+
+    if !is_fast_path_enabled() {
+        return FastPathOutcome::PassThrough(stream);
+    }
+
+    // Peek up to FAST_PATH_PEEK_SIZE bytes without consuming the socket.
+    // We use a temporary Vec and actual read + PrefixedStream for replay.
+    let mut buf = vec![0u8; FAST_PATH_PEEK_SIZE];
+    let n = match tokio::time::timeout(
+        Duration::from_millis(100),
+        stream.peek(&mut buf),
+    )
+    .await
+    {
+        Ok(Ok(n)) if n > 0 => n,
+        _ => {
+            // Timeout or empty read — fall through.
+            return FastPathOutcome::PassThrough(stream);
+        }
+    };
+    buf.truncate(n);
+
+    // Parse the minimal request (just method + path + host).
+    let req = match fast_path::parse_minimal_request(&buf) {
+        Ok(r) => r,
+        Err(_) => {
+            // Not a valid HTTP/1.x request — fall through.
+            return FastPathOutcome::PassThrough(stream);
+        }
+    };
+
+    // Look up in the global fast-path router.
+    let route = global_lookup(&req.path, req.host.as_deref());
+
+    let (upstream_addr, _route_id) = match &route {
+        Some(r) if !req.is_upgrade => (r.upstream_addr.clone(), r.route_id.clone()),
+        _ => {
+            // No matching route or upgrade — fall through.
+            let prefix = bytes::Bytes::from(buf);
+            return FastPathOutcome::Normal(PrefixedStream::new(stream, prefix));
+        }
+    };
+
+    // Actually consume the peeked bytes from the socket so we can read
+    // them properly (peek doesn't advance the read position).
+    let mut header_buf = vec![0u8; n];
+    if stream.try_read(&mut header_buf).is_err() {
+        let prefix = bytes::Bytes::from(buf);
+        return FastPathOutcome::Normal(PrefixedStream::new(stream, prefix));
+    }
+    let header_bytes = bytes::Bytes::from(header_buf);
+
+    // Fast path: forward directly.
+    let _mode = get_fast_path_mode(); // reserved for future splice branch selection
+    let upstream_addr_c = upstream_addr.clone();
+    let header_bytes_c = header_bytes.clone();
+    tokio::task::spawn_local(async move {
+        match fast_path::forward_split(
+            stream,
+            &upstream_addr_c,
+            header_bytes_c,
+            connect_timeout,
+            proxy_timeout,
+        )
+        .await
+        {
+            Ok(bytes) => {
+                tracing::debug!(bytes, upstream = %upstream_addr_c, "fast path session complete");
+            }
+            Err(e) => {
+                fast_path::fast_path_metrics()
+                    .upstream_connect_errors
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::debug!(error = %e, upstream = %upstream_addr_c, "fast path error");
+            }
+        }
+    });
+
+    FastPathOutcome::Handled
 }
 
 #[cfg(test)]

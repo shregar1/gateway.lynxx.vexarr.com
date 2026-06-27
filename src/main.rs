@@ -626,6 +626,17 @@ async fn async_main() -> anyhow::Result<()> {
         license_state.clone(),
     );
 
+    // Verify that the io_uring accept thread (which is only hookable via the kTLS listener)
+    // is not enabled without kernel_tls or on a non-Linux platform where it's a no-op.
+    if config.gateway.io_uring.accept_thread_enabled
+        && (!config.gateway.tls.kernel_tls || !crate::proxy::ktls_listener::supported_on_host())
+    {
+        tracing::warn!(
+            "[gateway.io_uring].accept_thread_enabled = true but kernel_tls is false (or not supported on host); \
+             the io_uring accept thread is a no-op. Enable kernel_tls on Linux to use io_uring accept acceleration."
+        );
+    }
+
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
         .trusted_proxies
