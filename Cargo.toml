@@ -91,7 +91,7 @@ algorithms = { path = "crates/algorithms" }
 # instead of a mutable default-branch HEAD that a force-push could swap. This is
 # the licensing/auth trust anchor — bump the rev deliberately when adopting new
 # utilx changes.
-utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", rev = "8eb34bfbb1ab7b3d9892a12dc411d1f12e4a113a", features = ["license", "net"] }
+utilx = { git = "https://github.com/shregar1/core.utilx.vexarr.com", rev = "8eb34bfbb1ab7b3d9892a12dc411d1f12e4a113a", features = ["license", "net", "userx", "vexarr-client", "vexarr-preflight", "vexarr-mock"] }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.7", features = ["macros", "ws"] }
 hyper = { version = "1", features = ["full"] }

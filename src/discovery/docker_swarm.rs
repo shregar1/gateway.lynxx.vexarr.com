@@ -483,6 +483,7 @@ impl DockerSwarmProvider {
         };
 
         let service = Service {
+            hide_patterns: vec![],
             id: service_id,
             name: format!("swarm:{}", parsed.service_name).into(),
             url: upstream,

@@ -66,6 +66,7 @@ unsafe fn murmur_hash2_generic(ptr: *const u8, mut len: usize) -> u32 {
 
 /// MurmurHash2 over raw bytes (`ngx_murmur_hash2`).
 #[inline]
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn ngx_murmur_hash2_ptr(ptr: *const u8, len: usize) -> u32 {
     if len == LEN_64K {
         unsafe { murmur_hash2_64k(ptr) }

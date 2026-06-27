@@ -371,6 +371,7 @@ impl DockerProvider {
         };
 
         let service = Service {
+            hide_patterns: vec![],
             id: service_id,
             name: format!("docker:{}", parsed.service_name).into(),
             url: upstream,

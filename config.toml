@@ -8,6 +8,17 @@ health_circuit_failure_threshold = 3
 health_circuit_success_threshold = 2
 health_circuit_open_duration_ms = 30000
 
+[gateway.fast_path]
+# Raw-TCP bypass: skips axum/hyper for plugin-free proxy routes.
+# mode: "auto" (splice on Linux, buffered_copy elsewhere), "splice",
+#       "buffered_copy", or "off".  Env: LYNXX_FAST_PATH_ENABLED / LYNXX_FAST_PATH_MODE.
+enabled = true
+mode = "auto"
+tcp_cork = true
+connect_timeout_ms = 5000
+proxy_timeout_ms = 60000
+
+
 # Time-Travel Debug: where the request-recorder plugin writes captured
 # request/response pairs and where the admin API loads them from.
 # Defaults to ~/.lynxx/recordings when unset.

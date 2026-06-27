@@ -83,6 +83,7 @@ pub fn admin_router(
     status_cache: crate::health::StatusCache,
     token_validator: Option<Arc<dyn crate::integrations::TokenValidator>>,
     token_cache: Option<Arc<crate::auth::middleware::AdminAuthCache>>,
+    userx_client: Option<Arc<utilx::vexarr::client::UserxClient>>,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -110,6 +111,7 @@ pub fn admin_router(
         status_cache,
         token_validator,
         token_cache,
+        userx_client,
     };
 
     // Routes that mutate live state require Operator or higher; token

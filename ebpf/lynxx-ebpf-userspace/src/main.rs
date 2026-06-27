@@ -153,16 +153,26 @@ async fn main() -> Result<()> {
 
     // Load + attach. We keep `bpf` alive for the duration of the
     // process; dropping it detaches tracepoints automatically.
+    #[allow(unused_mut)]
     let mut bpf = load_bpf().context("loading BPF object")?;
-    attach_programs(&mut bpf).context("attaching tracepoints")?;
-    if let Some(iface) = cli.xdp_iface.as_deref() {
-        attach_xdp_ratelimit(&mut bpf, iface)
-            .with_context(|| format!("attaching XDP rate-limiter to {iface}"))?;
-    } else {
-        debug!("--xdp-iface not set; skipping XDP rate-limiter");
+    #[cfg(target_os = "linux")]
+    {
+        attach_programs(&mut bpf).context("attaching tracepoints")?;
+        if let Some(iface) = cli.xdp_iface.as_deref() {
+            attach_xdp_ratelimit(&mut bpf, iface)
+                .with_context(|| format!("attaching XDP rate-limiter to {iface}"))?;
+        } else {
+            debug!("--xdp-iface not set; skipping XDP rate-limiter");
+        }
     }
 
+    #[cfg(target_os = "linux")]
+    let bpf_shared = std::sync::Arc::new(bpf);
+    #[cfg(not(target_os = "linux"))]
+    let bpf_shared = bpf;
+
     let poller = tokio::spawn(poll_loop(
+        bpf_shared.clone(),
         Duration::from_millis(cli.poll_interval_ms),
     ));
 
@@ -174,7 +184,7 @@ async fn main() -> Result<()> {
     // unmaps the BPF maps. On non-Linux this is a `()` so the drop is
     // a no-op; we silence the dropping_copy_types lint there.
     #[allow(dropping_copy_types)]
-    drop(bpf);
+    drop(bpf_shared);
     info!("lynxx-ebpf exited cleanly");
     Ok(())
 }
@@ -292,6 +302,7 @@ fn attach_programs(bpf: &mut aya::Ebpf) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn attach_programs(_bpf: &mut ()) -> Result<()> {
     anyhow::bail!("attach_programs unsupported on non-Linux hosts");
 }
@@ -318,6 +329,7 @@ fn attach_xdp_ratelimit(bpf: &mut aya::Ebpf, iface: &str) -> Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
+#[allow(dead_code)]
 fn attach_xdp_ratelimit(_bpf: &mut (), _iface: &str) -> Result<()> {
     anyhow::bail!("attach_xdp_ratelimit unsupported on non-Linux hosts");
 }
@@ -327,22 +339,20 @@ fn attach_xdp_ratelimit(_bpf: &mut (), _iface: &str) -> Result<()> {
 // ---------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-async fn poll_loop(interval: Duration) {
+async fn poll_loop(bpf: std::sync::Arc<aya::Ebpf>, interval: Duration) {
     let mut ticker = time::interval(interval);
     ticker.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
 
-    // We re-open the maps each tick rather than holding them across
-    // awaits — aya's map handles aren't `Send` in all configurations.
     loop {
         ticker.tick().await;
-        if let Err(e) = poll_once().await {
+        if let Err(e) = poll_once(&bpf).await {
             warn!(?e, "poll iteration failed");
         }
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn poll_loop(interval: Duration) {
+async fn poll_loop(_bpf: (), interval: Duration) {
     let mut ticker = time::interval(interval);
     loop {
         ticker.tick().await;
@@ -351,19 +361,94 @@ async fn poll_loop(interval: Duration) {
 }
 
 #[cfg(target_os = "linux")]
-async fn poll_once() -> Result<()> {
-    // NOTE: in a real Linux build we would re-open the map handles
-    // from the `aya::Ebpf` we kept in main(). Doing so requires
-    // wiring a shared handle (Arc<Mutex<Ebpf>>) which adds noise. For
-    // the v1 sidecar we simply mark this as a TODO and emit a debug
-    // line — operators see the metrics counters appear in the
-    // exporter via the inline updates below.
-    //
-    // The "right" wire-up is straightforward but pulls in lifetime
-    // gymnastics that distract from the structure of this file.
-    // Leaving as a deliberate seam for v2.
-    debug!("poll_once tick");
+async fn poll_once(bpf: &aya::Ebpf) -> Result<()> {
+    use aya::maps::HashMap;
+
+    // 1. Poll RETRANSMITS
+    let mut retransmits_count = 0;
+    if let Ok(map) = bpf.map("RETRANSMITS") {
+        if let Ok(hash_map) = HashMap::<_, u64, u64>::try_from(map) {
+            for item in hash_map.iter() {
+                if let Ok((key, value)) = item {
+                    retransmits_count += 1;
+                    let saddr = (key >> 32) as u32;
+                    let daddr = key as u32;
+                    let src_ip = fmt_ipv4_be(saddr);
+                    let dst_ip = fmt_ipv4_be(daddr);
+                    metrics::counter!("lynxx_ebpf_tcp_retransmits_total", "src" => src_ip, "dst" => dst_ip).absolute(value);
+                }
+            }
+        }
+    }
+    metrics::gauge!("lynxx_ebpf_map_entries", "map" => "retransmits").set(retransmits_count as f64);
+
+    // 2. Poll STATE_TRANSITIONS
+    let mut state_transitions_count = 0;
+    if let Ok(map) = bpf.map("STATE_TRANSITIONS") {
+        if let Ok(hash_map) = HashMap::<_, u32, u64>::try_from(map) {
+            for item in hash_map.iter() {
+                if let Ok((key, value)) = item {
+                    state_transitions_count += 1;
+                    let old_state = (key >> 16) as u8;
+                    let new_state = key as u8;
+                    let from_str = tcp_state_name(old_state);
+                    let to_str = tcp_state_name(new_state);
+                    metrics::counter!("lynxx_ebpf_tcp_state_transitions_total", "from" => from_str, "to" => to_str).absolute(value);
+                }
+            }
+        }
+    }
+    metrics::gauge!("lynxx_ebpf_map_entries", "map" => "state_transitions").set(state_transitions_count as f64);
+
+    // 3. Poll XDP_DROPPED
+    let mut xdp_dropped_count = 0;
+    if let Ok(map) = bpf.map("XDP_DROPPED") {
+        if let Ok(hash_map) = HashMap::<_, u32, u64>::try_from(map) {
+            for item in hash_map.iter() {
+                if let Ok((key, value)) = item {
+                    xdp_dropped_count += 1;
+                    let src_ip = fmt_ipv4_be(key);
+                    metrics::counter!("lynxx_ebpf_xdp_dropped_total", "src" => src_ip).absolute(value);
+                }
+            }
+        }
+    }
+    metrics::gauge!("lynxx_ebpf_map_entries", "map" => "xdp_dropped").set(xdp_dropped_count as f64);
+
+    // 4. Poll XDP_BUCKETS
+    let mut xdp_buckets_count = 0;
+    if let Ok(map) = bpf.map("XDP_BUCKETS") {
+        // TokenBucket is 16 bytes: tokens (u32) + last_refill_ns (u64) + padding
+        if let Ok(hash_map) = HashMap::<_, u32, [u8; 16]>::try_from(map) {
+            for item in hash_map.iter() {
+                if item.is_ok() {
+                    xdp_buckets_count += 1;
+                }
+            }
+        }
+    }
+    metrics::gauge!("lynxx_ebpf_map_entries", "map" => "xdp_buckets").set(xdp_buckets_count as f64);
+
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn tcp_state_name(state: u8) -> &'static str {
+    match state {
+        1 => "ESTABLISHED",
+        2 => "SYN_SENT",
+        3 => "SYN_RECV",
+        4 => "FIN_WAIT1",
+        5 => "FIN_WAIT2",
+        6 => "TIME_WAIT",
+        7 => "CLOSE",
+        8 => "CLOSE_WAIT",
+        9 => "LAST_ACK",
+        10 => "LISTEN",
+        11 => "CLOSING",
+        12 => "NEW_SYN_RECV",
+        _ => "UNKNOWN",
+    }
 }
 
 // ---------------------------------------------------------------------

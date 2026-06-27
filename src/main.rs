@@ -626,6 +626,17 @@ async fn async_main() -> anyhow::Result<()> {
         license_state.clone(),
     );
 
+    // Verify that the io_uring accept thread (which is only hookable via the kTLS listener)
+    // is not enabled without kernel_tls or on a non-Linux platform where it's a no-op.
+    if config.gateway.io_uring.accept_thread_enabled
+        && (!config.gateway.tls.kernel_tls || !crate::proxy::ktls_listener::supported_on_host())
+    {
+        tracing::warn!(
+            "[gateway.io_uring].accept_thread_enabled = true but kernel_tls is false (or not supported on host); \
+             the io_uring accept thread is a no-op. Enable kernel_tls on Linux to use io_uring accept acceleration."
+        );
+    }
+
     let trusted_proxies: Vec<ipnet::IpNet> = config
         .gateway
         .trusted_proxies
@@ -955,6 +966,14 @@ async fn async_main() -> anyhow::Result<()> {
     let admin_token_validator = token_validator.clone();
     let admin_token_cache: Option<Arc<crate::auth::middleware::AdminAuthCache>> = None;
 
+    let userx_client = if let (Some(ref url), Some(ref key)) = (config.gateway.userx_url.as_ref(), config.gateway.userx_service_key.as_ref()) {
+        let transport = utilx::vexarr::client::transport::reqwest_transport(url, std::time::Duration::from_secs(10))
+            .map_err(|e| anyhow::anyhow!("userx transport error: {e}"))?;
+        Some(Arc::new(utilx::vexarr::client::UserxClient::new(transport, (*key).clone())))
+    } else {
+        None
+    };
+
     let admin_app = admin::admin_router(
         route_table,
         repo,
@@ -979,6 +998,7 @@ async fn async_main() -> anyhow::Result<()> {
         status_cache,
         admin_token_validator,
         admin_token_cache,
+        userx_client,
     );
 
     let bind_addr = config.gateway.bind_address.clone();
@@ -1156,7 +1176,7 @@ async fn async_main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             if let Err(e) = axum_server::bind_rustls(admin_addr_socket, rustls_cfg)
                 .handle(h)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await
             {
                 tracing::error!("admin TLS server error: {e}");

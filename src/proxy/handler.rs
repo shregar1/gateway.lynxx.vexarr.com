@@ -854,7 +854,7 @@ pub async fn proxy_handler(
                 .get(axum::http::header::RANGE)
                 .and_then(|v| v.to_str().ok());
             let serve_opts = crate::proxy::static_files::ServeOptions {
-                hide_patterns: &[],
+                hide_patterns: &service.hide_patterns,
                 cache_control: None,
                 if_none_match,
                 if_modified_since,

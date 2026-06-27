@@ -105,9 +105,7 @@ impl ClusterBus for SqliteBus {
                             continue;
                         }
                     };
-                    if event.origin() == node_id {
-                        continue;
-                    }
+
                     tracing::info!(
                         kind = event.kind(),
                         origin = %event.origin(),

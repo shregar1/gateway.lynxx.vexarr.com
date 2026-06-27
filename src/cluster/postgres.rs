@@ -71,9 +71,7 @@ impl ClusterBus for PostgresBus {
                                     continue;
                                 }
                             };
-                            if event.origin() == node_id {
-                                continue;
-                            }
+
                             tracing::info!(
                                 kind = event.kind(),
                                 origin = %event.origin(),

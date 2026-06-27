@@ -291,6 +291,7 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>)
         let now = Utc::now();
 
         let service = Service {
+            hide_patterns: vec![],
             id: service_id,
             name: d.name.clone().into(),
             url: d.url.clone(),

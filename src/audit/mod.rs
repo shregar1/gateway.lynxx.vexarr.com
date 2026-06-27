@@ -92,6 +92,7 @@ pub struct AuditFilter {
     pub resource_type: Option<String>,
     pub since: Option<DateTime<Utc>>,
     pub limit: Option<u32>,
+    pub offset: Option<u32>,
     /// When true, include the full `diff` JSON blob per row. The list
     /// endpoint defaults to false (diff omitted) to keep payloads small;
     /// chain verification sets this to true because diffs are hashed.
@@ -208,44 +209,69 @@ impl AuditLog {
         self.repo.list_audit(filter).await
     }
 
-    /// Recompute the chain from row 1 onwards and report inconsistencies.
+    /// Recompute the chain backwards from the newest row to genesis and report inconsistencies.
     pub async fn verify_chain(&self) -> Result<ChainVerification, GatewayError> {
-        let all = self
-            .repo
-            .list_audit(&AuditFilter {
-                limit: Some(1000),
-                include_diff: true,
-                ..Default::default()
-            })
-            .await?;
-        // list_audit returns most-recent-first by default; flip for verification.
-        let mut rows = all;
-        rows.sort_by_key(|r| r.id);
-
-        let mut prev: Option<String> = None;
+        let mut offset = 0;
+        let limit = 1000;
         let mut checked: u64 = 0;
-        for row in &rows {
-            let new_entry = NewAuditEntry {
-                ts: row.ts,
-                actor_id: row.actor_id,
-                actor_name: row.actor_name.clone(),
-                actor_role: row.actor_role.clone(),
-                action: row.action.clone(),
-                resource_type: row.resource_type.clone(),
-                resource_id: row.resource_id.clone(),
-                diff: row.diff.clone(),
-            };
-            let expected = compute_hash(prev.as_deref(), &new_entry);
-            if expected != row.hash || row.prev_hash != prev {
-                return Ok(ChainVerification {
-                    ok: false,
-                    checked,
-                    broken_at: Some(row.id),
-                });
+        let mut expected_prev_hash: Option<String> = None;
+
+        loop {
+            let chunk = self
+                .repo
+                .list_audit(&AuditFilter {
+                    limit: Some(limit),
+                    offset: Some(offset),
+                    include_diff: true,
+                    ..Default::default()
+                })
+                .await?;
+            if chunk.is_empty() {
+                break;
             }
-            checked += 1;
-            prev = Some(row.hash.clone());
+
+            for row in chunk {
+                let new_entry = NewAuditEntry {
+                    ts: row.ts,
+                    actor_id: row.actor_id,
+                    actor_name: row.actor_name.clone(),
+                    actor_role: row.actor_role.clone(),
+                    action: row.action.clone(),
+                    resource_type: row.resource_type.clone(),
+                    resource_id: row.resource_id.clone(),
+                    diff: row.diff.clone(),
+                };
+                let expected = compute_hash(row.prev_hash.as_deref(), &new_entry);
+                if expected != row.hash {
+                    return Ok(ChainVerification {
+                        ok: false,
+                        checked,
+                        broken_at: Some(row.id),
+                    });
+                }
+                if let Some(eph) = &expected_prev_hash {
+                    if eph != &row.hash {
+                        return Ok(ChainVerification {
+                            ok: false,
+                            checked,
+                            broken_at: Some(row.id),
+                        });
+                    }
+                }
+                expected_prev_hash = row.prev_hash.clone();
+                checked += 1;
+            }
+            offset += limit;
         }
+
+        if expected_prev_hash.is_some() {
+            return Ok(ChainVerification {
+                ok: false,
+                checked,
+                broken_at: Some(0),
+            });
+        }
+
         Ok(ChainVerification {
             ok: true,
             checked,

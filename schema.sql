@@ -108,6 +108,7 @@ CREATE TABLE services (
   updated_at           TEXT    NOT NULL DEFAULT (datetime('now')),
   source               TEXT    NOT NULL DEFAULT 'api',
   service_type         TEXT    NOT NULL DEFAULT 'api',
+  hide_patterns        TEXT    DEFAULT '[]',
   document_root        TEXT,
   index_file           TEXT    NOT NULL DEFAULT 'index.html',
   spa_fallback         INTEGER NOT NULL DEFAULT 0,
