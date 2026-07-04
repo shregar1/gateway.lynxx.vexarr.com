@@ -1128,6 +1128,7 @@ pub async fn forward_split(
 
 
 #[cfg(test)]
+#[serial_test::serial(fast_path_routes)]
 mod tests {
     use super::*;
 
