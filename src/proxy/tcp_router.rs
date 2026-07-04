@@ -9,7 +9,7 @@ use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 // ── Configuration ────────────────────────────────────────────────────
 
@@ -431,8 +431,13 @@ async fn handle_tcp_conn(
 
 /// Listen for TCP connections on `addr` and route them through the given
 /// [`TcpRouter`].  This function runs forever (or until the listener errors).
+///
+/// The listener is bound with `SO_REUSEPORT` so multiple gateway processes
+/// may co-bind to the same address:port — the kernel load-balances new
+/// connections across the bound sockets. See
+/// [`crate::proxy::listener::bind_reuseport`].
 pub async fn serve_tcp(addr: SocketAddr, router: Arc<TcpRouter>) -> Result<()> {
-    let listener = TcpListener::bind(addr).await?;
+    let listener = crate::proxy::listener::bind_reuseport(addr)?;
     tracing::info!(%addr, "tcp proxy listening");
     let conn_limit = Arc::new(tokio::sync::Semaphore::new(MAX_TCP_CONNECTIONS));
     loop {

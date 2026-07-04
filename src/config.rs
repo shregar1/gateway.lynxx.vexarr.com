@@ -372,6 +372,14 @@ pub struct GatewaySettings {
     /// See `src/proxy/fast_path.rs` for eligibility criteria.
     #[serde(default)]
     pub fast_path: FastPathSettings,
+
+    /// Worker-model + CPU pinning + rlimit settings. Controls how the
+    /// gateway distributes accept work across cores (per-core pinned
+    /// listeners with `SO_REUSEPORT` vs. shared tokio runtime) and the
+    /// `RLIMIT_NOFILE` ceiling raised at startup. See
+    /// [`WorkersSettings`].
+    #[serde(default)]
+    pub workers: WorkersSettings,
 }
 
 /// Webhook URLs called on upstream health transitions.
@@ -451,6 +459,61 @@ impl Default for FastPathSettings {
             tcp_cork: true,
             connect_timeout_ms: default_fast_path_connect_timeout(),
             proxy_timeout_ms: default_fast_path_proxy_timeout(),
+        }
+    }
+}
+
+/// Worker-model + CPU pinning + RLIMIT_NOFILE configuration.
+///
+/// On Linux the proxy listener fans out N independent `SO_REUSEPORT`
+/// sockets across N OS threads, each running a private `current_thread`
+/// tokio runtime + `LocalSet`. When `cpu_pinning = true` (the default
+/// on Linux when `model = "per_core"`), each worker is pinned to a
+/// specific core via `sched_setaffinity` — keeping its working set warm
+/// in that core's private L1/L2 cache and avoiding work-stealing
+/// migrations between cores. This is the same pattern NGINX, HAProxy,
+/// and Envoy use.
+///
+/// On non-Linux platforms the per-core pinned listener is not available;
+/// the fields are accepted in config for portability but only
+/// `rlimit_nofile` takes effect.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct WorkersSettings {
+    /// Worker model: `"per_core"` (default on Linux) — one OS thread per
+    /// core, each with its own accept queue via `SO_REUSEPORT`. Or
+    /// `"shared"` — tokio's default work-stealing scheduler, single
+    /// accept queue.
+    #[serde(default = "default_worker_model")]
+    pub model: String,
+
+    /// Pin each worker thread to a specific CPU core via
+    /// `sched_setaffinity`. Only meaningful when `model = "per_core"`.
+    /// Default: `true`.
+    #[serde(default = "default_true_bool")]
+    pub cpu_pinning: bool,
+
+    /// Raise `RLIMIT_NOFILE` to this value at startup. `0` means leave
+    /// the existing limit untouched. The kernel only honours values up
+    /// to the system-wide `fs.nr_open` / `nofile` limit; requests above
+    /// that ceiling are silently clamped. Default: `1048576` (1M).
+    #[serde(default = "default_rlimit_nofile")]
+    pub rlimit_nofile: u64,
+}
+
+fn default_worker_model() -> String {
+    "per_core".to_string()
+}
+
+fn default_rlimit_nofile() -> u64 {
+    1_048_576
+}
+
+impl Default for WorkersSettings {
+    fn default() -> Self {
+        Self {
+            model: default_worker_model(),
+            cpu_pinning: true,
+            rlimit_nofile: default_rlimit_nofile(),
         }
     }
 }
@@ -1259,6 +1322,7 @@ fn default_gateway() -> GatewaySettings {
         io_uring: IoUringConfig::default(),
         acme: AcmeConfig::default(),
         providers: ProvidersConfig::default(),
+        workers: WorkersSettings::default(),
         pool_max_idle_per_host: default_pool_max_idle(),
         pool_idle_timeout_secs: default_pool_idle_timeout(),
         pool_idle_floor_per_host: None,
@@ -2724,5 +2788,43 @@ trusted_proxies_strict = true
             cfg.gateway.filesystems.get("uploads").unwrap(),
             "/var/data/uploads"
         );
+    }
+
+    // --- workers ---
+
+    #[test]
+    fn workers_defaults() {
+        let gw = default_gateway();
+        // Linux-style defaults: per_core + cpu pinning on, 1M FD limit.
+        assert_eq!(gw.workers.model, "per_core");
+        assert!(gw.workers.cpu_pinning);
+        assert_eq!(gw.workers.rlimit_nofile, 1_048_576);
+    }
+
+    #[test]
+    fn workers_deserializes() {
+        let toml_str = r#"
+[gateway.workers]
+model = "shared"
+cpu_pinning = false
+rlimit_nofile = 65536
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.workers.model, "shared");
+        assert!(!cfg.gateway.workers.cpu_pinning);
+        assert_eq!(cfg.gateway.workers.rlimit_nofile, 65_536);
+    }
+
+    #[test]
+    fn workers_partial_omitted_fields_use_defaults() {
+        // Only model is set; the other two must fall back to defaults.
+        let toml_str = r#"
+[gateway.workers]
+model = "shared"
+"#;
+        let cfg: GatewayConfig = toml::from_str(toml_str).expect("valid TOML");
+        assert_eq!(cfg.gateway.workers.model, "shared");
+        assert!(cfg.gateway.workers.cpu_pinning);
+        assert_eq!(cfg.gateway.workers.rlimit_nofile, 1_048_576);
     }
 }

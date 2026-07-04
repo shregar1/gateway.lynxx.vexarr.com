@@ -214,8 +214,13 @@ impl UdpRouter {
 
 /// Listen for UDP datagrams on `addr` and proxy them through the given
 /// [`UdpRouter`].  Also spawns a background task to prune expired sessions.
+///
+/// The socket is bound with `SO_REUSEPORT` so multiple gateway processes
+/// may co-bind to the same address:port — the kernel hashes incoming
+/// datagrams across the bound sockets. See
+/// [`crate::proxy::listener::bind_reuseport_udp`].
 pub async fn serve_udp(addr: SocketAddr, router: Arc<UdpRouter>) -> Result<()> {
-    let socket = Arc::new(UdpSocket::bind(addr).await?);
+    let socket = Arc::new(crate::proxy::listener::bind_reuseport_udp(addr)?);
     tracing::info!(%addr, "udp proxy listening");
 
     // Background session reaper.
