@@ -1,3 +1,42 @@
+//! Boot-time sysctl + rlimit tweaks for the proxy host.
+//!
+//! Beyond what's encoded here, two **non-sysctl** knobs make a large
+//! difference at saturation and should be applied by the operator:
+//!
+//! 1. **`iptables -t raw -A PREROUTING -i lo -j NOTRACK`** (and the
+//!    matching `OUTPUT -o lo -j NOTRACK`). Skips `nf_conntrack` for
+//!    loopback traffic. The symbolized perf capture at 100 k RPS
+//!    showed `__nf_conntrack_find_get` at ~470 M samples (≈ 2 % of
+//!    total CPU) when conntrack was enabled — pure overhead because
+//!    no NAT/iptables rules ever match a loopback packet, and the
+//!    bench rig never proxies cross-host. Switching this off on the
+//!    bench rig moved p99 from **4.06 ms → 2.89 ms** at 100 k offered
+//!    / 4096 conns and stabilized iteration-to-iteration variance
+//!    (conntrack table fill was the root cause of the
+//!    "first-run-clean, runs-2-and-3-explode-to-100ms+" pattern we
+//!    saw before the fix).
+//!
+//!    Production proxies serving real traffic *should not* blanket
+//!    NOTRACK — conntrack is needed for stateful firewall + outbound
+//!    NAT. The lower-overhead production-safe equivalent is a
+//!    targeted `iptables -t raw -A PREROUTING -p tcp --dport
+//!    <proxy_port> -j NOTRACK` on the proxy box, paired with `-A
+//!    OUTPUT -p tcp --sport <proxy_port> -j NOTRACK` for the
+//!    upstream-side replies. That removes conntrack on the bench-path
+//!    traffic only.
+//!
+//! 2. **`MI_PURGE_DELAY=-1 MI_ARENA_RESERVE=1073741824`** in the
+//!    `lynxx-gateway` process environment. Disables mimalloc's
+//!    periodic page-purge pass (the `_mi_page_free_collect` stacks
+//!    that produced 5–15 ms p99 spikes in the original Phase 0
+//!    capture) and pre-reserves a 1 GB arena so the first allocation
+//!    bursts don't fault in 4 K pages. Already set in
+//!    `bench/proxy-bench/proxies/lynxx.sh`; for production deploys
+//!    they belong in the systemd unit's `Environment=` block.
+//!
+//! These two changes together (NOTRACK + mimalloc env) are what put
+//! lynxx p99 < kong's 4.17 ms reference at 100 k RPS on this rig.
+
 use std::fs;
 use std::path::Path;
 

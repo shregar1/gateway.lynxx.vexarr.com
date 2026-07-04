@@ -37,6 +37,13 @@ pub struct TemplatePlugin {
     open_delim: String,
     close_delim: String,
     variables: HashMap<String, String>,
+    /// Allowlist of environment variable names that `{{.Env "VAR"}}` may
+    /// expand. SECURITY: templates render against the (upstream-controlled)
+    /// response body, so without an allowlist an attacker who can influence a
+    /// templated response could exfiltrate ANY process env var — including
+    /// `LYNXX_API_KEY`, `DATABASE_URL`, AWS creds. Default is empty (deny all):
+    /// operators must opt-in the specific vars they intend to expose.
+    env_allowlist: std::collections::HashSet<String>,
 }
 
 impl TemplatePlugin {
@@ -67,11 +74,22 @@ impl TemplatePlugin {
             HashMap::new()
         };
 
+        let env_allowlist = cfg
+            .get("env_allowlist")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(Self {
             content_types,
             open_delim,
             close_delim,
             variables,
+            env_allowlist,
         })
     }
 
@@ -112,9 +130,19 @@ impl TemplatePlugin {
         while let Some(start) = result.find(&env_prefix) {
             let after = start + env_prefix.len();
             if let Some(quote_end) = result[after..].find('"') {
-                let var_name = &result[after..after + quote_end];
+                let var_name = result[after..after + quote_end].to_string();
                 let env_pattern = format!("{open}.Env \"{var_name}\"{close}");
-                let env_val = std::env::var(var_name).unwrap_or_default();
+                // Only expand allowlisted env vars; everything else renders to
+                // empty so an attacker-influenced template can't read secrets.
+                let env_val = if self.env_allowlist.contains(&var_name) {
+                    std::env::var(&var_name).unwrap_or_default()
+                } else {
+                    tracing::warn!(
+                        var = %var_name,
+                        "template: {{.Env}} for non-allowlisted variable blocked"
+                    );
+                    String::new()
+                };
                 result = result.replace(&env_pattern, &env_val);
             } else {
                 break;
@@ -231,6 +259,7 @@ mod tests {
             open_delim: "{{".to_string(),
             close_delim: "}}".to_string(),
             variables: vars,
+            env_allowlist: std::collections::HashSet::new(),
         };
         let ctx = TemplateContext {
             host: "example.com".to_string(),
@@ -244,12 +273,52 @@ mod tests {
     }
 
     #[test]
+    fn env_expansion_requires_allowlist() {
+        std::env::set_var("LYNXX_TEST_TEMPLATE_SECRET", "supersecret");
+        let ctx = TemplateContext {
+            host: String::new(),
+            path: String::new(),
+            method: String::new(),
+            remote_addr: String::new(),
+            status: 200,
+        };
+        // Not allowlisted → blocked (renders empty), no secret leak.
+        let denied = TemplatePlugin {
+            content_types: vec![],
+            open_delim: "{{".to_string(),
+            close_delim: "}}".to_string(),
+            variables: HashMap::new(),
+            env_allowlist: std::collections::HashSet::new(),
+        };
+        assert_eq!(
+            denied.render("[{{.Env \"LYNXX_TEST_TEMPLATE_SECRET\"}}]", &ctx),
+            "[]"
+        );
+        // Explicitly allowlisted → expanded.
+        let allowed = TemplatePlugin {
+            content_types: vec![],
+            open_delim: "{{".to_string(),
+            close_delim: "}}".to_string(),
+            variables: HashMap::new(),
+            env_allowlist: ["LYNXX_TEST_TEMPLATE_SECRET".to_string()]
+                .into_iter()
+                .collect(),
+        };
+        assert_eq!(
+            allowed.render("[{{.Env \"LYNXX_TEST_TEMPLATE_SECRET\"}}]", &ctx),
+            "[supersecret]"
+        );
+        std::env::remove_var("LYNXX_TEST_TEMPLATE_SECRET");
+    }
+
+    #[test]
     fn render_status() {
         let plugin = TemplatePlugin {
             content_types: vec![],
             open_delim: "{{".to_string(),
             close_delim: "}}".to_string(),
             variables: HashMap::new(),
+            env_allowlist: std::collections::HashSet::new(),
         };
         let ctx = TemplateContext {
             host: String::new(),

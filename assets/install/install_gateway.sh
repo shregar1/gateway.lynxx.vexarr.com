@@ -53,8 +53,14 @@ LYNXX_WITNESS_PUBKEY="-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAZTPJ1gFfsAmBGGoldLmSN1ni/pKHH4kdNsdneIe7STw=
 -----END PUBLIC KEY-----"
 
+# Artifact verification is FAIL-CLOSED: a missing checksum/signature header, or
+# a toolchain that can't verify Ed25519, aborts the install. A network or
+# bucket attacker who simply strips the X-Content-* headers must NOT be able to
+# downgrade us to an unverified install. The only escape hatch is an explicit,
+# loud opt-in: LYNXX_ALLOW_UNVERIFIED=1 (for air-gapped/dev use only).
 verify_artifact() {
   local binary="$1" headers="$2"
+  local allow_unverified="${LYNXX_ALLOW_UNVERIFIED:-}"
 
   local expected_sha
   expected_sha=$(awk 'tolower($1) == "x-content-sha256:" { gsub(/\r$/, "", $2); print tolower($2); exit }' "$headers")
@@ -71,23 +77,34 @@ verify_artifact() {
       err "checksum mismatch — expected $expected_sha, got $actual_sha.\n  Refusing to install."
     fi
     ok "checksum verified (${expected_sha:0:12}…)"
+  elif [ "$allow_unverified" = "1" ]; then
+    warn "no X-Content-SHA256 header — installing WITHOUT checksum (LYNXX_ALLOW_UNVERIFIED=1)."
   else
-    warn "no X-Content-SHA256 header — installing without checksum verification."
+    err "no X-Content-SHA256 header — refusing to install.\n  Set LYNXX_ALLOW_UNVERIFIED=1 to override (NOT recommended)."
   fi
 
   local sig_b64
   sig_b64=$(awk 'tolower($1) == "x-content-signature:" { gsub(/\r$/, "", $2); print $2; exit }' "$headers")
   if [ -z "$sig_b64" ]; then
-    warn "no X-Content-Signature header — installing without signature verification."
-    return 0
+    if [ "$allow_unverified" = "1" ]; then
+      warn "no X-Content-Signature header — installing WITHOUT signature (LYNXX_ALLOW_UNVERIFIED=1)."
+      return 0
+    fi
+    err "no X-Content-Signature header — refusing to install.\n  Set LYNXX_ALLOW_UNVERIFIED=1 to override (NOT recommended)."
   fi
   if ! command -v openssl >/dev/null 2>&1; then
-    warn "openssl not available — skipping signature verification."
-    return 0
+    if [ "$allow_unverified" = "1" ]; then
+      warn "openssl not available — skipping signature verification (LYNXX_ALLOW_UNVERIFIED=1)."
+      return 0
+    fi
+    err "openssl not available — cannot verify the release signature.\n  Install openssl, or set LYNXX_ALLOW_UNVERIFIED=1 to override (NOT recommended)."
   fi
   if ! openssl list -public-key-algorithms 2>/dev/null | grep -q '^[[:space:]]*Name: ED25519'; then
-    warn "openssl lacks Ed25519 support — skipping signature verification."
-    return 0
+    if [ "$allow_unverified" = "1" ]; then
+      warn "openssl lacks Ed25519 support — skipping signature verification (LYNXX_ALLOW_UNVERIFIED=1)."
+      return 0
+    fi
+    err "openssl lacks Ed25519 support — cannot verify the release signature.\n  Upgrade openssl, or set LYNXX_ALLOW_UNVERIFIED=1 to override (NOT recommended)."
   fi
   local pubkey_pem="${TMP}/lynxx-pubkey.pem"
   local sig_bin="${TMP}/binary.sig"

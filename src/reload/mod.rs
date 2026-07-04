@@ -62,6 +62,12 @@ impl ReloadHandle {
             .await
             .map_err(|_| GatewayError::Internal("reload task dropped response".into()))
     }
+
+    #[cfg(test)]
+    pub fn dummy() -> Self {
+        let (tx, _) = mpsc::channel(1);
+        Self { tx }
+    }
 }
 
 pub fn spawn_reloader(
@@ -77,17 +83,36 @@ pub fn spawn_reloader(
     let (tx, mut rx) = mpsc::channel::<Trigger>(8);
 
     tokio::spawn(async move {
+        use futures_util::FutureExt;
         while let Some(resp) = rx.recv().await {
             tracing::info!(path = %config_path, "config reload starting");
-            let result = run_reload(
+            // Isolate each reload behind catch_unwind: a panic in run_reload
+            // would otherwise unwind this task entirely, dropping the receiver
+            // and permanently disabling ALL future config reloads until the
+            // process restarts. Surfacing it as an error result keeps the
+            // reloader alive for the next trigger.
+            let result = match std::panic::AssertUnwindSafe(run_reload(
                 &config_path,
                 &repo,
                 &route_table,
                 &health,
                 &lb,
                 &plugin_exec,
-            )
-            .await;
+            ))
+            .catch_unwind()
+            .await
+            {
+                Ok(r) => r,
+                Err(_) => {
+                    tracing::error!(
+                        "config reload panicked; reloader stays alive for future triggers"
+                    );
+                    ReloadResult {
+                        errors: vec!["config reload panicked".to_string()],
+                        ..Default::default()
+                    }
+                }
+            };
             tracing::info!(?result, "config reload complete");
             if result.errors.is_empty() {
                 if let Err(e) = bus.publish(ChangeEvent::FullSync { origin: node_id }).await {
@@ -160,7 +185,114 @@ async fn run_reload(
         }
     }
 
+    // ── Fast path sync ──────────────────────────────────────────────────────
+    // After the route table has been reconciled, rebuild the fast-path routing
+    // table from the live route snapshot. Also apply the FastPathSettings flags
+    // (enabled / mode) so operator config changes take effect immediately.
+    if result.errors.is_empty() {
+        let fp = &new_config.gateway.fast_path;
+        let mode = match fp.mode.as_str() {
+            "splice"         => crate::proxy::fast_path::FastPathMode::Splice,
+            "buffered_copy"  => crate::proxy::fast_path::FastPathMode::BufferedCopy,
+            "off"            => crate::proxy::fast_path::FastPathMode::Off,
+            _                => crate::proxy::fast_path::FastPathMode::Auto,
+        };
+        // Update the global atomic toggles.
+        let effective_enabled = fp.enabled && mode != crate::proxy::fast_path::FastPathMode::Off;
+        crate::proxy::fast_path::set_fast_path_enabled(effective_enabled);
+        crate::proxy::fast_path::set_fast_path_mode(mode);
+
+        if effective_enabled {
+            // Build a list of route specs from the current route table.
+            let routes_snapshot: Vec<crate::proxy::fast_path::FastPathRouteSpec> = {
+                // Fetch services for URL → upstream mapping.
+                let services: HashMap<uuid::Uuid, crate::models::Service> =
+                    match repo.list_services().await {
+                        Ok(svcs) => svcs.into_iter().map(|s| (s.id, s)).collect(),
+                        Err(e) => {
+                            tracing::warn!(error = %e, "fast_path: failed to list services for sync");
+                            HashMap::new()
+                        }
+                    };
+                match repo.list_routes().await {
+                    Ok(rt_routes) => rt_routes
+                        .into_iter()
+                        .filter_map(|r| {
+                            let svc = services.get(&r.service_id)?;
+                            // Determine upstream address from service URL.
+                            let upstream_addr = svc_url_to_addr(&svc.url)?;
+                            // Use first path as the prefix; multi-path routes
+                            // are represented as separate entries per-path.
+                            let specs: Vec<_> = r.paths.iter().map(|path| {
+                                let profile = crate::proxy::fast_path::RouteProfile {
+                                    route_id: r.id.to_string(),
+                                    service_id: svc.id.to_string(),
+                                    plugin_count: 0, // global plugin check is done separately
+                                    has_header_add: r.headers.iter().any(|(_, v)| !v.is_empty()),
+                                    has_header_remove: false,
+                                    has_header_replace: false,
+                                    has_path_rewrite: r.path_rewrite_pattern.is_some(),
+                                    has_body_buffering: r.buffer_request,
+                                    has_request_transform: false,
+                                    has_response_transform: false,
+                                    has_auth: false,
+                                    has_rate_limit: false,
+                                    upstream_is_tls: svc.url.starts_with("https://"),
+                                    is_websocket: false,
+                                    is_grpc: false,
+                                };
+                                crate::proxy::fast_path::FastPathRouteSpec {
+                                    route_id: r.id.to_string(),
+                                    path_prefix: path.clone(),
+                                    upstream_addr: upstream_addr.clone(),
+                                    host: r.hosts.first().cloned(),
+                                    profile,
+                                }
+                            }).collect();
+                            Some(specs)
+                        })
+                        .flatten()
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "fast_path: failed to list routes for sync");
+                        Vec::new()
+                    }
+                }
+            };
+
+            crate::proxy::fast_path::sync_fast_path_routes(&routes_snapshot);
+            tracing::info!(
+                routes = routes_snapshot.len(),
+                "fast_path: routing table synced after reload"
+            );
+        } else {
+            // Disabled — clear the table.
+            crate::proxy::fast_path::sync_fast_path_routes(&[]);
+        }
+    }
+
     result
+}
+
+/// Extract `host:port` from an HTTP service URL for direct TCP forwarding.
+/// Returns `None` for non-HTTP/HTTPS URLs or if parsing fails.
+fn svc_url_to_addr(url: &str) -> Option<String> {
+    let stripped = if let Some(rest) = url.strip_prefix("http://") {
+        rest
+    } else if let Some(rest) = url.strip_prefix("https://") {
+        rest
+    } else {
+        return None;
+    };
+    // Take only the authority part (before any path).
+    let authority = stripped.split('/').next()?;
+    if authority.contains(':') {
+        Some(authority.to_string())
+    } else {
+        // No explicit port — use default for scheme.
+        let port = if url.starts_with("https://") { 443u16 } else { 80u16 };
+        Some(format!("{authority}:{port}"))
+    }
 }
 
 // ---------- services ----------
@@ -195,7 +327,9 @@ async fn diff_services(
                     || cur.connect_timeout_ms != svc_cfg.connect_timeout_ms
                 {
                     let url_changed = cur.url != svc_cfg.url;
-                    let updated = Service {
+                    let updated = Service { hide_patterns: vec![],
+            
+            
                         id: cur.id,
                         name: cur.name.clone(),
                         url: svc_cfg.url.clone(),
@@ -216,6 +350,8 @@ async fn diff_services(
                         stream_timeout_ms: cur.stream_timeout_ms,
                         stream_close_delay_ms: cur.stream_close_delay_ms,
                         pass_host_header: cur.pass_host_header,
+                        force_http_version: cur.force_http_version.clone(),
+                        pool_idle_floor: cur.pool_idle_floor,
                         drain_timeout_ms: None,
                         project_id: cur.project_id,
                         domain: cur.domain.clone(),

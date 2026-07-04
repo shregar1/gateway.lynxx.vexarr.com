@@ -193,7 +193,27 @@ async fn poll_keys(
     conn: &mut ConnectionManager,
 ) -> Result<Vec<DiscoveredService>, Box<dyn std::error::Error + Send + Sync>> {
     let pattern = format!("{}*", config.prefix);
-    let keys: Vec<String> = redis::cmd("KEYS").arg(&pattern).query_async(conn).await?;
+    // Use cursor-based SCAN, not KEYS: KEYS does an O(N) sweep over the entire
+    // keyspace and blocks the single-threaded Redis server for every other
+    // client for the duration — a well-known production footgun. SCAN yields
+    // in bounded COUNT-sized batches without blocking.
+    let mut keys: Vec<String> = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(&pattern)
+            .arg("COUNT")
+            .arg(256)
+            .query_async(conn)
+            .await?;
+        keys.extend(batch);
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
 
     let mut discovered: Vec<DiscoveredService> = Vec::new();
 
@@ -259,11 +279,19 @@ fn deterministic_uuid(seed: &str, kind: &str) -> Uuid {
 
 async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>) {
     for d in discovered {
+        if !crate::discovery::is_safe_upstream_url(&d.url) {
+            tracing::warn!(
+                provider = "redis_kv", service = %d.name, url = %d.url,
+                "skipping discovered service: unsafe upstream url (SSRF guard)"
+            );
+            continue;
+        }
         let service_id = deterministic_uuid(&d.key, "service");
         let route_id = deterministic_uuid(&d.key, "route");
         let now = Utc::now();
 
         let service = Service {
+            hide_patterns: vec![],
             id: service_id,
             name: d.name.clone().into(),
             url: d.url.clone(),
@@ -284,6 +312,8 @@ async fn reconcile(discovered: &[DiscoveredService], repo: &Arc<dyn Repository>)
             stream_timeout_ms: None,
             stream_close_delay_ms: None,
             pass_host_header: None,
+            pool_idle_floor: None,
+            force_http_version: None,
             drain_timeout_ms: None,
             project_id: None,
             domain: String::new(),

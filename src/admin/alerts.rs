@@ -23,15 +23,9 @@ pub struct CreateAlertRuleBody {
     pub channels: serde_json::Value,
 }
 
-fn default_operator() -> String {
-    "gt".into()
-}
-fn default_window() -> i32 {
-    300
-}
-fn default_cooldown() -> i32 {
-    600
-}
+fn default_operator() -> String { "gt".into() }
+fn default_window() -> i32 { 300 }
+fn default_cooldown() -> i32 { 600 }
 
 #[derive(Deserialize)]
 pub struct PatchAlertRuleBody {
@@ -92,30 +86,14 @@ pub async fn patch_alert_rule(
         .await?
         .ok_or(GatewayError::NotFound("alert rule not found".into()))?;
 
-    if let Some(v) = body.name {
-        rule.name = v;
-    }
-    if let Some(v) = body.metric {
-        rule.metric = v;
-    }
-    if let Some(v) = body.operator {
-        rule.operator = v;
-    }
-    if let Some(v) = body.threshold {
-        rule.threshold = v;
-    }
-    if let Some(v) = body.window_seconds {
-        rule.window_seconds = v;
-    }
-    if let Some(v) = body.cooldown_seconds {
-        rule.cooldown_seconds = v;
-    }
-    if let Some(v) = body.channels {
-        rule.channels = v;
-    }
-    if let Some(v) = body.enabled {
-        rule.enabled = v;
-    }
+    if let Some(v) = body.name { rule.name = v; }
+    if let Some(v) = body.metric { rule.metric = v; }
+    if let Some(v) = body.operator { rule.operator = v; }
+    if let Some(v) = body.threshold { rule.threshold = v; }
+    if let Some(v) = body.window_seconds { rule.window_seconds = v; }
+    if let Some(v) = body.cooldown_seconds { rule.cooldown_seconds = v; }
+    if let Some(v) = body.channels { rule.channels = v; }
+    if let Some(v) = body.enabled { rule.enabled = v; }
 
     state.repo.update_alert_rule(&id, &rule).await?;
     Ok(Json(rule))
@@ -147,9 +125,7 @@ pub async fn resolve_alert_event(
     if state.repo.resolve_alert_event(&id).await? {
         Ok(Json(serde_json::json!({ "resolved": true })))
     } else {
-        Err(GatewayError::NotFound(
-            "alert event not found or already resolved".into(),
-        ))
+        Err(GatewayError::NotFound("alert event not found or already resolved".into()))
     }
 }
 

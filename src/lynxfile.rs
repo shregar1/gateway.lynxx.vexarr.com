@@ -153,6 +153,7 @@ impl<'a> Parser<'a> {
         let mut url = String::new();
         let mut retries = 3u32;
         let mut timeout = 5000u64;
+        let mut hide_patterns = Vec::new();
 
         loop {
             self.skip_whitespace_and_comments();
@@ -173,6 +174,10 @@ impl<'a> Parser<'a> {
                 Some("connect_timeout_ms") => {
                     self.advance_token();
                     timeout = self.expect_u64()?;
+                }
+                Some("hide_pattern") => {
+                    self.advance_token();
+                    hide_patterns.push(self.expect_string()?);
                 }
                 Some("route") => {
                     self.advance_token();
@@ -212,6 +217,7 @@ impl<'a> Parser<'a> {
             document_root: None,
             index_file: None,
             spa_fallback: None,
+            hide_patterns,
             id_tag: None,
             stream_timeout_secs: 0,
             stream_close_delay_secs: 0,

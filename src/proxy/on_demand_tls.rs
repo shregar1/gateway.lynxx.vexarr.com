@@ -213,6 +213,20 @@ impl OnDemandTlsResolver {
     /// Check whether a domain is allowed (allow-list + ask endpoint).
     /// This is `async` because the ask endpoint requires an HTTP call.
     async fn is_domain_allowed(&self, domain: &str) -> bool {
+        // SECURITY: on-demand issuance with NEITHER an allow-list NOR an ask
+        // endpoint means any SNI a client sends triggers a real ACME order —
+        // a cert-flood / ACME-rate-limit (and billing) exhaustion vector. Refuse
+        // unless the operator has gated it explicitly, matching Caddy's
+        // `on_demand` policy. The per-minute rate limiter is a backstop, not a
+        // substitute for an allow policy.
+        if self.allowed_domains.is_none() && self.ask_url.is_none() {
+            tracing::warn!(
+                domain = %domain,
+                "on-demand TLS: refusing issuance — configure `allowed_domains` or `ask_url` to enable"
+            );
+            return false;
+        }
+
         // 1. Allow-list check.
         if let Some(ref allowed) = self.allowed_domains {
             if !allowed.iter().any(|d| d == domain) {
@@ -671,8 +685,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_domain_allowed_all_allowed() {
+    async fn is_domain_allowed_denies_when_unconfigured() {
         install_crypto_provider();
+        // No allow-list and no ask endpoint: issuance must be REFUSED (was
+        // previously allow-all → cert-flood vector).
         let config = OnDemandTlsConfig {
             enabled: true,
             allowed_domains: vec![],
@@ -680,7 +696,7 @@ mod tests {
             max_certs_per_minute: 10,
         };
         let resolver = OnDemandTlsResolver::new(&config, make_acme_manager()).unwrap();
-        assert!(resolver.is_domain_allowed("anything.com").await);
+        assert!(!resolver.is_domain_allowed("anything.com").await);
     }
 
     #[tokio::test]

@@ -100,6 +100,21 @@ pub async fn proxy_try(
 ) -> Result<Json<TryItResponse>, GatewayError> {
     let start = std::time::Instant::now();
 
+    // SECURITY: this endpoint is behind admin auth but it's an
+    // operator-controlled HTTP fetcher — an admin (or a stolen admin token)
+    // could otherwise use it to reach the cloud metadata endpoint
+    // (169.254.169.254), loopback services bound to 127.0.0.1, or escape via a
+    // non-http scheme like file://. Reuse the discovery SSRF allowlist
+    // (rejects non-http(s), loopback, link-local, unspecified, localhost,
+    // metadata domains). Private/mesh IPs stay allowed because operators
+    // legitimately try-it against internal upstreams.
+    if !crate::discovery::is_safe_upstream_url(&body.url) {
+        return Err(GatewayError::BadRequest(format!(
+            "url rejected by SSRF guard: {}",
+            body.url
+        )));
+    }
+
     let method = reqwest::Method::from_bytes(body.method.as_bytes())
         .map_err(|_| GatewayError::BadRequest("invalid HTTP method".into()))?;
 
@@ -126,10 +141,21 @@ pub async fn proxy_try(
         }
     }
 
-    let resp_body = resp.text().await.unwrap_or_default();
+    let resp_body = resp
+        .text()
+        .await
+        .unwrap_or_default();
 
     let preview = if resp_body.len() > 4096 {
-        format!("{}...(truncated)", &resp_body[..4096])
+        // Truncate on a UTF-8 char boundary, not a raw byte index: slicing
+        // mid-codepoint panics, and under `panic = "abort"` that aborts the
+        // whole process. The upstream body is attacker-influenceable (this is
+        // an operator SSRF helper), so the byte at 4096 is not trusted.
+        let end = (0..=4096)
+            .rev()
+            .find(|&i| resp_body.is_char_boundary(i))
+            .unwrap_or(0);
+        format!("{}...(truncated)", &resp_body[..end])
     } else {
         resp_body
     };

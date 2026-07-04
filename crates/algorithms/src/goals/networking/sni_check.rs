@@ -1,0 +1,148 @@
+/// Domain fronting protection (inspired by Traefik).
+///
+/// Validates SNI (Server Name Indication) against allowed patterns and
+/// detects domain-fronting attacks where the TLS SNI differs from the
+/// HTTP Host header.
+
+/// Check if an SNI value matches an allowed pattern.
+///
+/// Supports exact match and wildcard match (`*.example.com` matches
+/// `foo.example.com` but not `example.com` or `foo.bar.example.com`).
+pub fn sni_matches(sni: &str, allowed: &str) -> bool {
+    let sni = sni.trim().to_ascii_lowercase();
+    let allowed = allowed.trim().to_ascii_lowercase();
+
+    if sni == allowed {
+        return true;
+    }
+
+    // Wildcard matching: *.example.com
+    if let Some(suffix) = allowed.strip_prefix("*.") {
+        // SNI must end with .suffix and have exactly one label before it.
+        if let Some(rest) = sni.strip_suffix(&format!(".{suffix}")) {
+            // The part before .suffix must be a single label (no dots).
+            return !rest.is_empty() && !rest.contains('.');
+        }
+    }
+
+    false
+}
+
+/// Detect domain fronting: returns `true` if the SNI and Host header
+/// represent the same domain (no fronting), `false` if they differ
+/// (potential fronting attack).
+///
+/// Comparison is case-insensitive.  Port suffixes on the Host header
+/// (e.g., `:443`) are stripped before comparison.
+pub fn check_domain_fronting(sni: &str, host_header: &str) -> bool {
+    let sni = sni.trim().to_ascii_lowercase();
+    let host = host_header.trim().to_ascii_lowercase();
+
+    // Strip port from host header.
+    let host_domain = if host.starts_with('[') {
+        // IPv6 literal: "[::1]:443". Strip the brackets so the address compares
+        // against the SNI, which carries the BARE address (no brackets). The old
+        // code returned "[::1]" (brackets kept) while the SNI side is "::1", so
+        // every legitimate bracketed-IPv6 Host mismatched and was wrongly flagged.
+        match host.find(']') {
+            Some(end) => &host[1..end],
+            None => host.as_str(),
+        }
+    } else if host.matches(':').count() == 1 {
+        // BUG FIX: a bare (unbracketed) IPv6 literal contains multiple colons
+        // (e.g. "2001:db8::1"), and its trailing hextet may be all digits — the
+        // previous `rfind(':')` logic mistook that hextet for a port and truncated
+        // the address (-> "2001:db8:"). Only treat a trailing numeric run as a port
+        // when the host has exactly one colon (hostname:port / IPv4:port). Multi-colon
+        // unbracketed values are raw IPv6 literals and must be left intact; bracketed
+        // "[..]:port" forms are already handled by the branch above.
+        let colon_pos = host.rfind(':').expect("exactly one colon present");
+        let after = &host[colon_pos + 1..];
+        if after.chars().all(|c| c.is_ascii_digit()) {
+            &host[..colon_pos]
+        } else {
+            host.as_str()
+        }
+    } else {
+        host.as_str()
+    };
+
+    sni == host_domain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── sni_matches ──
+
+    #[test]
+    fn test_exact_match() {
+        assert!(sni_matches("example.com", "example.com"));
+    }
+
+    #[test]
+    fn test_exact_mismatch() {
+        assert!(!sni_matches("other.com", "example.com"));
+    }
+
+    #[test]
+    fn test_case_insensitive() {
+        assert!(sni_matches("Example.COM", "example.com"));
+    }
+
+    #[test]
+    fn test_wildcard_match() {
+        assert!(sni_matches("foo.example.com", "*.example.com"));
+    }
+
+    #[test]
+    fn test_wildcard_no_match_bare() {
+        assert!(!sni_matches("example.com", "*.example.com"));
+    }
+
+    #[test]
+    fn test_wildcard_no_multi_level() {
+        assert!(!sni_matches("a.b.example.com", "*.example.com"));
+    }
+
+    #[test]
+    fn test_wildcard_no_match_different_domain() {
+        assert!(!sni_matches("foo.other.com", "*.example.com"));
+    }
+
+    // ── check_domain_fronting ──
+
+    #[test]
+    fn test_fronting_same() {
+        assert!(check_domain_fronting("example.com", "example.com"));
+    }
+
+    #[test]
+    fn test_fronting_same_with_port() {
+        assert!(check_domain_fronting("example.com", "example.com:443"));
+    }
+
+    #[test]
+    fn test_fronting_different() {
+        assert!(!check_domain_fronting("evil.com", "example.com"));
+    }
+
+    #[test]
+    fn test_fronting_case_insensitive() {
+        assert!(check_domain_fronting("Example.COM", "example.com:8080"));
+    }
+
+    // Regression: a bare (unbracketed) IPv6 Host whose trailing hextet is all
+    // digits must NOT have that hextet stripped as a "port". Before the fix,
+    // "2001:db8::1" was truncated to "2001:db8:" and failed to match an
+    // identical SNI. (Bug: rfind(':') treated the final numeric group as a port.)
+    #[test]
+    fn test_fronting_bare_ipv6_numeric_tail() {
+        assert!(check_domain_fronting("2001:db8::1", "2001:db8::1"));
+        assert!(check_domain_fronting("fe80::1", "fe80::1"));
+        assert!(check_domain_fronting("::1", "::1"));
+        // Distinct bare-IPv6 addresses must still be reported as differing.
+        assert!(!check_domain_fronting("2001:db8::1", "2001:db8::2"));
+    }
+}

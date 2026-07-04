@@ -24,6 +24,10 @@ use dashmap::DashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Above this many tracked keys we reclaim idle (zero-in-flight) counters so a
+/// flood of distinct IPs/hosts can't grow the map without bound.
+const MAX_INFLIGHT_KEYS: usize = 100_000;
+
 /// Source criterion for grouping in-flight counts.
 #[derive(Clone, Debug, PartialEq)]
 enum SourceCriterion {
@@ -144,6 +148,16 @@ impl Plugin for InFlightReqPlugin {
             }
             SourceCriterion::RequestIp | SourceCriterion::RequestHost => {
                 let key = self.extract_key(req);
+                // Reclaim idle keys when the map grows large, so a flood of
+                // distinct IPs/hosts can't grow it without bound. strong_count
+                // == 1 means only the map holds the counter — no in-flight
+                // request references it — so it's safe to drop. `entry()` and
+                // `retain()` both take the shard lock, so no clone can race in
+                // during the sweep.
+                if self.keyed_counters.len() > MAX_INFLIGHT_KEYS {
+                    self.keyed_counters
+                        .retain(|_, c| Arc::strong_count(c) > 1);
+                }
                 let counter = self
                     .keyed_counters
                     .entry(key)

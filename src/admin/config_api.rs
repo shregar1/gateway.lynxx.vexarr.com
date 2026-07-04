@@ -104,11 +104,6 @@ pub struct ConfigApiState {
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
-pub struct ConfigResponse {
-    pub config: GatewayConfig,
-}
-
-#[derive(Serialize)]
 pub struct ApplyResult {
     pub ok: bool,
     pub message: String,
@@ -161,20 +156,170 @@ fn validate_config(cfg: &GatewayConfig) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
+// Secret redaction
+// ---------------------------------------------------------------------------
+
+/// Placeholder substituted for secret values in API responses. When a
+/// client echoes this value back in a PUT/PATCH we treat it as "keep the
+/// existing secret" so the dashboard's read-edit-write loop never clobbers
+/// a credential it was never shown.
+pub const REDACTED_PLACEHOLDER: &str = "***REDACTED***";
+
+/// True when the JSON object key names a secret whose string value must
+/// never leave the process in an API response. Matched case-insensitively.
+fn is_secret_key(key: &str) -> bool {
+    let k = key.to_ascii_lowercase();
+    // Exact secret field names anywhere in the config tree.
+    const EXACT: &[&str] = &[
+        "api_key",
+        "api_token",
+        "secret",
+        "secret_access_key",
+        "access_key_id",
+        "password",
+        "passwd",
+        "client_secret",
+        "private_key",
+        "dns_api_token",
+        "eab_hmac_key",
+        "eab_key",
+        "hmac_secret",
+        "shared_secret",
+        "bearer_token",
+        "auth_token",
+        "license_key",
+        "webhook_secret",
+        "encryption_key",
+        "signing_key",
+    ];
+    EXACT.contains(&k.as_str())
+        || k.ends_with("_secret")
+        || k.ends_with("_password")
+        || k.ends_with("_token")
+        || k.ends_with("_api_key")
+        || k.ends_with("_private_key")
+        || k.ends_with("_access_key")
+}
+
+/// Keys carrying connection strings that embed credentials in userinfo.
+fn is_credential_url_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "database_url" | "db_url" | "dsn" | "connection_string" | "redis_url"
+    )
+}
+
+/// Mask the `user:password@` userinfo of a URL, preserving the rest so the
+/// dashboard can still display which host it points at.
+fn mask_url_credentials(s: &str) -> String {
+    if let Some(scheme_end) = s.find("://") {
+        let after = &s[scheme_end + 3..];
+        if let Some(at) = after.find('@') {
+            return format!(
+                "{}://{}@{}",
+                &s[..scheme_end],
+                REDACTED_PLACEHOLDER,
+                &after[at + 1..]
+            );
+        }
+    }
+    s.to_string()
+}
+
+/// Recursively replace secret string values with the redaction placeholder.
+fn redact_value(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(map) => {
+            for (k, val) in map.iter_mut() {
+                if is_secret_key(k) {
+                    if val.is_string() {
+                        *val = serde_json::Value::String(REDACTED_PLACEHOLDER.to_string());
+                        continue;
+                    }
+                } else if is_credential_url_key(k) {
+                    if let serde_json::Value::String(s) = val {
+                        *s = mask_url_credentials(s);
+                        continue;
+                    }
+                }
+                redact_value(val);
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                redact_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_redacted_string(v: &serde_json::Value) -> bool {
+    v.as_str() == Some(REDACTED_PLACEHOLDER)
+}
+
+/// Walk an incoming config value and, wherever the client sent back the
+/// redaction placeholder (or a masked credential URL), substitute the real
+/// value from `current`. This keeps a read-edit-write round trip from
+/// destroying secrets the client was never allowed to see.
+fn restore_redacted(new: &mut serde_json::Value, current: &serde_json::Value) {
+    match (new, current) {
+        (serde_json::Value::Object(nmap), serde_json::Value::Object(cmap)) => {
+            for (k, nval) in nmap.iter_mut() {
+                let Some(cval) = cmap.get(k) else { continue };
+                if is_redacted_string(nval) {
+                    *nval = cval.clone();
+                } else if is_credential_url_key(k)
+                    && nval.as_str().is_some_and(|s| s.contains(REDACTED_PLACEHOLDER))
+                {
+                    *nval = cval.clone();
+                } else {
+                    restore_redacted(nval, cval);
+                }
+            }
+        }
+        (serde_json::Value::Array(narr), serde_json::Value::Array(carr)) => {
+            for (i, nval) in narr.iter_mut().enumerate() {
+                if let Some(cval) = carr.get(i) {
+                    restore_redacted(nval, cval);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `GET /admin/v1/config` — return the current running config as JSON.
-pub async fn get_config(State(state): State<ConfigApiState>) -> Json<ConfigResponse> {
+/// `GET /admin/v1/config` — return the current running config as JSON with
+/// all secret values redacted. Mounted behind an Admin-role guard, but we
+/// redact regardless so credentials never end up in logs, proxies, or
+/// browser history even for legitimate admins.
+pub async fn get_config(
+    State(state): State<ConfigApiState>,
+) -> Result<Json<serde_json::Value>, GatewayError> {
     let config = state.store.current().await;
-    Json(ConfigResponse { config })
+    let mut value = serde_json::to_value(&config)
+        .map_err(|e| GatewayError::Internal(format!("failed to serialise config: {e}")))?;
+    redact_value(&mut value);
+    Ok(Json(serde_json::json!({ "config": value })))
 }
 
 /// `PUT /admin/v1/config` — replace the entire config atomically.
 pub async fn put_config(
     State(state): State<ConfigApiState>,
-    Json(new_config): Json<GatewayConfig>,
+    Json(mut incoming): Json<serde_json::Value>,
 ) -> Result<Json<ApplyResult>, GatewayError> {
+    // 0. Restore any secret values the client echoed back as the redaction
+    //    placeholder (GET never reveals real secrets), then deserialise.
+    let current_json = serde_json::to_value(&state.store.current().await)
+        .map_err(|e| GatewayError::Internal(format!("failed to serialise current config: {e}")))?;
+    restore_redacted(&mut incoming, &current_json);
+    let new_config: GatewayConfig = serde_json::from_value(incoming)
+        .map_err(|e| GatewayError::BadRequest(format!("invalid config: {e}")))?;
+
     // 1. Validate the incoming config.
     if let Err(msg) = validate_config(&new_config) {
         return Ok(Json(ApplyResult {
@@ -244,6 +389,16 @@ pub async fn patch_config(
         })?;
     }
     let leaf = segments.last().unwrap();
+    // Echoing the redaction placeholder back means "leave the existing secret
+    // untouched" — silently skip the write rather than overwriting a real
+    // credential with the placeholder string.
+    if is_redacted_string(&body.value) {
+        return Ok(Json(ApplyResult {
+            ok: true,
+            message: format!("'{json_path}' left unchanged (redaction placeholder ignored)"),
+            rolled_back: None,
+        }));
+    }
     match cursor {
         serde_json::Value::Object(map) => {
             if !map.contains_key(*leaf) {
@@ -375,8 +530,9 @@ pub async fn get_by_id_tag(
 
     for (i, svc) in config.services.iter().enumerate() {
         if svc.id_tag.as_deref() == Some(&tag) {
-            let value = serde_json::to_value(svc)
+            let mut value = serde_json::to_value(svc)
                 .map_err(|e| GatewayError::Internal(format!("serialisation error: {e}")))?;
+            redact_value(&mut value);
             return Ok(Json(IdLookupResult {
                 kind: "service".into(),
                 index: i,
@@ -387,8 +543,9 @@ pub async fn get_by_id_tag(
 
     for (i, rt) in config.routes.iter().enumerate() {
         if rt.id_tag.as_deref() == Some(&tag) {
-            let value = serde_json::to_value(rt)
+            let mut value = serde_json::to_value(rt)
                 .map_err(|e| GatewayError::Internal(format!("serialisation error: {e}")))?;
+            redact_value(&mut value);
             return Ok(Json(IdLookupResult {
                 kind: "route".into(),
                 index: i,
@@ -399,8 +556,9 @@ pub async fn get_by_id_tag(
 
     for (i, pl) in config.plugins.iter().enumerate() {
         if pl.id_tag.as_deref() == Some(&tag) {
-            let value = serde_json::to_value(pl)
+            let mut value = serde_json::to_value(pl)
                 .map_err(|e| GatewayError::Internal(format!("serialisation error: {e}")))?;
+            redact_value(&mut value);
             return Ok(Json(IdLookupResult {
                 kind: "plugin".into(),
                 index: i,

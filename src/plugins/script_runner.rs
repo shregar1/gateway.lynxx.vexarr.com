@@ -210,6 +210,16 @@ async fn run_script(
         .map_err(|e| PluginError::Internal(format!("script-runner: serialize input: {e}")))?;
 
     let mut cmd = tokio::process::Command::new(&def.command);
+    // SECURITY: do NOT let the untrusted script inherit the gateway's
+    // environment — it carries DATABASE_URL, the license/API key, AWS creds,
+    // etc. Clear it and hand the child only an explicit, minimal env (plus the
+    // operator-configured `env`). PATH is preserved so bare command names
+    // still resolve.
+    cmd.env_clear();
+    cmd.env(
+        "PATH",
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string()),
+    );
     cmd.args(&def.args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -224,11 +234,17 @@ async fn run_script(
         PluginError::Internal(format!("script-runner: spawn `{}`: {e}", def.command))
     })?;
 
-    // Write input to stdin.
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(&input_json).await.ok();
-        drop(stdin); // close stdin so the script sees EOF
-    }
+    // Write input to stdin in a background task. A script that never drains
+    // stdin would otherwise fill the pipe buffer and block `write_all` here —
+    // BEFORE the timeout below is armed — hanging the request indefinitely.
+    // Spawning the writer means a stuck pipe just leaves the task parked; the
+    // timeout on `wait()` still fires and kills the child.
+    let stdin_writer = child.stdin.take().map(|mut stdin| {
+        tokio::spawn(async move {
+            let _ = stdin.write_all(&input_json).await;
+            // Dropping `stdin` closes the pipe so the script sees EOF.
+        })
+    });
 
     // Wait with timeout. We use wait() + manual stdout/stderr reads so we
     // retain ownership of `child` for the kill path.
@@ -237,16 +253,25 @@ async fn run_script(
     let exit_status = match wait_result {
         Ok(Ok(s)) => s,
         Ok(Err(e)) => {
+            if let Some(h) = stdin_writer {
+                h.abort();
+            }
             return Err(PluginError::Internal(format!("script-runner: wait: {e}")));
         }
         Err(_) => {
             child.kill().await.ok();
+            if let Some(h) = stdin_writer {
+                h.abort();
+            }
             return Err(PluginError::Internal(format!(
                 "script-runner: `{}` timed out after {:?}",
                 def.command, def.timeout
             )));
         }
     };
+    if let Some(h) = stdin_writer {
+        h.abort();
+    }
 
     let mut stdout_bytes = Vec::new();
     let mut stderr_bytes = Vec::new();

@@ -84,7 +84,14 @@ impl ResponseCache {
     /// Inputs that affect the response include: model, temperature, top_p,
     /// max_tokens, response_format, tools, and messages. We hash all of them
     /// — under-keying would silently return wrong outputs.
-    pub fn key(&self, model: &str, body: &Value) -> String {
+    ///
+    /// `tenant` is the consumer/tenant identity and MUST be part of the key:
+    /// without it, two different consumers issuing the same prompt share a
+    /// cache slot, so one tenant's completion (which can contain data derived
+    /// from that tenant's prompt/context) is served to another. The cache is
+    /// a per-instance store shared across all consumers on the route, so the
+    /// tenant scope is the only thing isolating them.
+    pub fn key(&self, tenant: &str, model: &str, body: &Value) -> String {
         let temperature = body.get("temperature").cloned().unwrap_or(Value::Null);
         let top_p = body.get("top_p").cloned().unwrap_or(Value::Null);
         let max_tokens = body.get("max_tokens").cloned().unwrap_or(Value::Null);
@@ -93,6 +100,7 @@ impl ResponseCache {
         let messages = body.get("messages").cloned().unwrap_or(Value::Null);
 
         let canonical = serde_json::json!({
+            "tenant": tenant,
             "m": model,
             "t": temperature,
             "p": top_p,
@@ -125,7 +133,7 @@ impl ResponseCache {
         }
     }
 
-    pub async fn get_semantic(&self, model: &str, body: &Value) -> Option<CacheEntry> {
+    pub async fn get_semantic(&self, tenant: &str, model: &str, body: &Value) -> Option<CacheEntry> {
         if !self.enabled || self.strategy != "semantic" {
             return None;
         }
@@ -135,6 +143,7 @@ impl ResponseCache {
 
         let lookup_url = format!("{}/v1/cache/lookup", url.trim_end_matches("/"));
         let req_body = serde_json::json!({
+            "tenant": tenant,
             "model": model,
             "prompt": prompt,
             "similarityThreshold": 0.9,
@@ -161,25 +170,28 @@ impl ResponseCache {
         None
     }
 
-    pub async fn put_semantic(&self, model: &str, body: &Value, response_body: &[u8]) {
+    pub async fn put_semantic(&self, tenant: &str, model: &str, body: &Value, response_body: &[u8]) {
         if !self.enabled || self.strategy != "semantic" {
             return;
         }
-        let url = self.reusex_url.as_ref().unwrap();
-        let messages = body.get("messages").unwrap();
-        let prompt = messages
-            .as_array()
-            .unwrap()
-            .last()
-            .unwrap()
-            .get("content")
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let Some(url) = self.reusex_url.as_ref() else {
+            return;
+        };
+        let prompt = match body
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .and_then(|a| a.last())
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+        {
+            Some(p) => p,
+            None => return,
+        };
 
         let store_url = format!("{}/v1/cache/store", url.trim_end_matches("/"));
         let payload: Value = serde_json::from_slice(response_body).unwrap_or(Value::Null);
         let req_body = serde_json::json!({
+            "tenant": tenant,
             "model": model,
             "prompt": prompt,
             "payload": payload,
@@ -224,7 +236,7 @@ mod tests {
             "messages": [{"role":"user","content":"hi"}],
             "temperature": 0.5,
         });
-        assert_eq!(c.key("gpt-4o", &body), c.key("gpt-4o", &body));
+        assert_eq!(c.key("t1", "gpt-4o", &body), c.key("t1", "gpt-4o", &body));
     }
 
     #[test]
@@ -232,7 +244,14 @@ mod tests {
         let c = ResponseCache::new_exact(true, 60);
         let a = serde_json::json!({"messages":[],"temperature":0.0});
         let b = serde_json::json!({"messages":[],"temperature":0.7});
-        assert_ne!(c.key("gpt-4o", &a), c.key("gpt-4o", &b));
+        assert_ne!(c.key("t1", "gpt-4o", &a), c.key("t1", "gpt-4o", &b));
+    }
+
+    #[test]
+    fn keys_differ_across_tenants() {
+        let c = ResponseCache::new_exact(true, 60);
+        let body = serde_json::json!({"messages":[{"role":"user","content":"hi"}]});
+        assert_ne!(c.key("tenant-a", "gpt-4o", &body), c.key("tenant-b", "gpt-4o", &body));
     }
 
     #[test]

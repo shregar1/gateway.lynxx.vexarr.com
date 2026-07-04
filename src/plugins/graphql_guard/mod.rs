@@ -186,9 +186,20 @@ impl Plugin for GraphqlGuardPlugin {
                         vec![],
                     ));
                 } else {
-                    // Pass through; upstream may have its own APQ store.
-                    *req.body_mut() = Body::from(bytes);
-                    return Ok(());
+                    // SECURITY: we have only a hash, not the query text, so we
+                    // cannot run any depth/complexity/guard checks. Passing the
+                    // unknown hash straight through let a client bypass the
+                    // entire guard via APQ. Instead return the standard APQ
+                    // `PersistedQueryNotFound` so the client re-sends the FULL
+                    // query — which then flows through the analyser below.
+                    metric_block("PERSISTED_QUERY_NOT_FOUND", "");
+                    return Err(short_circuit(
+                        400,
+                        "PersistedQueryNotFound",
+                        "PERSISTED_QUERY_NOT_FOUND",
+                        None,
+                        vec![],
+                    ));
                 }
             }
             (None, None) => unreachable!("classify guarantees at least one"),

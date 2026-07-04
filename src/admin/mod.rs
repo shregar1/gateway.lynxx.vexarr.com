@@ -51,7 +51,7 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use routes::AdminState;
 use rust_embed::RustEmbed;
 use std::sync::Arc;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
 #[derive(RustEmbed)]
@@ -83,6 +83,7 @@ pub fn admin_router(
     status_cache: crate::health::StatusCache,
     token_validator: Option<Arc<dyn crate::integrations::TokenValidator>>,
     token_cache: Option<Arc<crate::auth::middleware::AdminAuthCache>>,
+    userx_client: Option<Arc<utilx::vexarr::client::UserxClient>>,
 ) -> Router {
     let audit = AuditLog::new(repo.clone());
     let state = AdminState {
@@ -110,6 +111,7 @@ pub fn admin_router(
         status_cache,
         token_validator,
         token_cache,
+        userx_client,
     };
 
     // Routes that mutate live state require Operator or higher; token
@@ -134,9 +136,7 @@ pub fn admin_router(
         .route("/plugins/:id", get(routes::get_plugin))
         .route("/consumers", get(routes::list_consumers))
         .route("/health", get(routes::list_health))
-        .route("/healthz", get(routes::healthz))
         .route("/health/:service_id", get(routes::get_health))
-        .route("/status", get(routes::gateway_status))
         .route("/metrics", get(routes::metrics))
         .route("/quota", get(routes::quota_snapshot))
         .route("/circuit-breakers", get(routes::list_circuit_breakers))
@@ -465,8 +465,19 @@ pub fn admin_router(
 
     // ---- live config API ----
     let config_store = config_api::ConfigStore::new(gateway_config);
-    let config_sub =
-        config_api::config_router(config_store).layer(middleware::from_fn(api_envelope));
+    // SECURITY: this sub-router reads and mutates the entire running gateway
+    // configuration (and the config can carry secrets), so it MUST be behind
+    // the same authentication as the rest of the admin surface. It is
+    // `.nest()`-ed onto the OUTER router below, *after* the `api` sub-router's
+    // `extract_token`/role layers are applied — and in axum 0.7 a `.layer()`
+    // on a sibling router does NOT propagate to later-nested routes. We
+    // therefore attach `extract_token` + an Admin-role guard directly to this
+    // router so it can never be reached unauthenticated. (Previously only
+    // `api_envelope` wrapped it, leaving GET/PUT/PATCH wide open.)
+    let config_sub = config_api::config_router(config_store)
+        .route_layer(middleware::from_fn(admin_only))
+        .layer(middleware::from_fn_with_state(state.clone(), extract_token))
+        .layer(middleware::from_fn(api_envelope));
 
     // ---- dashboard serving ----
     let dashboard = Router::new().fallback(dashboard_handler);
@@ -478,13 +489,21 @@ pub fn admin_router(
         .layer(middleware::from_fn_with_state(state.clone(), extract_token))
         .layer(middleware::from_fn(api_envelope));
 
-    // Public sign-in endpoint. The node dashboard hits this with the
-    // customer's api key as Bearer; the gateway forwards it to the
-    // licence backend (keyx) and returns the licence info. Bypasses
-    // `extract_token` so unrecognised keys can be validated — they're
-    // the WHOLE POINT of the endpoint.
+    // Public endpoints — intentionally bypass `extract_token`:
+    //   * `/auth/sign-in`: the node dashboard posts the customer's api key
+    //     as Bearer; the gateway forwards it to keyx and returns the licence
+    //     info. Validating unrecognised keys is the WHOLE POINT, so it can't
+    //     sit behind token auth.
+    //   * `/healthz` (liveness) and `/status` (readiness): standard probes
+    //     hit by load balancers / k8s without credentials. They expose only
+    //     low-sensitivity data (version, uptime, counts, licence tier). Every
+    //     other read — including `/metrics` and the `/debug/pprof/*` profiles
+    //     — stays behind auth. (Before auth was enforced by default these
+    //     were reachable only because the whole admin plane was open.)
     let auth_public = Router::new()
         .route("/auth/sign-in", post(routes::auth_sign_in))
+        .route("/healthz", get(routes::healthz))
+        .route("/status", get(routes::gateway_status))
         .layer(middleware::from_fn(api_envelope));
 
     dashboard
@@ -672,16 +691,29 @@ async fn api_envelope(req: Request, next: Next) -> Response {
 }
 
 fn admin_cors() -> CorsLayer {
-    CorsLayer::new()
-        .allow_methods([
-            Method::GET,
-            Method::POST,
-            Method::PUT,
-            Method::DELETE,
-            Method::PATCH,
-            Method::OPTIONS,
-        ])
-        .allow_headers(Any)
-        .allow_origin(Any)
-        .expose_headers(Any)
+    let base = CorsLayer::new().allow_methods([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::DELETE,
+        Method::PATCH,
+        Method::OPTIONS,
+    ]);
+
+    // SECURITY: `allow_origin(Any)` let ANY website read admin API responses
+    // cross-origin. The bundled dashboard is served same-origin from the admin
+    // port and needs no CORS at all, so default to NO cross-origin access.
+    // Operators running a separately-hosted dashboard set
+    // `LYNXX_ADMIN_CORS_ORIGINS` to an explicit comma-separated allowlist.
+    match std::env::var("LYNXX_ADMIN_CORS_ORIGINS") {
+        Ok(v) if !v.trim().is_empty() => {
+            let origins: Vec<HeaderValue> = v
+                .split(',')
+                .filter_map(|o| o.trim().parse().ok())
+                .collect();
+            base.allow_origin(origins)
+                .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE])
+        }
+        _ => base,
+    }
 }

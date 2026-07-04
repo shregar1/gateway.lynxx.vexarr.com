@@ -32,6 +32,12 @@ use std::sync::{Arc, Mutex};
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
+/// Hasher for the embedded ACME server state. Nonces / accounts / orders
+/// are all server-issued UUIDs — never attacker-influenced — so ahash
+/// is safe and 2-5× faster than the default SipHash on the typical
+/// 36-byte string keys.
+type FastHasher = ahash::RandomState;
+
 // ======================================================================
 // Configuration (self-contained — does NOT touch config.rs)
 // ======================================================================
@@ -95,11 +101,11 @@ pub struct AcmeServer {
     /// Intermediate CA private key PEM.
     intermediate_key_pem: String,
     /// Outstanding nonces for replay protection.
-    nonces: Mutex<std::collections::HashSet<String>>,
+    nonces: Mutex<std::collections::HashSet<String, FastHasher>>,
     /// Registered accounts.
-    accounts: Mutex<HashMap<String, Account>>,
+    accounts: Mutex<HashMap<String, Account, FastHasher>>,
     /// Active orders.
-    orders: Mutex<HashMap<String, Order>>,
+    orders: Mutex<HashMap<String, Order, FastHasher>>,
 }
 
 impl AcmeServer {
@@ -117,9 +123,9 @@ impl AcmeServer {
             root_key_pem,
             intermediate_cert_pem,
             intermediate_key_pem,
-            nonces: Mutex::new(std::collections::HashSet::new()),
-            accounts: Mutex::new(HashMap::new()),
-            orders: Mutex::new(HashMap::new()),
+            nonces: Mutex::new(std::collections::HashSet::with_hasher(FastHasher::default())),
+            accounts: Mutex::new(HashMap::with_hasher(FastHasher::default())),
+            orders: Mutex::new(HashMap::with_hasher(FastHasher::default())),
         })
     }
 

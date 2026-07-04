@@ -14,7 +14,7 @@ use crate::proxy::router::SharedRouteTable;
 use crate::quota::QuotaTracker;
 use crate::reload::{ReloadHandle, ReloadResult};
 use axum::body::Body;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{ConnectInfo, Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -84,6 +84,7 @@ pub struct AdminState {
     /// when caching is disabled (TTL = 0); `Some` otherwise. Cap on
     /// revocation staleness equals the TTL.
     pub token_cache: Option<std::sync::Arc<crate::auth::middleware::AdminAuthCache>>,
+    pub userx_client: Option<std::sync::Arc<utilx::vexarr::client::UserxClient>>,
 }
 
 /// Convenience: extract the optional actor from request extensions.
@@ -197,6 +198,7 @@ pub async fn reload_handler(
 
 #[derive(Deserialize)]
 pub struct CreateService {
+            
     pub name: String,
     #[serde(default)]
     pub url: String,
@@ -275,6 +277,7 @@ pub struct PatchRoute {
 
 #[derive(Deserialize)]
 pub struct PatchService {
+            
     pub name: Option<String>,
     pub url: Option<String>,
     pub retries: Option<u32>,
@@ -333,7 +336,7 @@ pub struct StatusResponse {
 }
 
 pub async fn list_services(State(state): State<AdminState>) -> Json<Vec<Service>> {
-    Json(state.route_table.list_services())
+    Json(state.route_table.list_services().into_iter().map(|s| (*s).clone()).collect())
 }
 
 pub async fn create_service(
@@ -448,6 +451,7 @@ pub async fn update_service(
     let strategy_changed = new_strategy != existing.lb_strategy;
 
     let updated = Service {
+        hide_patterns: vec![],
         id,
         name: input.name.into(),
         url: input.url,
@@ -474,6 +478,8 @@ pub async fn update_service(
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
+        pool_idle_floor: existing.pool_idle_floor,
+        force_http_version: existing.force_http_version.clone(),
         drain_timeout_ms: existing.drain_timeout_ms,
         project_id: input.project_id.or(existing.project_id),
         domain: input.domain.unwrap_or_else(|| existing.domain.clone()),
@@ -871,6 +877,7 @@ pub async fn patch_service(
     let strategy_changed = new_strategy != existing.lb_strategy;
 
     let updated = Service {
+        hide_patterns: vec![],
         id,
         name: input
             .name
@@ -902,6 +909,8 @@ pub async fn patch_service(
         stream_timeout_ms: existing.stream_timeout_ms,
         stream_close_delay_ms: existing.stream_close_delay_ms,
         pass_host_header: existing.pass_host_header,
+        pool_idle_floor: existing.pool_idle_floor,
+        force_http_version: existing.force_http_version.clone(),
         drain_timeout_ms: existing.drain_timeout_ms,
         project_id: input.project_id.or(existing.project_id),
         domain: input.domain.unwrap_or_else(|| existing.domain.clone()),
@@ -1005,6 +1014,7 @@ pub async fn create_plugin(
         &input.config,
         Some(state.repo.clone()),
         state.plugin_exec.context(),
+        state.plugin_exec.algorithm_tier(),
     )?;
     let now = Utc::now();
     let plugin = PluginInstance {
@@ -1072,6 +1082,7 @@ pub async fn update_plugin(
         &input.config,
         Some(state.repo.clone()),
         state.plugin_exec.context(),
+        state.plugin_exec.algorithm_tier(),
     )?;
 
     let updated = PluginInstance {
@@ -1754,6 +1765,7 @@ pub async fn list_audit(
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<Vec<AuditEntry>>, GatewayError> {
     let filter = AuditFilter {
+        offset: None,
         actor: q.actor,
         action: q.action,
         resource_type: q.resource_type,
@@ -1917,10 +1929,73 @@ pub struct SignInResponse {
     pub allow_overage: bool,
 }
 
+struct RateLimitEntry {
+    tokens: f64,
+    last_updated: std::time::Instant,
+}
+
+struct RateLimiter {
+    attempts: dashmap::DashMap<String, RateLimitEntry>,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            attempts: dashmap::DashMap::new(),
+        }
+    }
+
+    fn check_limit(&self, ip: &str) -> bool {
+        let max_tokens = 5.0;
+        let refill_rate = 0.1; // 1 token every 10 seconds (6 tokens per minute)
+        let now = std::time::Instant::now();
+
+        let mut entry = self.attempts.entry(ip.to_string()).or_insert_with(|| RateLimitEntry {
+            tokens: max_tokens,
+            last_updated: now,
+        });
+
+        let elapsed = now.duration_since(entry.last_updated).as_secs_f64();
+        let refilled = elapsed * refill_rate;
+        entry.tokens = (entry.tokens + refilled).min(max_tokens);
+        entry.last_updated = now;
+
+        if entry.tokens >= 1.0 {
+            entry.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
+static SIGNIN_LIMITER: std::sync::OnceLock<RateLimiter> = std::sync::OnceLock::new();
+
+fn check_rate_limit(ip: &str) -> Result<(), GatewayError> {
+    let limiter = SIGNIN_LIMITER.get_or_init(RateLimiter::new);
+    if limiter.check_limit(ip) {
+        Ok(())
+    } else {
+        Err(GatewayError::PluginError(PluginError::RateLimited))
+    }
+}
+
 pub async fn auth_sign_in(
     State(state): State<AdminState>,
+    connect_info: Option<ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
 ) -> Result<Json<SignInResponse>, GatewayError> {
+    let client_ip = headers
+        .get("x-real-ip")
+        .or_else(|| headers.get("x-forwarded-for"))
+        .and_then(|h| h.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(|s| s.trim().to_string())
+        .or_else(|| connect_info.map(|ConnectInfo(addr)| addr.ip().to_string()))
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+
+    check_rate_limit(&client_ip)?;
+
     let license_state = state
         .license_state
         .as_ref()

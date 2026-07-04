@@ -7,6 +7,7 @@ pub mod bot_detection;
 pub mod buffering;
 pub mod canary;
 pub mod client_cert_header;
+pub mod consumer_cache;
 pub mod content_type;
 pub mod correlation_id;
 pub mod cors;
@@ -66,7 +67,7 @@ pub mod websocket_size_limit;
 
 use crate::db::Repository;
 use crate::error::{GatewayError, PluginError};
-use crate::quota::PlanTier;
+use crate::quota::{PlanTier, PlanTierAlgo};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
 use std::collections::HashMap;
@@ -97,20 +98,27 @@ pub struct PluginIndex {
 /// concrete `Arc<dyn Plugin>` instances cached here. Every plugin CRUD op in
 /// the admin API triggers `rebuild` to refresh the cache.
 /// Plugins available on the Free tier. Everything else requires Pro+.
+///
+/// Entries MUST be the canonical hyphenated plugin names — i.e. the
+/// `factory::build` dispatch keys, which equal each plugin's `name()`.
+/// The Free-tier gate in [`PluginExecutor::rebuild`] compares the
+/// persisted plugin name (that same hyphenated key) against this list, so
+/// any underscore/spelling drift here silently locks a core plugin out of
+/// the Free tier. `core_plugins_match_factory_keys` guards against drift.
 const CORE_PLUGINS: &[&str] = &[
-    "rate_limit",
+    "rate-limit",
     "cors",
-    "request_transformer",
-    "response_transformer",
+    "request-transformer",
+    "response-transformer",
     "jwt",
-    "basic_auth",
-    "key_auth",
+    "basic-auth",
+    "key-auth",
     "logging",
-    "request_size_limit",
-    "request_termination",
-    "ip_restriction",
-    "proxy_cache",
-    "response_compression",
+    "request-size-limit",
+    "request-termination",
+    "ip-restriction",
+    "proxy-cache",
+    "response-compression",
 ];
 
 /// Shared services that the plugin factory can hand to individual
@@ -197,6 +205,13 @@ impl PluginExecutor {
         self.is_empty.load(Ordering::Acquire)
     }
 
+    /// The runtime algorithm [`Tier`](algorithms::backbone::Tier) this
+    /// executor builds plugins for, derived from the licence plan tier.
+    /// Tier-gated plugins (e.g. `rate-limit`) receive this at build time.
+    pub fn algorithm_tier(&self) -> algorithms::backbone::Tier {
+        self.tier.algorithm_tier()
+    }
+
     /// Shared services available to plugin construction. Used by the
     /// admin API's plugin-validate endpoints so they build under the
     /// same context as production (matters for plugins like hmac-auth
@@ -227,19 +242,24 @@ impl PluginExecutor {
                 );
                 continue;
             }
-            let plugin =
-                match factory::build(&row.name, &row.config, Some(repo.clone()), &self.context) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        tracing::warn!(
-                            plugin = %row.name,
-                            id = %row.id,
-                            error = %e,
-                            "failed to build plugin; skipping"
-                        );
-                        continue;
-                    }
-                };
+            let plugin = match factory::build(
+                &row.name,
+                &row.config,
+                Some(repo.clone()),
+                &self.context,
+                self.tier.algorithm_tier(),
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %row.name,
+                        id = %row.id,
+                        error = %e,
+                        "failed to build plugin; skipping"
+                    );
+                    continue;
+                }
+            };
 
             match (row.service_id, row.route_id) {
                 (_, Some(route_id)) => {
@@ -467,5 +487,37 @@ mod tests {
 
         let sorted_names: Vec<String> = ids.iter().map(|id| names[id].clone()).collect();
         assert_eq!(sorted_names, original_names);
+    }
+
+    /// Regression guard for the Free-tier gate in [`PluginExecutor::rebuild`].
+    ///
+    /// That gate compares each persisted plugin name — the hyphenated
+    /// `factory::build` dispatch key, which equals the plugin's own `name()`
+    /// — against `CORE_PLUGINS`. If an entry here is spelled differently
+    /// (e.g. the old underscore form `rate_limit` vs the factory key
+    /// `rate-limit`), `CORE_PLUGINS.contains(&row.name)` never matches and
+    /// the plugin is silently skipped on Free-tier licences.
+    ///
+    /// Assert every entry both (a) builds via the factory and (b) round-trips
+    /// through `name()`, so the allow-list and the factory can't drift apart.
+    #[test]
+    fn core_plugins_match_factory_keys() {
+        let ctx = PluginContext::default();
+        let tier = algorithms::backbone::Tier::default();
+        for &name in CORE_PLUGINS {
+            let plugin = factory::build(name, &serde_json::json!({}), None, &ctx, tier)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "CORE_PLUGINS entry `{name}` is not a buildable factory name \
+                         ({e}); keep it in sync with the hyphenated keys in \
+                         factory::build()"
+                    )
+                });
+            assert_eq!(
+                plugin.name(),
+                name,
+                "CORE_PLUGINS entry `{name}` does not match the built plugin's name()"
+            );
+        }
     }
 }

@@ -16,6 +16,14 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 use tokio::process::{Child, Command};
 
+/// Master admin credential the test gateway is launched with (via
+/// `LYNXX_API_KEY`). Used to authenticate admin requests now that
+/// `auth_required` defaults to true.
+// utilx::license validates the API-key shape and requires the `lnx_test_`
+// (or `lnx_live_`) prefix, so this test value must match. Was
+// `admin-test-token` pre-utilx; the gateway rejected it post-merge.
+const ADMIN_TEST_TOKEN: &str = "lnx_test_admin_dummy";
+
 /// Drop guard that kills the gateway subprocess so a panicking test
 /// never leaks a port-bound process.
 struct GatewayGuard {
@@ -80,7 +88,18 @@ async fn wait_for_status(admin_port: u16, timeout: Duration) -> bool {
 }
 
 async fn run_admin_cycle(admin_port: u16) {
-    let client = reqwest::Client::new();
+    // The admin surface now requires auth by default (auth_required = true);
+    // authenticate every request with the master license key the gateway was
+    // launched with.
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        format!("Bearer {ADMIN_TEST_TOKEN}").parse().unwrap(),
+    );
+    let client = reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .expect("client");
     let base = format!("http://127.0.0.1:{admin_port}");
 
     // POST /services
@@ -159,10 +178,11 @@ async fn launch_gateway(db_url: &str) -> (GatewayGuard, u16) {
     let bin = env!("CARGO_BIN_EXE_lynxx-gateway");
     let child = Command::new(bin)
         .env("LYNXX_CONFIG", &config)
-        // `[keyx]` is unset here, so licence defaults to "unverified"
-        // (Enterprise tier, no kill-switch). LYNXX_API_KEY just acts
-        // as a master admin token shortcut for the admin API.
-        .env("LYNXX_API_KEY", "admin-test-token")
+        // utilx::license validates the api key against the configured
+        // licence backend. Point at the local keyx stub via LYNXX_BASE_URL
+        // (was the older AUTH_URL → keyx-stub mapping pre-utilx).
+        .env("LYNXX_API_KEY", ADMIN_TEST_TOKEN)
+        .env("LYNXX_BASE_URL", "http://127.0.0.1:9100")
         .env("RUST_LOG", "lynxx_gateway=warn")
         .current_dir(&dir_path)
         .stdout(Stdio::null())
@@ -187,6 +207,84 @@ async fn admin_api_sqlite_lifecycle() {
     let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
     let (_guard, admin_port) = launch_gateway(&db_url).await;
     run_admin_cycle(admin_port).await;
+}
+
+/// Regression test for the critical admin-auth findings: the live-config
+/// API (`/admin/v1/config`) used to be mounted OUTSIDE the auth middleware,
+/// so an unauthenticated client could read the full running config
+/// (secrets included) and overwrite it. It must now reject every
+/// unauthenticated request and only serve callers with a valid admin
+/// credential.
+#[tokio::test]
+async fn admin_config_api_requires_auth() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("cfg.db");
+    let db_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let (_guard, admin_port) = launch_gateway(&db_url).await;
+    let base = format!("http://127.0.0.1:{admin_port}");
+
+    let anon = reqwest::Client::new();
+
+    // Unauthenticated read — must be denied.
+    let resp = anon
+        .get(format!("{base}/admin/v1/config"))
+        .send()
+        .await
+        .expect("get");
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "unauthenticated GET /admin/v1/config must be 401, got {}",
+        resp.status()
+    );
+
+    // Unauthenticated full replace — must be denied.
+    let resp = anon
+        .put(format!("{base}/admin/v1/config"))
+        .json(&json!({ "gateway": { "proxy_port": 1 } }))
+        .send()
+        .await
+        .expect("put");
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "unauthenticated PUT /admin/v1/config must be 401, got {}",
+        resp.status()
+    );
+
+    // Unauthenticated targeted patch — must be denied.
+    let resp = anon
+        .patch(format!("{base}/admin/v1/config/gateway/proxy_port"))
+        .json(&json!({ "value": 1234 }))
+        .send()
+        .await
+        .expect("patch");
+    assert_eq!(
+        resp.status().as_u16(),
+        401,
+        "unauthenticated PATCH /admin/v1/config must be 401, got {}",
+        resp.status()
+    );
+
+    // With the master credential, the read succeeds and returns a config.
+    let resp = anon
+        .get(format!("{base}/admin/v1/config"))
+        .bearer_auth(ADMIN_TEST_TOKEN)
+        .send()
+        .await
+        .expect("authed get");
+    assert_eq!(
+        resp.status().as_u16(),
+        200,
+        "authenticated GET /admin/v1/config must be 200, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("json");
+    let cfg = body.get("config").or_else(|| body.get("data").and_then(|d| d.get("config")));
+    assert!(
+        cfg.is_some(),
+        "authenticated config response must contain a config object, got: {body}"
+    );
 }
 
 #[tokio::test]

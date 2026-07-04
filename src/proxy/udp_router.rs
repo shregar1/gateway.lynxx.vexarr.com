@@ -43,6 +43,11 @@ struct UdpSession {
 
 // ── Router ───────────────────────────────────────────────────────────
 
+/// Cap on concurrent UDP sessions. UDP source addresses are trivially
+/// spoofable, and each session binds an ephemeral socket + spawns a relay
+/// task, so an unbounded table is an FD/task/memory-exhaustion vector.
+const MAX_UDP_SESSIONS: usize = 65_536;
+
 pub struct UdpRouter {
     services: Vec<UdpServiceConfig>,
     /// Sessions keyed by the client `SocketAddr` string representation.
@@ -117,7 +122,14 @@ impl UdpRouter {
             return Ok(());
         }
 
-        // Slow path: create a new session.
+        // Slow path: create a new session. Bound the session table first — UDP
+        // source addresses are spoofable, so without a cap a flood of distinct
+        // sources would exhaust ephemeral sockets / relay tasks / FDs.
+        if self.sessions.len() >= MAX_UDP_SESSIONS {
+            tracing::warn!(%src, sessions = self.sessions.len(), "udp proxy at session cap; dropping packet");
+            return Ok(());
+        }
+
         let upstream_addr = self.next_upstream().context("no upstreams configured")?;
         let upstream_socket = Arc::new(
             UdpSocket::bind("0.0.0.0:0")
@@ -165,8 +177,16 @@ impl UdpRouter {
                         break;
                     }
                     Err(_) => {
-                        // Timeout -- clean up session.
-                        sessions.remove(&key);
+                        // Idle timeout. Remove ONLY if this session is still
+                        // the idle one: a client packet may have refreshed
+                        // last_activity (or created a replacement session for
+                        // the same source) between the last upstream packet and
+                        // this timeout firing — removing by key alone would drop
+                        // that newer/active session (TOCTOU).
+                        let now = Instant::now();
+                        sessions.remove_if(&key, |_, s| {
+                            now.duration_since(s.last_activity) >= timeout
+                        });
                         break;
                     }
                 }

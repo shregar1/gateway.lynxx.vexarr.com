@@ -43,7 +43,7 @@ pub struct LicenseSettings {
     /// Sent as a Bearer token to auth.vexarr.com to look up the
     /// associated licence (tier / expiry / quotas) on boot. Treated as
     /// a secret — prefer `LYNXX_API_KEY` env var over TOML.
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::config::redact_secret_string")]
     pub api_key: String,
 }
 
@@ -55,12 +55,17 @@ pub struct TelemetrySettings {
     pub endpoint: String,
     /// API key / bearer token sent as `Authorization` header on OTLP exports.
     /// Env override: `LYNXX_TELEMETRY_API_KEY`.
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::config::redact_secret_string")]
     pub api_key: String,
     /// Logical service name embedded in every span. Defaults to `lynxx-gateway`.
     /// Env override: `OTEL_SERVICE_NAME`.
     #[serde(default = "default_telemetry_service_name")]
     pub service_name: String,
+    /// Optional secondary endpoint (e.g. Fluxx sidecar). When set, spans
+    /// are exported to both endpoints.
+    /// Env override: `FLUXX_OTEL_ENDPOINT`.
+    #[serde(default)]
+    pub fluxx_endpoint: String,
 }
 
 fn default_telemetry_service_name() -> String {
@@ -132,11 +137,19 @@ pub struct GatewaySettings {
     #[serde(default = "default_prewarm_concurrency")]
     pub prewarm_concurrency: usize,
 
-    /// When true, admin API requests must always present a valid token
-    /// (no bootstrap mode). Defaults to false: bootstrap mode is allowed
-    /// while `admin_tokens` is empty, and auth turns on automatically as
-    /// soon as any token exists.
-    #[serde(default)]
+    /// When true (the default), admin API requests must present a valid
+    /// token. The Lynxx license API key always works as a master admin
+    /// credential (see `auth::middleware::resolve_actor`), so this does not
+    /// block first-run setup — the operator authenticates with the same key
+    /// they already have from their account dashboard.
+    ///
+    /// This MUST default to true: the admin port binds `0.0.0.0` by default,
+    /// and an earlier "bootstrap mode" that left the admin surface open until
+    /// a token existed was never actually wired up (no code counted tokens
+    /// or flipped the flag), so it amounted to an unauthenticated admin
+    /// plane on every default deployment. Set to `false` only on a trusted,
+    /// isolated network where you explicitly want no admin auth.
+    #[serde(default = "default_true")]
     pub auth_required: bool,
 
     /// When true, the proxy's per-request telemetry (prometheus counter +
@@ -193,6 +206,14 @@ pub struct GatewaySettings {
     /// Idle connection timeout in seconds. Default: 120.
     #[serde(default = "default_pool_idle_timeout")]
     pub pool_idle_timeout_secs: u64,
+    /// Global default for the idle-connection floor the prewarmer
+    /// maintains per upstream host. Per-service `services[].pool_idle_floor`
+    /// overrides this. When neither is set the prewarmer falls back to
+    /// the legacy single-HEAD heartbeat. Matches nginx's `keepalive N`
+    /// directive in role — N idle conns are kept warm even when there's
+    /// no traffic. Default: `None` (off).
+    #[serde(default)]
+    pub pool_idle_floor_per_host: Option<usize>,
     /// HTTP/2 keepalive ping interval in seconds. Default: 10.
     #[serde(default = "default_h2_keepalive")]
     pub h2_keepalive_interval_secs: u64,
@@ -340,6 +361,17 @@ pub struct GatewaySettings {
     pub deploy_health_check_timeout_ms: u64,
     #[serde(default = "default_deploy_hc_threshold")]
     pub deploy_health_check_threshold: u32,
+
+    #[serde(default)]
+    pub userx_url: Option<String>,
+    #[serde(default, serialize_with = "crate::config::redact_secret_option")]
+    pub userx_service_key: Option<String>,
+
+    /// Raw-TCP fast path (L4/L7 splicing bypass). Controls the zero-copy
+    /// forwarding path that skips axum/hyper for trivial proxy routes.
+    /// See `src/proxy/fast_path.rs` for eligibility criteria.
+    #[serde(default)]
+    pub fast_path: FastPathSettings,
 }
 
 /// Webhook URLs called on upstream health transitions.
@@ -351,6 +383,76 @@ pub struct EventsConfig {
     /// URLs to POST when an upstream becomes unhealthy.
     #[serde(default)]
     pub on_unhealthy: Vec<String>,
+}
+
+/// Raw-TCP fast path (L4/L7 splicing bypass) configuration.
+///
+/// When `enabled = true`, the gateway inspects the first request bytes
+/// and routes eligible connections directly at the TCP level using
+/// `splice(2)` (Linux) or `tokio::io::copy_bidirectional` (portable),
+/// bypassing the entire Hyper/Axum HTTP framework stack. This removes
+/// 400–700 ns of per-request overhead for plugin-free proxy routes and
+/// raises maximum throughput from ~33k RPS to 45–55k RPS on the same
+/// hardware — competitive with HAProxy and NGINX at their default
+/// configurations.
+///
+/// Eligibility is evaluated at route compile time; see
+/// `crate::proxy::fast_path::evaluate_eligibility` for full criteria.
+///
+/// Env overrides: `LYNXX_FAST_PATH_ENABLED`, `LYNXX_FAST_PATH_MODE`.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct FastPathSettings {
+    /// Master switch. When false, all connections go through Hyper/Axum.
+    /// Default: `true`.
+    #[serde(default = "default_true_bool")]
+    pub enabled: bool,
+
+    /// Transfer mode:
+    /// - `"auto"` (default): `splice` on Linux, `buffered_copy` elsewhere.
+    /// - `"splice"`: Linux zero-copy via `splice(2)` + kernel pipe.
+    /// - `"buffered_copy"`: portable `tokio::io::copy_bidirectional`.
+    /// - `"off"`: disable (same as `enabled = false`).
+    #[serde(default = "default_fast_path_mode")]
+    pub mode: String,
+
+    /// Set TCP_CORK on the upstream socket before splicing to batch
+    /// small writes into full-sized segments. Default: `true`.
+    #[serde(default = "default_true_bool")]
+    pub tcp_cork: bool,
+
+    /// Timeout in milliseconds to establish the upstream TCP connection.
+    /// Default: `5000` (5 s).
+    #[serde(default = "default_fast_path_connect_timeout")]
+    pub connect_timeout_ms: u64,
+
+    /// Maximum wall-clock time in milliseconds for a fast-path forwarding
+    /// session (client + upstream combined). Default: `60000` (60 s).
+    #[serde(default = "default_fast_path_proxy_timeout")]
+    pub proxy_timeout_ms: u64,
+}
+
+fn default_fast_path_mode() -> String {
+    "auto".to_string()
+}
+
+fn default_fast_path_connect_timeout() -> u64 {
+    5000
+}
+
+fn default_fast_path_proxy_timeout() -> u64 {
+    60000
+}
+
+impl Default for FastPathSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: default_fast_path_mode(),
+            tcp_cork: true,
+            connect_timeout_ms: default_fast_path_connect_timeout(),
+            proxy_timeout_ms: default_fast_path_proxy_timeout(),
+        }
+    }
 }
 
 /// Built-in PKI configuration. When `enabled = true` the gateway
@@ -609,7 +711,7 @@ pub struct Dns01Config {
     #[serde(default)]
     pub access_key_id: String,
     /// AWS secret access key. Also reads `AWS_SECRET_ACCESS_KEY`.
-    #[serde(default)]
+    #[serde(default, serialize_with = "crate::config::redact_secret_string")]
     pub secret_access_key: String,
     /// Seconds to wait for DNS propagation. Default 120.
     #[serde(default = "default_dns_propagation_timeout")]
@@ -1026,6 +1128,8 @@ pub struct ServiceConfig {
     pub index_file: Option<String>,
     #[serde(default)]
     pub spa_fallback: Option<bool>,
+    #[serde(default)]
+    pub hide_patterns: Vec<String>,
     /// Optional stable identifier for JSON config traversal. When set,
     /// this entry can be looked up via `GET /admin/v1/config/@id/<tag>`
     /// instead of navigating array indices.
@@ -1157,11 +1261,12 @@ fn default_gateway() -> GatewaySettings {
         providers: ProvidersConfig::default(),
         pool_max_idle_per_host: default_pool_max_idle(),
         pool_idle_timeout_secs: default_pool_idle_timeout(),
+        pool_idle_floor_per_host: None,
         h2_keepalive_interval_secs: default_h2_keepalive(),
         max_header_size: default_max_header_size(),
         prewarm_interval_secs: default_prewarm_interval(),
         prewarm_concurrency: default_prewarm_concurrency(),
-        auth_required: false,
+        auth_required: true,
         minimal_telemetry: false,
         stream_response_body: default_stream_response_body(),
         recordings_directory: None,
@@ -1195,6 +1300,9 @@ fn default_gateway() -> GatewaySettings {
         deploy_health_check_interval_ms: default_deploy_hc_interval(),
         deploy_health_check_timeout_ms: default_deploy_hc_timeout(),
         deploy_health_check_threshold: default_deploy_hc_threshold(),
+        userx_url: None,
+        userx_service_key: None,
+        fast_path: FastPathSettings::default(),
     }
 }
 
@@ -1634,6 +1742,26 @@ fn expand_env_vars(input: &str) -> String {
     .into_owned()
 }
 
+/// Serialize a string field as redacted.
+pub fn redact_secret_string<S>(_: &String, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str("***REDACTED***")
+}
+
+/// Serialize an Option<String> field as redacted.
+pub fn redact_secret_option<S>(val: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if val.is_some() {
+        serializer.serialize_some("***REDACTED***")
+    } else {
+        serializer.serialize_none()
+    }
+}
+
 pub fn load_config(path: &str) -> anyhow::Result<GatewayConfig> {
     match std::fs::read_to_string(path) {
         Ok(raw_contents) => {
@@ -1707,6 +1835,7 @@ where
 ///   * `LYNXX_MINIMAL_TELEMETRY` overrides `gateway.minimal_telemetry`
 ///     (legacy alias: `LYNXX_BENCH_MODE`)
 ///   * `LYNXX_API_KEY`           overrides `license.api_key` (vexarr api key)
+///   * `FLUXX_OTEL_ENDPOINT`     overrides `telemetry.fluxx_endpoint`
 pub fn apply_env_overrides(config: &mut GatewayConfig) {
     if let Ok(url) = std::env::var("DATABASE_URL") {
         if !url.is_empty() {
@@ -1778,6 +1907,42 @@ pub fn apply_env_overrides(config: &mut GatewayConfig) {
         if !k.trim().is_empty() {
             config.license.api_key = k;
         }
+    }
+    if let Ok(url) = std::env::var("FLUXX_OTEL_ENDPOINT") {
+        if !url.is_empty() {
+            config.telemetry.fluxx_endpoint = url;
+        }
+    }
+    if let Ok(url) = std::env::var("USERX_GATEWAY_URL").or_else(|_| std::env::var("VEXARR_USERX_URL")) {
+        if !url.trim().is_empty() {
+            config.gateway.userx_url = Some(url);
+        }
+    }
+    if let Ok(key) = std::env::var("USERX_SERVICE_KEY").or_else(|_| std::env::var("VEXARR_SERVICE_API_KEY")) {
+        if !key.trim().is_empty() {
+            config.gateway.userx_service_key = Some(key);
+        }
+    }
+    // Fast path env overrides.
+    if let Ok(v) = std::env::var("LYNXX_FAST_PATH_ENABLED") {
+        let on = parse_truthy(&v);
+        tracing::info!(enabled = on, "LYNXX_FAST_PATH_ENABLED env override applied");
+        config.gateway.fast_path.enabled = on;
+    }
+    if let Ok(v) = std::env::var("LYNXX_FAST_PATH_MODE") {
+        match v.to_lowercase().as_str() {
+            "auto" => config.gateway.fast_path.mode = "auto".to_string(),
+            "splice" => config.gateway.fast_path.mode = "splice".to_string(),
+            "buffered_copy" | "buffered-copy" => {
+                config.gateway.fast_path.mode = "buffered_copy".to_string();
+            }
+            "off" => config.gateway.fast_path.mode = "off".to_string(),
+            other => tracing::warn!(
+                mode = other,
+                "LYNXX_FAST_PATH_MODE: unknown value; accepted: auto, splice, buffered_copy, off"
+            ),
+        }
+        tracing::info!(mode = %config.gateway.fast_path.mode, "LYNXX_FAST_PATH_MODE env override applied");
     }
 }
 

@@ -32,8 +32,15 @@ pub struct PostgresRepository {
 
 impl PostgresRepository {
     pub async fn new(database_url: &str) -> Result<Self, GatewayError> {
+        // Scale the pool with the runtime's worker threads instead of a flat
+        // 8 — under load on a many-core box a hardcoded 8 becomes the
+        // bottleneck. Bound to a sane ceiling so we don't exhaust Postgres's
+        // own connection limit. acquire_timeout stops a request hanging
+        // forever when the pool is saturated.
+        let max_conns = ((num_cpus::get() as u32) * 2).clamp(8, 32);
         let pool = PgPoolOptions::new()
-            .max_connections(8)
+            .max_connections(max_conns)
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .connect(database_url)
             .await?;
 
@@ -118,7 +125,7 @@ impl Repository for PostgresRepository {
     ) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -135,7 +142,7 @@ impl Repository for PostgresRepository {
     async fn list_services(&self) -> Result<Vec<Service>, GatewayError> {
         let rows = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -150,7 +157,7 @@ impl Repository for PostgresRepository {
     async fn get_service(&self, id: &Uuid) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -166,7 +173,7 @@ impl Repository for PostgresRepository {
     async fn get_service_by_name(&self, name: &str) -> Result<Option<Service>, GatewayError> {
         let row = sqlx::query(
             "SELECT id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                    document_root, index_file, spa_fallback, \
+                    document_root, index_file, spa_fallback, hide_patterns, \
                     tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                     project_id, domain, subdomain, \
                     created_at, updated_at \
@@ -182,11 +189,11 @@ impl Repository for PostgresRepository {
     async fn create_service(&self, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "INSERT INTO services (id, name, url, retries, connect_timeout_ms, lb_strategy, service_type, \
-                                   document_root, index_file, spa_fallback, \
+                                   document_root, index_file, spa_fallback, hide_patterns, \
                                    tls_verify, tls_client_cert_path, tls_client_key_path, tls_ca_path, \
                                    project_id, domain, subdomain, \
                                    enabled, created_at, updated_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, TRUE, $18, $19)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, TRUE, $19, $20)",
         )
         .bind(svc.id)
         .bind(&*svc.name)
@@ -198,6 +205,7 @@ impl Repository for PostgresRepository {
         .bind(svc.document_root.as_deref())
         .bind(&svc.index_file)
         .bind(svc.spa_fallback)
+        .bind(serde_json::to_value(&svc.hide_patterns).unwrap_or(serde_json::json!([])))
         .bind(svc.tls_verify)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -215,11 +223,11 @@ impl Repository for PostgresRepository {
     async fn update_service(&self, id: &Uuid, svc: &Service) -> Result<(), GatewayError> {
         sqlx::query(
             "UPDATE services SET name = $1, url = $2, retries = $3, connect_timeout_ms = $4, lb_strategy = $5, service_type = $6, \
-                                 document_root = $7, index_file = $8, spa_fallback = $9, \
-                                 tls_verify = $10, tls_client_cert_path = $11, tls_client_key_path = $12, tls_ca_path = $13, \
-                                 project_id = $14, domain = $15, subdomain = $16, \
-                                 updated_at = $17 \
-             WHERE id = $18 AND is_deleted = FALSE",
+                                 document_root = $7, index_file = $8, spa_fallback = $9, hide_patterns = $10, \
+                                 tls_verify = $11, tls_client_cert_path = $12, tls_client_key_path = $13, tls_ca_path = $14, \
+                                 project_id = $15, domain = $16, subdomain = $17, \
+                                 updated_at = $18 \
+             WHERE id = $19 AND is_deleted = FALSE",
         )
         .bind(&*svc.name)
         .bind(&svc.url)
@@ -230,6 +238,7 @@ impl Repository for PostgresRepository {
         .bind(svc.document_root.as_deref())
         .bind(&svc.index_file)
         .bind(svc.spa_fallback)
+        .bind(serde_json::to_value(&svc.hide_patterns).unwrap_or(serde_json::json!([])))
         .bind(svc.tls_verify)
         .bind(svc.tls_client_cert_path.as_deref())
         .bind(svc.tls_client_key_path.as_deref())
@@ -808,6 +817,9 @@ impl Repository for PostgresRepository {
 
     async fn append_audit(&self, entry: &NewAuditEntry) -> Result<AuditEntry, GatewayError> {
         let mut tx = self.pool.begin().await?;
+        sqlx::query("LOCK TABLE audit_log IN EXCLUSIVE MODE")
+            .execute(&mut *tx)
+            .await?;
         let prev_hash: Option<String> =
             sqlx::query_scalar("SELECT hash FROM audit_log ORDER BY id DESC LIMIT 1")
                 .fetch_optional(&mut *tx)
@@ -894,6 +906,10 @@ impl Repository for PostgresRepository {
             since_param = Some(since);
         }
         sql.push_str(&format!(" ORDER BY ts DESC, id DESC LIMIT ${}", idx));
+        idx += 1;
+        if filter.offset.is_some() {
+            sql.push_str(&format!(" OFFSET ${}", idx));
+        }
 
         let mut q = sqlx::query(&sql);
         if let Some(actor) = &filter.actor {
@@ -913,6 +929,9 @@ impl Repository for PostgresRepository {
             q = q.bind(s);
         }
         q = q.bind(limit);
+        if let Some(offset) = filter.offset {
+            q = q.bind(offset as i64);
+        }
 
         let rows = q.fetch_all(&self.pool).await?;
         rows.into_iter().map(row_to_audit).collect()
@@ -1168,17 +1187,19 @@ impl Repository for PostgresRepository {
 
     // ---------- quota ----------
 
-    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64)>, GatewayError> {
-        let row =
-            sqlx::query("SELECT calls_total, calls_rejected FROM quota_usage WHERE period = $1")
-                .bind(period)
-                .fetch_optional(&self.pool)
-                .await?;
+    async fn get_quota_usage(&self, period: &str) -> Result<Option<(u64, u64, u64)>, GatewayError> {
+        let row = sqlx::query(
+            "SELECT calls_total, calls_rejected, calls_overage FROM quota_usage WHERE period = $1",
+        )
+        .bind(period)
+        .fetch_optional(&self.pool)
+        .await?;
 
         Ok(row.map(|r| {
             let calls: i64 = r.get(0);
             let rejected: i64 = r.get(1);
-            (calls.max(0) as u64, rejected.max(0) as u64)
+            let overage: i64 = r.get(2);
+            (calls.max(0) as u64, rejected.max(0) as u64, overage.max(0) as u64)
         }))
     }
 
@@ -1187,18 +1208,21 @@ impl Repository for PostgresRepository {
         period: &str,
         calls_total: u64,
         calls_rejected: u64,
+        calls_overage: u64,
     ) -> Result<(), GatewayError> {
         sqlx::query(
-            "INSERT INTO quota_usage (period, calls_total, calls_rejected, updated_at) \
-             VALUES ($1, $2, $3, $4) \
+            "INSERT INTO quota_usage (period, calls_total, calls_rejected, calls_overage, updated_at) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (period) DO UPDATE SET \
                calls_total    = EXCLUDED.calls_total, \
                calls_rejected = EXCLUDED.calls_rejected, \
+               calls_overage  = EXCLUDED.calls_overage, \
                updated_at     = EXCLUDED.updated_at",
         )
         .bind(period)
         .bind(calls_total as i64)
         .bind(calls_rejected as i64)
+        .bind(calls_overage as i64)
         .bind(Utc::now())
         .execute(&self.pool)
         .await?;
@@ -2811,7 +2835,13 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
         .ok()
         .flatten();
 
+    let hide_patterns_val: Option<serde_json::Value> = row.try_get("hide_patterns").ok().flatten();
+    let hide_patterns: Vec<String> = hide_patterns_val
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
     Ok(Service {
+        hide_patterns,
         id,
         // sqlx doesn't impl Decode for Arc<str>; decode as String then
         // convert via the std `impl From<String> for Arc<str>` (one alloc
@@ -2855,6 +2885,10 @@ fn row_to_service(row: sqlx::postgres::PgRow) -> Result<Service, GatewayError> {
             .try_get::<Option<bool>, _>("pass_host_header")
             .ok()
             .flatten(),
+        // `pool_idle_floor` + `force_http_version` mirror the sqlite
+        // path — not DB columns yet, default to `None`.
+        pool_idle_floor: None,
+        force_http_version: None,
         drain_timeout_ms: row
             .try_get::<Option<i64>, _>("drain_timeout_ms")
             .ok()
@@ -3007,7 +3041,10 @@ fn row_to_audit(row: sqlx::postgres::PgRow) -> Result<AuditEntry, GatewayError> 
         resource_id: row.try_get("resource_id").ok(),
         diff,
         hash: row.try_get("hash")?,
-        prev_hash: row.try_get("prev_hash").ok(),
+        // Propagate the decode error: prev_hash participates directly in chain
+        // verification, so silently coercing a decode failure to None would
+        // make the chain mis-verify with no warning. Better to surface it.
+        prev_hash: row.try_get("prev_hash")?,
     })
 }
 

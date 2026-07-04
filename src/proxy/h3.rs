@@ -15,7 +15,7 @@ use tracing::{error, info};
 /// requires ALPN to include `"h3"`.
 pub async fn spawn_h3_server(
     addr: SocketAddr,
-    state: ProxyState,
+    state: Arc<ProxyState>,
     rustls_config: rustls::ServerConfig,
 ) -> anyhow::Result<()> {
     // quinn 0.11+ uses a specialized wrapper for rustls config.
@@ -47,7 +47,7 @@ pub async fn spawn_h3_server(
     Ok(())
 }
 
-async fn handle_connection(conn: quinn::Connection, state: ProxyState) -> anyhow::Result<()> {
+async fn handle_connection(conn: quinn::Connection, state: Arc<ProxyState>) -> anyhow::Result<()> {
     let mut h3_conn = h3::server::Connection::new(h3_quinn::Connection::new(conn)).await?;
 
     while let Ok(Some(resolver)) = h3_conn.accept().await {
@@ -63,14 +63,26 @@ async fn handle_connection(conn: quinn::Connection, state: ProxyState) -> anyhow
 
             let (parts, _) = req.into_parts();
 
-            // Collect request body chunks from the stream.
-            let mut body_bytes = Vec::new();
+            // Collect request body chunks from the stream. Two fixes vs. the
+            // previous loop: (1) extend from the chunk slice instead of
+            // pushing one byte at a time (the old code was O(n) syscalls and
+            // realloc churn for a multi-MB upload); (2) cap the total at 64
+            // MiB so a malicious client can't OOM the gateway by streaming an
+            // unbounded body over an HTTP/3 datagram.
+            const H3_MAX_BODY: usize = 64 * 1024 * 1024;
+            let mut body_bytes: Vec<u8> = Vec::new();
+            let mut overflowed = false;
             loop {
                 match stream.recv_data().await {
-                    Ok(Some(mut chunk)) => {
-                        while chunk.has_remaining() {
-                            body_bytes.push(chunk.get_u8());
+                    Ok(Some(chunk)) => {
+                        // `Buf::chunk()` returns the contiguous remaining slice
+                        // of the current Bytes — no per-byte copying.
+                        let slice = chunk.chunk();
+                        if body_bytes.len().saturating_add(slice.len()) > H3_MAX_BODY {
+                            overflowed = true;
+                            break;
                         }
+                        body_bytes.extend_from_slice(slice);
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -79,11 +91,18 @@ async fn handle_connection(conn: quinn::Connection, state: ProxyState) -> anyhow
                     }
                 }
             }
+            if overflowed {
+                error!(
+                    cap = H3_MAX_BODY,
+                    "H3 request body exceeded cap; aborting stream"
+                );
+                return;
+            }
 
             let mut axum_req = Request::from_parts(parts, Body::from(body_bytes));
             *axum_req.version_mut() = Version::HTTP_3;
 
-            match proxy_handler(State(state), axum_req).await {
+            match proxy_handler(State(state.into()), axum_req).await {
                 Ok(resp) => {
                     let (parts, body) = resp.into_parts();
                     let h3_resp = Response::from_parts(parts, ());

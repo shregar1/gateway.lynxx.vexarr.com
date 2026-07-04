@@ -14,7 +14,6 @@ use crate::plugins::{BoxBody, Plugin};
 use async_trait::async_trait;
 use axum::http::{Request, Response};
 use http_body_util::BodyExt;
-use std::io::Write;
 
 /// Marker stored in request extensions when the buffered request body
 /// exceeds `max_request_body_bytes`. The handler should map this to 413.
@@ -78,33 +77,19 @@ impl BufferingPlugin {
         &self.retry_expression
     }
 
-    /// Buffer bytes, spilling to a temp file when over the memory threshold.
-    /// Returns the buffered bytes or an IO error.
-    fn buffer_bytes(data: &[u8], mem_threshold: u64) -> Result<Vec<u8>, std::io::Error> {
-        let len = data.len() as u64;
-        if len <= mem_threshold {
-            // Fast path: keep in memory.
-            return Ok(data.to_vec());
-        }
-
-        // Spill to temp file and read back.
-        let tmp_path = format!(
-            "/tmp/lynxx_buf_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        {
-            let mut file = std::fs::File::create(&tmp_path)?;
-            file.write_all(data)?;
-            file.flush()?;
-        }
-        let result = std::fs::read(&tmp_path);
-        // Best-effort cleanup.
-        let _ = std::fs::remove_file(&tmp_path);
-        result
+    /// Buffer bytes for forwarding.
+    ///
+    /// The caller has already collected the entire body into memory before
+    /// calling this, so there is nothing to save by spilling to disk. The
+    /// previous implementation wrote `data` to `/tmp` and immediately read it
+    /// back into a fresh `Vec` — pure blocking disk IO on the async proxy hot
+    /// path (and via blocking `std::fs`, stalling the tokio worker), for zero
+    /// memory benefit. We keep the in-memory copy and skip the disk round-trip.
+    ///
+    /// `_mem_threshold` is retained for config/signature compatibility but no
+    /// longer triggers a spill.
+    fn buffer_bytes(data: &[u8], _mem_threshold: u64) -> Result<Vec<u8>, std::io::Error> {
+        Ok(data.to_vec())
     }
 }
 

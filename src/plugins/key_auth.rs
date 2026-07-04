@@ -94,14 +94,11 @@ impl Plugin for KeyAuthPlugin {
             .repo
             .as_ref()
             .ok_or_else(|| PluginError::Internal("key-auth: no repository".into()))?;
-        let consumers = repo
-            .list_consumers()
+        // Indexed lookup via the shared short-TTL consumer cache — avoids
+        // fetching and linear-scanning the whole consumers table per request.
+        let consumer = crate::plugins::consumer_cache::by_api_key(repo, &key)
             .await
-            .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?;
-
-        let consumer = consumers
-            .into_iter()
-            .find(|c| c.api_key.as_deref() == Some(key.as_str()))
+            .map_err(|e| PluginError::Internal(format!("consumer lookup: {e}")))?
             .ok_or_else(|| PluginError::Unauthorized("invalid api key".into()))?;
 
         if let Ok(v) = HeaderValue::from_str(&consumer.username) {
