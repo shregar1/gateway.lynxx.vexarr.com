@@ -269,6 +269,16 @@ path = "src/ingress/main.rs"
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
+# `#[serial(group)]` annotation that serialises tests touching shared
+# global state (per-module atomics / OnceLock-s). Without this, tests
+# that rely on per-test `before / after - before == 1` counter deltas
+# or on a shared toggle (`MIRRORING_ENABLED`, `COOKIE_REWRITE_ENABLED`,
+# `GLOBAL_FAST_PATH_ROUTER`) race against each other under
+# `--test-threads > 1`. Tests in different groups still run in
+# parallel; only the named group is serialised. See module-level
+# comments in `proxy/mirror.rs`, `proxy/cookie_rewrite.rs`, and
+# `proxy/fast_path.rs` for the rationale.
+serial_test = "3"
 wat = "1"
 # cache-bust: 1778248579
 

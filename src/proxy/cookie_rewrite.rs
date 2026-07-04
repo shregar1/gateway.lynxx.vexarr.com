@@ -342,6 +342,7 @@ pub fn rewrite_set_cookie_header(header_value: &str, config: &CookieRewriteConfi
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[serial_test::serial(cookie_rewrite)]
 mod tests {
     use super::*;
 
