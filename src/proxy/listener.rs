@@ -106,6 +106,28 @@ pub fn bind_reuseport(addr: SocketAddr) -> io::Result<TcpListener> {
     TcpListener::from_std(socket.into())
 }
 
+/// Bind a `SO_REUSEPORT`-enabled UDP socket to `addr`. Returns a
+/// [`tokio::net::UdpSocket`] ready for `recv_from` / `send_to`.
+///
+/// Used by the L4 UDP proxy listener (`crate::proxy::udp_router`) so
+/// that kernel-level datagram load-balancing is available if multiple
+/// gateway processes are co-deployed on the same host (e.g. blue/green
+/// during a rolling upgrade). On Linux the kernel hashes the source IP
+/// + port of each datagram to one of the bound sockets, eliminating
+/// the single-listener recv queue as a contention point.
+pub fn bind_reuseport_udp(addr: SocketAddr) -> io::Result<tokio::net::UdpSocket> {
+    let domain = match addr {
+        SocketAddr::V4(_) => Domain::IPV4,
+        SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let socket = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    tokio::net::UdpSocket::from_std(socket.into())
+}
+
 #[cfg(target_os = "linux")]
 fn set_ip_freebind(socket: &Socket) {
     use std::os::fd::AsRawFd;
