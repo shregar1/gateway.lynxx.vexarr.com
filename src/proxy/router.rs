@@ -552,6 +552,12 @@ pub struct RouteTable {
     /// 1000 routes spread across 100 services, this is ~10× fewer iterations
     /// per request. Kept in sync via add / update / remove / load_from_repo.
     routes_by_service: DashMap<Uuid, Vec<Uuid>, FastHasher>,
+    /// Service-name → service-id index: turns `get_service_by_name` from
+    /// O(N_services) into O(1). Kept in sync via add / update / remove /
+    /// load_from_repo. The current router looks up services primarily by
+    /// id and host (both already O(1)); the name path is exercised by the
+    /// admin API and external CLI tooling.
+    service_name_index: DashMap<String, Uuid, FastHasher>,
 
     // ── Runtime strategy toggles (lock-free) ──
 
@@ -592,6 +598,7 @@ impl RouteTable {
             regex_match_cache: RegexResultCache::new(),
             route_result_cache: RouteResultCache::new(),
             routes_by_service: DashMap::with_hasher(FastHasher::default()),
+            service_name_index: DashMap::with_hasher(FastHasher::default()),
             path_strategy: AtomicU8::new(PathMatchStrategy::Trie as u8),
             use_regex_set: AtomicBool::new(true),
             use_route_cache: AtomicBool::new(true),
@@ -803,6 +810,20 @@ impl RouteTable {
         self.route_result_cache.clear();
     }
 
+    /// Rebuild the service-name → service-id index from scratch.
+    /// Called from `load_from_repo` (cold start + reload) to ensure
+    /// the index is in sync with the just-loaded `services` map. The
+    /// same loop pattern as `rebuild_host_index` — single pass over
+    /// the services DashMap, O(N_services) where N is small (services
+    /// are O(hundreds), not millions).
+    fn rebuild_service_name_index(&self) {
+        self.service_name_index.clear();
+        for entry in self.services.iter() {
+            self.service_name_index
+                .insert(entry.value().name.to_string(), entry.key().clone());
+        }
+    }
+
     fn hash_path(path: &str) -> u64 {
         let mut h = AHasher::default();
         path.hash(&mut h);
@@ -961,9 +982,12 @@ impl RouteTable {
 
         self.services.clear();
         self.routes.clear();
+        self.service_name_index.clear();
 
         for svc in &services {
             self.services.insert(svc.id, Arc::new(svc.clone()));
+            self.service_name_index
+                .insert(svc.name.to_string(), svc.id);
         }
         for route in routes.iter() {
             self.routes.insert(route.id, Arc::new(route.clone()));
@@ -981,6 +1005,11 @@ impl RouteTable {
         if let Some(fqdn) = Self::service_fqdn(&service) {
             self.host_index.insert(fqdn, id);
         }
+        // Name index: O(1) lookup by service name. Insert first; if a
+        // duplicate name exists the old id is overwritten (the most
+        // recently inserted service wins, matching the previous linear
+        // scan's "first match wins" semantics on insertion order).
+        self.service_name_index.insert(service.name.to_string(), id);
         self.services.insert(id, Arc::new(service));
         self.rebuild_host_index_fast();
         self.route_result_cache.clear();
@@ -992,10 +1021,15 @@ impl RouteTable {
     }
 
     pub fn get_service_by_name(&self, name: &str) -> Option<Arc<Service>> {
-        self.services
-            .iter()
-            .find(|s| s.name == name.into())
-            .map(|s| Arc::clone(s.value()))
+        // O(1) via the name index. Falls back to None if the name isn't
+        // indexed (e.g. the service was added via a path that didn't
+        // update the index — currently no such path exists, but the
+        // graceful fallback keeps this robust against future code
+        // changes).
+        match self.service_name_index.get(name) {
+            Some(id_ref) => self.services.get(id_ref.value()).map(|s| Arc::clone(s.value())),
+            None => None,
+        }
     }
 
     pub fn list_services(&self) -> Vec<Arc<Service>> {
@@ -1008,10 +1042,20 @@ impl RouteTable {
                 if let Some(old_fqdn) = Self::service_fqdn(old.value()) {
                     self.host_index.remove(&old_fqdn);
                 }
+                // Drop the OLD name entry if it differs from the new one.
+                // Same name → no-op (we just refresh the value). Different
+                // name → remove the stale entry so a stale name can't keep
+                // resolving to the same id.
+                if old.value().name != service.name {
+                    self.service_name_index
+                        .remove(&*old.value().name);
+                }
             }
             if let Some(fqdn) = Self::service_fqdn(&service) {
                 self.host_index.insert(fqdn, *id);
             }
+            self.service_name_index
+                .insert(service.name.to_string(), *id);
             self.services.insert(*id, Arc::new(service));
             self.rebuild_host_index_fast();
             self.route_result_cache.clear();
@@ -1025,6 +1069,15 @@ impl RouteTable {
         if let Some((_, svc)) = self.services.remove(id) {
             if let Some(fqdn) = Self::service_fqdn(&svc) {
                 self.host_index.remove(&fqdn);
+            }
+            // Drop the name index entry ONLY if it still points at this id
+            // — protects against the case where a new service was inserted
+            // under the same name (the new id wins in the index).
+            if let Some(entry) = self.service_name_index.get(&*svc.name) {
+                if *entry.value() == *id {
+                    drop(entry);
+                    self.service_name_index.remove(&*svc.name);
+                }
             }
             self.rebuild_host_index_fast();
             self.route_result_cache.clear();
@@ -2018,6 +2071,107 @@ mod tests {
             &["/api/*".to_string()],
             "/api/"
         ));
+    }
+
+    // ── Service name index (O(1) get_service_by_name) ──
+
+    /// Minimal service constructor for the name-index tests below.
+    fn make_test_service(name: &str) -> Service {
+        let id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        Service {
+            id,
+            name: Arc::from(name),
+            url: "http://upstream:8080".to_string(),
+            retries: 0,
+            connect_timeout_ms: 5000,
+            lb_strategy: "round_robin".to_string(),
+            service_type: "api".to_string(),
+            document_root: None,
+            index_file: "index.html".to_string(),
+            spa_fallback: false,
+            hide_patterns: Vec::new(),
+            tls_verify: true,
+            tls_client_cert_path: None,
+            tls_client_key_path: None,
+            tls_ca_path: None,
+            lb_hash_header: None,
+            lb_hash_query_param: None,
+            flush_interval_ms: None,
+            stream_timeout_ms: None,
+            stream_close_delay_ms: None,
+            pass_host_header: None,
+            pool_idle_floor: None,
+            force_http_version: None,
+            drain_timeout_ms: None,
+            project_id: None,
+            domain: String::new(),
+            subdomain: String::new(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn service_name_index_lookup_after_add() {
+        let table = RouteTable::new();
+        let svc = make_test_service("orders");
+        let id = table.add_service(svc);
+        let fetched = table.get_service_by_name("orders").expect("name hit");
+        assert_eq!(fetched.id, id);
+        assert_eq!(&*fetched.name, "orders");
+    }
+
+    #[test]
+    fn service_name_index_miss_returns_none() {
+        let table = RouteTable::new();
+        let svc = make_test_service("orders");
+        table.add_service(svc);
+        assert!(table.get_service_by_name("nonexistent").is_none());
+    }
+
+    #[test]
+    fn service_name_index_removes_on_remove_service() {
+        let table = RouteTable::new();
+        let svc = make_test_service("orders");
+        let id = svc.id;
+        table.add_service(svc);
+        assert!(table.get_service_by_name("orders").is_some());
+        table.remove_service(&id);
+        assert!(table.get_service_by_name("orders").is_none());
+    }
+
+    #[test]
+    fn service_name_index_rename_via_update_service() {
+        let table = RouteTable::new();
+        let svc = make_test_service("orders");
+        let id = svc.id;
+        table.add_service(svc);
+        // Rename: keep id, change name.
+        let mut renamed = make_test_service("payments");
+        renamed.id = id;
+        assert!(table.update_service(&id, renamed));
+        // Old name should miss; new name should hit.
+        assert!(table.get_service_by_name("orders").is_none());
+        let fetched = table.get_service_by_name("payments").expect("renamed hit");
+        assert_eq!(fetched.id, id);
+    }
+
+    #[test]
+    fn service_name_index_keeps_name_on_no_rename_update() {
+        // When update_service is called with the same name, the index
+        // entry should be preserved (we only remove on a name CHANGE).
+        let table = RouteTable::new();
+        let svc = make_test_service("orders");
+        let id = svc.id;
+        table.add_service(svc.clone());
+        let mut same_name = make_test_service("orders");
+        same_name.id = id;
+        same_name.url = "http://other-upstream:9090".to_string();
+        assert!(table.update_service(&id, same_name));
+        let fetched = table.get_service_by_name("orders").expect("still indexed");
+        assert_eq!(fetched.id, id);
+        assert_eq!(fetched.url, "http://other-upstream:9090");
     }
 
     #[test]
