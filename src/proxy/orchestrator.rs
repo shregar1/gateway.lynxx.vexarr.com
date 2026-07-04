@@ -234,17 +234,17 @@ pub struct HealthGate {
     /// Number of consecutive healthy checks required.
     pub required_passes: u32,
     /// Current consecutive passes per node.
-    passes: std::collections::HashMap<NodeId, u32>,
+    passes: std::collections::HashMap<NodeId, u32, ahash::RandomState>,
     /// Nodes that have passed the gate.
-    cleared: std::collections::HashSet<NodeId>,
+    cleared: std::collections::HashSet<NodeId, ahash::RandomState>,
 }
 
 impl HealthGate {
     pub fn new(required_passes: u32) -> Self {
         Self {
             required_passes: required_passes.max(1),
-            passes: std::collections::HashMap::new(),
-            cleared: std::collections::HashSet::new(),
+            passes: std::collections::HashMap::with_hasher(ahash::RandomState::default()),
+            cleared: std::collections::HashSet::with_hasher(ahash::RandomState::default()),
         }
     }
 
@@ -313,14 +313,14 @@ impl DrainEntry {
 }
 
 pub struct DrainCoordinator {
-    draining: std::collections::HashMap<NodeId, DrainEntry>,
+    draining: std::collections::HashMap<NodeId, DrainEntry, ahash::RandomState>,
     default_timeout: Duration,
 }
 
 impl DrainCoordinator {
     pub fn new(default_timeout: Duration) -> Self {
         Self {
-            draining: std::collections::HashMap::new(),
+            draining: std::collections::HashMap::with_hasher(ahash::RandomState::default()),
             default_timeout,
         }
     }
