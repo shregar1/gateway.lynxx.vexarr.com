@@ -23,6 +23,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
+/// Hasher for the Vary header tracker. The keys are server-side paths
+/// (the URLs we have served and marked with `Vary: Accept-Encoding`) —
+/// not attacker-controlled — so ahash is safe and a clear win on the
+/// 32-128 byte path strings that dominate this cache.
+type FastHasher = ahash::RandomState;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Global toggles
 // ═══════════════════════════════════════════════════════════════════════════
@@ -630,7 +636,7 @@ impl MinSizeFilter {
 /// Tracks Vary: Accept-Encoding for proper caching.
 pub struct VaryTracker {
     /// Paths that have been marked with Vary: Accept-Encoding.
-    paths: std::collections::HashSet<String>,
+    paths: std::collections::HashSet<String, FastHasher>,
     /// Maximum tracked paths.
     max_entries: usize,
 }
@@ -638,7 +644,7 @@ pub struct VaryTracker {
 impl VaryTracker {
     pub fn new(max_entries: usize) -> Self {
         Self {
-            paths: std::collections::HashSet::new(),
+            paths: std::collections::HashSet::with_hasher(FastHasher::default()),
             max_entries: max_entries.max(100),
         }
     }

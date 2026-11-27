@@ -454,11 +454,16 @@ impl Default for MirrorEngine {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[cfg(test)]
+#[serial_test::serial(mirror)]
 mod tests {
     use super::*;
 
-    // Reset global state between tests. Not strictly thread-safe across
-    // tests but sufficient for serial `cargo test` with `--test-threads=1`
+    // Reset global state between tests. The `#[serial_test::serial(mirror)]`
+    // attribute on this module ensures tests run one-at-a-time within the
+    // `mirror` group, so the shared `MIRRORING_ENABLED` atomic + any
+    // per-test counter deltas see a single mutator at a time. Tests in
+    // other modules (cookie_rewrite, fast_path) still run in parallel
+    // with us.
     // or when tests use their own engine instances.
     fn reset_global() {
         MIRRORING_ENABLED.store(false, Ordering::Relaxed);

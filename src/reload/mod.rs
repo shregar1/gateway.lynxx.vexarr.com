@@ -202,6 +202,26 @@ async fn run_reload(
         crate::proxy::fast_path::set_fast_path_enabled(effective_enabled);
         crate::proxy::fast_path::set_fast_path_mode(mode);
 
+        // ── Workers settings sync ────────────────────────────────────────
+        // The worker model + CPU pinning + RLIMIT_NOFILE controls are
+        // (re-)applied on every reload. The model + pinning flags take
+        // effect on the NEXT listener bind (i.e. the next process
+        // restart — they aren't hot-pluggable on a running socket); the
+        // rlimit raise IS hot-pluggable and a `setrlimit` raise takes
+        // effect immediately across the process.
+        let workers = &new_config.gateway.workers;
+        match crate::proxy::worker::apply_workers_settings(
+            &workers.model,
+            workers.cpu_pinning,
+            workers.rlimit_nofile,
+        ) {
+            Ok(()) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                "workers: invalid reload config; keeping previous settings"
+            ),
+        }
+
         if effective_enabled {
             // Build a list of route specs from the current route table.
             let routes_snapshot: Vec<crate::proxy::fast_path::FastPathRouteSpec> = {

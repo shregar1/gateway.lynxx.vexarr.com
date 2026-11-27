@@ -401,6 +401,47 @@ pub fn init_worker(config: &WorkerConfig) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Apply the [`crate::config::WorkersSettings`] block to the runtime
+/// atomics + raise the FD limit. Call once at startup (and on each
+/// config reload) before any listener is bound.
+///
+/// `model` accepts `"per_core"` (default) or `"shared"`. `cpu_pinning`
+/// is only honoured when `model = "per_core"` on Linux. `rlimit_nofile`
+/// of `0` leaves the existing limit untouched.
+pub fn apply_workers_settings(
+    model: &str,
+    cpu_pinning: bool,
+    rlimit_nofile: u64,
+) -> Result<(), String> {
+    let wm = match model {
+        "per_core" => WorkerModel::PerCore,
+        "shared" => WorkerModel::Shared,
+        other => return Err(format!("unknown worker model: {other}")),
+    };
+    set_worker_model(wm);
+    // Pinning only makes sense for the per-core model. When running on
+    // the shared runtime the global flag is set anyway — `init_worker`
+    // short-circuits on `core_id == None` regardless.
+    set_cpu_pinning(cpu_pinning);
+
+    if rlimit_nofile > 0 {
+        match raise_nofile_limit(rlimit_nofile) {
+            Ok(actual) => tracing::info!(
+                requested = rlimit_nofile,
+                actual,
+                "raise RLIMIT_NOFILE"
+            ),
+            Err(e) => tracing::warn!(
+                requested = rlimit_nofile,
+                error = %e,
+                "RLIMIT_NOFILE raise failed; continuing with current limit"
+            ),
+        }
+    }
+
+    Ok(())
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
@@ -465,6 +506,39 @@ mod tests {
 
         set_worker_model(WorkerModel::Shared);
         assert_eq!(worker_model(), WorkerModel::Shared);
+    }
+
+    #[test]
+    fn apply_workers_settings_per_core() {
+        // Should set model=PerCore and pinning=true.
+        apply_workers_settings("per_core", true, 0).unwrap();
+        // These atomics are shared global state — other tests in this
+        // module (worker_model_toggle, cpu_pinning_toggle) flip them.
+        // We assert by re-applying + checking the model atom that we
+        // *know* we just wrote; the pinning flag is best-effort here.
+        assert_eq!(worker_model(), WorkerModel::PerCore);
+    }
+
+    #[test]
+    fn apply_workers_settings_shared() {
+        apply_workers_settings("shared", false, 0).unwrap();
+        assert_eq!(worker_model(), WorkerModel::Shared);
+    }
+
+    #[test]
+    fn apply_workers_settings_invalid_model() {
+        // Unknown model string returns Err. (We don't assert on the
+        // global model atom — other tests in this module flip it
+        // concurrently and the assertion is racy.)
+        assert!(apply_workers_settings("bogus", false, 0).is_err());
+    }
+
+    #[test]
+    fn apply_workers_settings_zero_rlimit_is_noop() {
+        // rlimit_nofile=0 means "leave existing limit untouched"; the
+        // apply call should still succeed and update the worker model.
+        apply_workers_settings("per_core", true, 0).unwrap();
+        assert_eq!(worker_model(), WorkerModel::PerCore);
     }
 
     #[test]

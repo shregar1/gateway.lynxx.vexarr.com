@@ -33,6 +33,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::Duration;
 
+/// Hasher for the io_uring connection affinity map. The connection IDs
+/// are server-allocated u64s (see `next_id` below) — never
+/// attacker-influenced — so ahash gives the 2-5× hashing speedup
+/// without giving up any meaningful security property.
+type FastHasher = ahash::RandomState;
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Global toggles
 // ═══════════════════════════════════════════════════════════════════════════
@@ -535,7 +541,7 @@ impl SyscallSnapshot {
 /// Tracks which core owns which connections to prevent task migration.
 pub struct ConnectionAffinity {
     /// Mapping: connection_id → cpu_id.
-    map: std::collections::HashMap<u64, u32>,
+    map: std::collections::HashMap<u64, u32, FastHasher>,
     /// Total connections ever tracked.
     total_tracked: u64,
     /// Migrations detected (should be 0 in pure thread-per-core).
@@ -545,7 +551,7 @@ pub struct ConnectionAffinity {
 impl ConnectionAffinity {
     pub fn new() -> Self {
         Self {
-            map: std::collections::HashMap::new(),
+            map: std::collections::HashMap::with_hasher(FastHasher::default()),
             total_tracked: 0,
             migrations: 0,
         }

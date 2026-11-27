@@ -18,6 +18,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Hasher for the OCSP response cache. Keys are SHA-256 fingerprints
+/// of the server cert chain — not attacker-influenced — so ahash gives
+/// the typical 2-5× speedup over SipHash on the 32-byte fingerprint
+/// without giving up any meaningful security property.
+type FastHasher = ahash::RandomState;
+
 /// How often the background refresher wakes up (6 hours).
 const REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
@@ -504,7 +510,7 @@ struct CachedOcsp {
 
 /// OCSP stapler that fetches, caches, and refreshes OCSP responses.
 pub struct OcspStapler {
-    cache: RwLock<HashMap<Vec<u8>, CachedOcsp>>,
+    cache: RwLock<HashMap<Vec<u8>, CachedOcsp, FastHasher>>,
     http: reqwest::Client,
 }
 
@@ -521,7 +527,7 @@ impl OcspStapler {
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         Self {
-            cache: RwLock::new(HashMap::new()),
+            cache: RwLock::new(HashMap::with_hasher(FastHasher::default())),
             http,
         }
     }

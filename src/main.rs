@@ -306,6 +306,32 @@ async fn async_main() -> anyhow::Result<()> {
     apply_env_overrides(&mut config);
     apply_cli_overrides(&mut config, &args);
 
+    // --- Worker settings ------------------------------------------------
+    // Apply the [gateway.workers] block (worker model, CPU pinning,
+    // RLIMIT_NOFILE) BEFORE any listener is bound — the FD limit raise
+    // has to happen while we're still single-threaded (it applies to
+    // the process), and the per-core / SO_REUSEPORT decision is read
+    // by `serve_per_worker` when it constructs each accept thread.
+    let workers = &config.gateway.workers;
+    if let Err(e) = crate::proxy::worker::apply_workers_settings(
+        &workers.model,
+        workers.cpu_pinning,
+        workers.rlimit_nofile,
+    ) {
+        tracing::warn!(error = %e, "workers: invalid config; using defaults");
+        let _ = crate::proxy::worker::apply_workers_settings(
+            "per_core",
+            true,
+            workers.rlimit_nofile,
+        );
+    }
+    tracing::info!(
+        model = %workers.model,
+        cpu_pinning = workers.cpu_pinning,
+        rlimit_nofile = workers.rlimit_nofile,
+        "workers: settings applied"
+    );
+
     // --- Telemetry init -------------------------------------------------
     // Reads from config.telemetry (populated from TOML + env overrides).
     // Primary endpoint: [telemetry].endpoint / LYNXX_TELEMETRY_URL / OTEL_EXPORTER_OTLP_ENDPOINT
